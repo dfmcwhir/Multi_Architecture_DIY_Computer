@@ -1,0 +1,48 @@
+%SIGNAL
+PIN   3 =  A15 
+PIN   1 =  CLK_IN 
+PIN  19 =  CLK_OUT 
+PIN  14 =  IOEN 
+PIN   2 =  IOM 
+PIN  15 =  IOR 
+PIN  16 =  IOW 
+PIN  17 =  MEMR 
+PIN  18 =  MEMW 
+PIN  12 =  RAMEN 
+PIN   5 =  RD 
+PIN  13 =  ROMEN 
+PIN   4 =  SWAPMEM 
+PIN   6 =  WR 
+%END
+
+%FIELD
+%END
+
+%EQUATION
+CLK_OUT =>
+    !CLK_IN
+
+!IOEN =>
+    IOM
+
+!IOR =>
+    IOM & !RD
+
+!IOW =>
+    IOM & !WR
+
+!MEMR =>
+    !IOM & !RD
+
+!MEMW =>
+    !IOM & !WR
+
+!RAMEN =>
+    !A15 & !IOM & SWAPMEM
+  # A15 & !IOM & !SWAPMEM
+
+!ROMEN =>
+    A15 & !IOM & SWAPMEM
+  # !A15 & !IOM & !SWAPMEM
+
+%END

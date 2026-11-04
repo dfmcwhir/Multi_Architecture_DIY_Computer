@@ -1,0 +1,34 @@
+# Berkeley PLA format generated using
+#
+# CUPL(WM)        5.0a Serial# MW-10400000
+# Device          g16v8s  Library DLIB-h-40-9
+# Created         Thu Oct 08 21:45:55 2026
+# Name            SIGNAL_DEC
+# Partno          00 
+# Revision        01 
+# Date            10/06/2026 
+# Designer        Engineer 
+# Company         none 
+# Assembly        None 
+# Location        
+#
+# Inputs  A15 CLK_IN CLK_OUT IOEN 
+#         IOM IOR IOW MEMR 
+#         MEMW RAMEN RD ROMEN 
+#         SWAPMEM WR 
+# Outputs CLK_OUT !IOEN !IOR !IOW 
+#         !MEMR !MEMW !RAMEN !ROMEN 
+.i 14
+.o 8
+.p 10
+-0------------ 1~~~~~~~
+----1--------- ~1~~~~~~
+----1-----0--- ~~1~~~~~
+----1--------0 ~~~1~~~~
+----0-----0--- ~~~~1~~~
+----0--------0 ~~~~~1~~
+0---0-------1- ~~~~~~1~
+1---0-------0- ~~~~~~1~
+1---0-------1- ~~~~~~~1
+0---0-------0- ~~~~~~~1
+.end

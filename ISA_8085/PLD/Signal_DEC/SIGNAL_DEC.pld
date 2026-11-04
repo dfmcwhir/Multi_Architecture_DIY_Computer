@@ -1,0 +1,40 @@
+Name     SIGNAL_DEC;
+PartNo   00 ;
+Date     10/06/2026 ;
+Revision 01 ;
+Designer Engineer ;
+Company  none ;
+Assembly None ;
+Location  ;
+Device   G16V8 ;
+
+/* *************** INPUT PINS *********************/
+pin 1    = CLK_IN                       ; /*                                 */ 
+PIN 2    = IOM                          ; /*                                 */ 
+PIN 3     = A15                         ; /*                                 */ 
+PIN 4     = SWAPMEM                     ; /*                                 */ 
+PIN 5     = RD                          ; /*                                 */ 
+PIN 6     = WR                          ; /*                                 */ 
+
+/* *************** OUTPUT PINS *********************/
+PIN 12     = RAMEN                      ; /*                                 */
+PIN 13     = ROMEN                      ; /*                                 */
+PIN 14     = IOEN                       ; /*                                 */ 
+PIN 15     = IOR                        ; /*                                 */ 
+PIN 16     = IOW                        ; /*                                 */ 
+PIN 17     = MEMR                       ; /*                                 */ 
+PIN 18     = MEMW                       ; /*                                 */ 
+PIN 19     = CLK_OUT                    ; /*                                 */ 
+
+/** Declarations and Intermediate Variable Definitions  **/
+
+/** Logic Equations **/
+
+!ROMEN = (A15 & !IOM & SWAPMEM) # (!A15 & !IOM & !SWAPMEM);
+!RAMEN = (!A15 & !IOM & SWAPMEM) # (A15 & !IOM & !SWAPMEM);
+!IOEN = IOM;
+!IOR = IOM & !RD;
+!IOW = IOM & !WR;
+!MEMR = !IOM & !RD;
+!MEMW = !IOM & !WR;
+CLK_OUT = !CLK_IN;

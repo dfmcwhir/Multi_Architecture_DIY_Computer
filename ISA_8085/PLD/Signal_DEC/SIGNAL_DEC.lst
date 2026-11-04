@@ -1,0 +1,53 @@
+LISTING FOR LOGIC DESCRIPTION FILE: SIGNAL_DEC.pld                   Page 1
+
+CUPL(WM): Universal Compiler for Programmable Logic
+Version 5.0a Serial# MW-10400000
+Copyright (c) 1983, 1998 Logical Devices, Inc.
+Created Thu Oct 08 21:45:55 2026
+
+  1:Name     SIGNAL_DEC;
+  2:PartNo   00 ;
+  3:Date     10/06/2026 ;
+  4:Revision 01 ;
+  5:Designer Engineer ;
+  6:Company  none ;
+  7:Assembly None ;
+  8:Location  ;
+  9:Device   G16V8 ;
+ 10:
+ 11:/* *************** INPUT PINS *********************/
+ 12:pin 1    = CLK_IN                       ; /*                                 */ 
+ 13:PIN 2    = IOM                          ; /*                                 */ 
+ 14:PIN 3     = A15                         ; /*                                 */ 
+ 15:PIN 4     = SWAPMEM                     ; /*                                 */ 
+ 16:PIN 5     = RD                          ; /*                                 */ 
+ 17:PIN 6     = WR                          ; /*                                 */ 
+ 18:
+ 19:/* *************** OUTPUT PINS *********************/
+ 20:PIN 12     = RAMEN                      ; /*                                 */
+ 21:PIN 13     = ROMEN                      ; /*                                 */
+ 22:PIN 14     = IOEN                       ; /*                                 */ 
+ 23:PIN 15     = IOR                        ; /*                                 */ 
+ 24:PIN 16     = IOW                        ; /*                                 */ 
+ 25:PIN 17     = MEMR                       ; /*                                 */ 
+ 26:PIN 18     = MEMW                       ; /*                                 */ 
+ 27:PIN 19     = CLK_OUT                    ; /*                                 */ 
+ 28:
+ 29:/** Declarations and Intermediate Variable Definitions  **/
+ 30:
+ 31:/** Logic Equations **/
+ 32:
+ 33:!ROMEN = (A15 & !IOM & SWAPMEM) # (!A15 & !IOM & !SWAPMEM);
+ 34:!RAMEN = (!A15 & !IOM & SWAPMEM) # (A15 & !IOM & !SWAPMEM);
+ 35:!IOEN = IOM;
+ 36:!IOR = IOM & !RD;
+ 37:!IOW = IOM & !WR;
+ 38:!MEMR = !IOM & !RD;
+ 39:!MEMW = !IOM & !WR;
+ 40:CLK_OUT = !CLK_IN;
+ 41:
+
+
+
+Jedec Fuse Checksum       (2f2d)
+Jedec Transmit Checksum   (bb4c)

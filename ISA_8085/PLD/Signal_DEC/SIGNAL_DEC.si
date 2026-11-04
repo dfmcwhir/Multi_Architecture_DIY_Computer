@@ -1,0 +1,30 @@
+Name     SIGNAL_DEC;
+PartNo   00 ;
+Date     10/06/2026 ;
+Revision 01 ;
+Designer Engineer ;
+Company  none ;
+Assembly None ;
+Location  ;
+Device   G16V8 ;
+
+
+/* *************** SIMULATION ORDER *********************/
+ORDER: CLK_IN, IOM, A15, SWAPMEM, RD, WR, RAMEN, ROMEN, IOEN, IOR, IOW, MEMR, MEMW, CLK_OUT;
+
+/* *************** TEST VECTORS ********************
+C I A S R W R R I I I M M C
+L O 1 W D R A O O O O E E L
+K M 5 P     M M E R W M M K
+I           E E N     R W O
+N           N N           U */
+VECTORS:
+0 0 0 0 0 1 H L H H H L H L
+0 0 0 0 1 0 H L H H H H L L
+0 0 1 0 0 1 L H H H H L H L
+0 0 1 0 1 0 L H H H H H L L
+0 0 0 1 0 1 L H H H H L H L
+0 0 1 1 0 1 H L H H H L H L
+0 1 0 0 0 1 H H L L H H H L
+0 1 0 0 1 0 H H L H L H H L
+1 1 0 0 1 0 H H L H L H H H
