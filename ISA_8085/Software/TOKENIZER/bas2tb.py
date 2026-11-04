@@ -18,12 +18,29 @@ script does instead is everything that is tedious by hand:
   * whole-line source comments (lines starting with ' or ; or //) and blank
     lines are dropped, so they cost no program memory; REM lines are kept
   * everything outside quotes is upper-cased, as the ROM does on input
+  * memory-mapped hardware: .poke / .peek directives turn POKE and PEEK of
+    fixed addresses into OUT and IN on I/O ports (see below)
   * checks: line length, line numbers in order and in range, undefined labels,
     GOTO/GOSUB/THEN targets that do not exist, statements the interpreter does
     not have (DATA, READ, ON, string variables, SIN, MOD, AND, OR ...), and
     non-ASCII characters
   * output uses CR+LF line endings and a DOS 8.3 file name, ready to copy to
     the USB stick and  LOAD "NAME"
+
+Memory-mapped I/O.  Put directives at the top of the source (they are not
+copied to the output):
+
+    .poke 32545 = out 34          POKE 32545,V   ->  OUT 34,V
+    .peek 32545 = in  34          PEEK(32545)    ->  IN(34)
+    .poke $D000..$D00F = out $40  POKE $D003,V   ->  OUT $43,V   (a block of
+    .peek $D000..$D00F = in  $40  PEEK($D003)    ->  IN($43)     addresses maps
+                                                                 to consecutive ports)
+
+Addresses and ports can be decimal, $hex, &Hhex or 0xhex.  Only POKE and PEEK
+with a literal address are converted.  A POKE/PEEK whose address is a
+variable or an expression is left alone with a warning, and so is a literal
+address that no directive covers, because on this board those really write
+or read memory.
 
 Usage:
     python3 bas2tb.py game.txt                 # writes GAME.BAS
@@ -56,6 +73,77 @@ UNSUPPORTED = sorted([
     "RANDOMIZE", "WHILE", "WEND", "REPEAT", "UNTIL", "ELSE", "CLEAR", "CONT",
     "DELETE", "RENUM", "TRON", "TROFF", "SWAP", "PRINT#", "LPRINT",
 ], key=len, reverse=True)
+
+
+def parse_num(tok):
+    """Decimal, $hex, &Hhex or 0xhex -> int, or None."""
+    t = tok.strip().upper()
+    try:
+        if t.startswith("$"):
+            return int(t[1:], 16)
+        if t.startswith("&H"):
+            return int(t[2:], 16)
+        if t.startswith("0X"):
+            return int(t[2:], 16)
+        if re.fullmatch(r"\d+", t):
+            return int(t)
+    except ValueError:
+        pass
+    return None
+
+
+NUM = r"(?:\$[0-9A-Fa-f]+|&[Hh][0-9A-Fa-f]+|0[xX][0-9A-Fa-f]+|\d+)"
+
+
+class Mapper:
+    """The .poke / .peek rules: memory addresses that are really I/O ports."""
+    def __init__(self):
+        self.rules = {"poke": [], "peek": []}     # (lo, hi, port_base, port_text)
+        self.used = {"poke": 0, "peek": 0}
+
+    def add(self, kind, lo, hi, port, ptext):
+        self.rules[kind].append((lo, hi, port, ptext))
+
+    def lookup(self, kind, addr):
+        for lo, hi, port, ptext in self.rules[kind]:
+            if lo <= addr <= hi:
+                self.used[kind] += 1
+                off = addr - lo
+                if off == 0 and lo == hi:
+                    return ptext                      # keep the notation the user typed
+                return str(port + off)
+        return None
+
+
+def parse_directive(text, ln, mapper, prob):
+    """.poke ADDR[..ADDR] = out PORT   /   .peek ADDR[..ADDR] = in PORT"""
+    m = re.match(r"\.(poke|peek)\s+(%s)(?:\s*\.\.\s*(%s))?\s*=\s*(out|in)\s+(%s)\s*(?:['';].*)?$"
+                 % (NUM, NUM, NUM), text, re.I)
+    if not m:
+        prob.error(ln, "bad directive (expected  .poke ADDR[..ADDR] = out PORT  or  "
+                       ".peek ADDR[..ADDR] = in PORT): %s" % text)
+        return
+    kind, a1, a2, word, ptok = m.group(1).lower(), m.group(2), m.group(3), m.group(4).lower(), m.group(5)
+    if (kind, word) not in (("poke", "out"), ("peek", "in")):
+        prob.error(ln, ".poke must be followed by 'out' and .peek by 'in'")
+        return
+    lo = parse_num(a1)
+    hi = parse_num(a2) if a2 else lo
+    port = parse_num(ptok)
+    if lo is None or hi is None or port is None or hi < lo:
+        prob.error(ln, "bad address range or port in directive")
+        return
+    if not (0 <= lo and hi <= 65535):
+        prob.error(ln, "address out of range 0..65535")
+        return
+    if not (0 <= port and port + (hi - lo) <= 255):
+        prob.error(ln, "port out of range 0..255")
+        return
+    for lo2, hi2, _, _ in mapper.rules[kind]:
+        if lo <= hi2 and lo2 <= hi:
+            prob.error(ln, "this address range overlaps an earlier .%s rule" % kind)
+            return
+    mapper.add(kind, lo, hi, port, ptok.strip())
 
 
 class Problems:
@@ -101,7 +189,7 @@ def code_only(text):
     return "".join(t for is_str, t in parts if not is_str)
 
 
-def parse_source(path, prob):
+def parse_source(path, prob, mapper):
     """Return a list of logical lines: dicts with src, number, labels, text."""
     try:
         raw = open(path, "r", encoding="utf-8-sig").read()
@@ -111,6 +199,9 @@ def parse_source(path, prob):
     for i, line in enumerate(raw.replace("\r\n", "\n").replace("\r", "\n").split("\n"), 1):
         s = line.strip().replace("\t", " ")
         if not s or s[0] in "';" or s.startswith("//"):
+            continue
+        if re.match(r"\.(poke|peek)\b", s, re.I):
+            parse_directive(s, i, mapper, prob)
             continue
         number = None
         m = re.match(r"(\d+)\s*(.*)$", s)
@@ -135,7 +226,39 @@ def parse_source(path, prob):
     return lines
 
 
-def convert(lines, start, step, upper, prob):
+def apply_mapping(code, mapper, src, prob):
+    """Rewrite POKE/PEEK with literal addresses according to the rules."""
+    def poke(m):
+        addr = parse_num(m.group(1))
+        port = mapper.lookup("poke", addr) if addr is not None else None
+        if port is None:
+            prob.warn(src, "POKE %s is not covered by a .poke rule (writes real memory)"
+                      % m.group(1))
+            return m.group(0)
+        return "OUT %s," % port
+
+    def peek(m):
+        addr = parse_num(m.group(1))
+        port = mapper.lookup("peek", addr) if addr is not None else None
+        if port is None:
+            prob.warn(src, "PEEK(%s) is not covered by a .peek rule (reads real memory)"
+                      % m.group(1))
+            return m.group(0)
+        return "IN(%s)" % port
+
+    code = re.sub(r"\bPOKE\s*(%s)\s*," % NUM, poke, code, flags=re.I)
+    code = re.sub(r"\bPEEK\s*\(\s*(%s)\s*\)" % NUM, peek, code, flags=re.I)
+    # whatever is left uses a variable or an expression as the address
+    for m in re.finditer(r"\b(POKE|PEEK)\b", code, re.I):
+        rest = code[m.end():m.end() + 24]
+        if m.group(1).upper() == "POKE" and not re.match(r"\s*%s\s*," % NUM, rest):
+            prob.warn(src, "POKE with a variable/expression address left unchanged")
+        elif m.group(1).upper() == "PEEK" and not re.match(r"\s*\(\s*%s\s*\)" % NUM, rest):
+            prob.warn(src, "PEEK with a variable/expression address left unchanged")
+    return code
+
+
+def convert(lines, start, step, upper, prob, mapper=None):
     # assign line numbers
     nxt = start
     last = None
@@ -172,7 +295,10 @@ def convert(lines, start, step, upper, prob):
                     return m.group(0)
                 return str(labels[name])
             code = re.sub(r"\.([A-Za-z_][A-Za-z0-9_]*)", lab, code)
-            return code.upper() if upper else code
+            code = code.upper() if upper else code
+            if mapper is not None and (mapper.rules["poke"] or mapper.rules["peek"]):
+                code = apply_mapping(code, mapper, ln["src"], prob)
+            return code
         text = map_code(text, fix)
         text = text.rstrip()
         ln["out"] = text
@@ -252,10 +378,11 @@ def main():
         ap.error("--start and --step must be at least 1")
 
     prob = Problems()
-    lines = parse_source(args.source, prob)
+    mapper = Mapper()
+    lines = parse_source(args.source, prob, mapper)
     if not lines and not prob.errors:
         prob.error("-", "the file contains no program lines")
-    out = convert(lines, args.start, args.step, not args.keep_case, prob)
+    out = convert(lines, args.start, args.step, not args.keep_case, prob, mapper)
 
     for msg in prob.errors:
         print(msg, file=sys.stderr)
@@ -266,6 +393,9 @@ def main():
         print("%d error(s): no output written." % len(prob.errors), file=sys.stderr)
         return 1
 
+    if not args.quiet and (mapper.used["poke"] or mapper.used["peek"]):
+        print("converted %d POKE and %d PEEK to OUT/IN."
+              % (mapper.used["poke"], mapper.used["peek"]), file=sys.stderr)
     mem = sum(len(l.split(" ", 1)[1]) + 3 for l in out)       # 2 byte number + text + CR
     if not args.quiet:
         print("%d lines, about %d bytes of program memory (%d free at power-up)."
