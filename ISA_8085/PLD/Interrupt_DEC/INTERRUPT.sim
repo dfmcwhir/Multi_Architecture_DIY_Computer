@@ -1,0 +1,43 @@
+%SIGNAL
+PIN   2 =  A0 
+PIN   3 =  A1 
+PIN   4 =  A2 
+PIN   5 =  A3 
+PIN   6 =  A4 
+PIN   7 =  A5 
+PIN   8 =  A6 
+PIN   9 =  A7 
+PIN  13 =  DMA 
+PIN   1 =  HLDA_IN 
+PIN  16 =  HLDA_OUT 
+PIN  15 =  HOLD 
+PIN  11 =  INTR_IN 
+PIN  14 =  INTR_OUT 
+PIN  10 =  IOEN 
+PIN  22 =  OE 
+%END
+
+%FIELD
+FIELD addr = A7,A6,A5,A4,A3,A2,A1,A0
+%END
+
+%EQUATION
+HLDA_OUT =>
+    !HLDA_IN
+
+INTR_OUT =>
+    !INTR_IN
+
+!OE =>
+    A0 & A1 & A2 & A3 & A4 & A5 & A6 & A7 & !IOEN
+
+HLDA_OUT.oe  =>
+    1 
+
+INTR_OUT.oe  =>
+    1 
+
+OE.oe  =>
+    1 
+
+%END

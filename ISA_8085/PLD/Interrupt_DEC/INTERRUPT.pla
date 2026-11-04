@@ -1,0 +1,31 @@
+# Berkeley PLA format generated using
+#
+# CUPL(WM)        5.0a Serial# MW-10400000
+# Device          p22v10  Library DLIB-h-40-17
+# Created         Thu Oct 08 18:47:37 2026
+# Name            INTERRUPT 
+# Partno          00 
+# Revision        01 
+# Date            5/4/2026 
+# Designer        Engineer 
+# Company         none 
+# Assembly        None 
+# Location        
+#
+# Inputs  1 A0 A1 A2 
+#         A3 A4 A5 A6 
+#         A7 DMA HLDA_IN HLDA_OUT 
+#         HOLD INTR_IN INTR_OUT IOEN 
+#         OE 
+# Outputs HLDA_OUT INTR_OUT !OE HLDA_OUT.oe 
+#         INTR_OUT.oe OE.oe 
+.i 17
+.o 6
+.p 6
+----------0------ 1~~~~~
+-------------0--- ~1~~~~
+-11111111------0- ~~1~~~
+1---------------- ~~~1~~
+1---------------- ~~~~1~
+1---------------- ~~~~~1
+.end

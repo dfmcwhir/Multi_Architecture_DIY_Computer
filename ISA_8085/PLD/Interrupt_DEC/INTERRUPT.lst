@@ -1,0 +1,58 @@
+LISTING FOR LOGIC DESCRIPTION FILE: INTERRUPT.pld                    Page 1
+
+CUPL(WM): Universal Compiler for Programmable Logic
+Version 5.0a Serial# MW-10400000
+Copyright (c) 1983, 1998 Logical Devices, Inc.
+Created Thu Oct 08 18:47:37 2026
+
+  1:Name     INTERRUPT ;
+  2:PartNo   00 ;
+  3:Date     5/4/2026 ;
+  4:Revision 01 ;
+  5:Designer Engineer ;
+  6:Company  none ;
+  7:Assembly None ;
+  8:Location  ;
+  9:Device   g22v10 ;
+ 10:
+ 11:/* *************** INPUT PINS *********************/
+ 12:PIN 1      = HLDA_IN;
+ 13:PIN 2    =  A0                       ; /*                                 */ 
+ 14:PIN 3    =  A1                       ; /*                                 */ 
+ 15:PIN 4    =  A2                       ; /*                                 */ 
+ 16:PIN 5    =  A3                       ; /*                                 */ 
+ 17:PIN 6    =  A4                       ; /*                                 */ 
+ 18:PIN 7    =  A5                       ; /*                                 */ 
+ 19:PIN 8    =  A6                       ; /*                                 */ 
+ 20:PIN 9    =  A7                       ; /*                                 */ 
+ 21:PIN 10   = IOEN                       ; /*                                 */ 
+ 22:PIN 11   = INTR_IN;
+ 23:PIN 13   = DMA;
+ 24:
+ 25:
+ 26:/* *************** OUTPUT PINS *********************/
+ 27:PIN 14   = INTR_OUT;
+ 28:PIN 15   = HOLD;
+ 29:PIN 16   = HLDA_OUT;
+ 30:PIN 22   =  OE                       ; /*                                 */ 
+ 31:/* Pin 23   =  OEtmp; */
+ 32:
+ 33:
+ 34:/** Declarations and Intermediate Variable Definitions  **/
+ 35:
+ 36:field addr = [A7..0] ;
+ 37:
+ 38:/** Logic Equations **/
+ 39:
+ 40:!OE = addr:['h'ff] & !IOEN;
+ 41:/* OEtmp = OE; /*work around for pin 23 not having enough product terms */ 
+ 42:HLDA_OUT = !HLDA_IN;
+ 43:INTR_OUT = !INTR_IN;
+ 44:
+ 45:
+ 46:
+
+
+
+Jedec Fuse Checksum       (212d)
+Jedec Transmit Checksum   (b7f8)

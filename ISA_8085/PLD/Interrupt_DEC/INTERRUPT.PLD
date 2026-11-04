@@ -1,0 +1,44 @@
+Name     INTERRUPT ;
+PartNo   00 ;
+Date     5/4/2026 ;
+Revision 01 ;
+Designer Engineer ;
+Company  none ;
+Assembly None ;
+Location  ;
+Device   g22v10 ;
+
+/* *************** INPUT PINS *********************/
+PIN 1	   = HLDA_IN;
+PIN 2    =  A0                       ; /*                                 */ 
+PIN 3    =  A1                       ; /*                                 */ 
+PIN 4    =  A2                       ; /*                                 */ 
+PIN 5    =  A3                       ; /*                                 */ 
+PIN 6    =  A4                       ; /*                                 */ 
+PIN 7    =  A5                       ; /*                                 */ 
+PIN 8    =  A6                       ; /*                                 */ 
+PIN 9    =  A7                       ; /*                                 */ 
+PIN 10   = IOEN                       ; /*                                 */ 
+PIN 11   = INTR_IN;
+PIN 13   = DMA;
+
+
+/* *************** OUTPUT PINS *********************/
+PIN 14   = INTR_OUT;
+PIN 15   = HOLD;
+PIN 16   = HLDA_OUT;
+PIN 22   =  OE                       ; /*                                 */ 
+/* Pin 23   =  OEtmp; */
+
+
+/** Declarations and Intermediate Variable Definitions  **/
+
+field addr = [A7..0] ;
+
+/** Logic Equations **/
+
+!OE = addr:['h'ff] & !IOEN;
+/* OEtmp = OE; /*work around for pin 23 not having enough product terms */ 
+HLDA_OUT = !HLDA_IN;
+INTR_OUT = !INTR_IN;
+
