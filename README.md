@@ -76,7 +76,7 @@ So far I have done the 6502 and 8085 CPU cards with the Z80 on the way. The plan
 <tr><td>B5</td><td>-5VDC</td><td>-5 VDC</td><td>Not Currently used</td></tr>
 <tr><td>B6</td><td>DRQ2</td><td>IN</td><td>/DMA; Not used/tested by any add-on cards yet, but should put CPU in state for DMA operations*</td></tr>
 <tr><td>B7</td><td>-12VDC</td><td>-12 VDC</td><td>Not Currently used</td></tr>
-<tr><td>B8</td><td>/NOWS</td><td>IN</td><td>/STRETCH (/CLK stretch); When Low should slow down the clock*</td></tr>
+<tr><td>B8</td><td>/NOWS</td><td>IN</td><td>/STRETCH (CLK stretch); When Low should slow down the clock*</td></tr>
 <tr><td>B9</td><td>+12VDC</td><td>+12 VDC</td><td>Not Currently used</td></tr>
 <tr><td>B10</td><td>GND</td><td>Ground</td><td></td></tr>
 <tr><td>B11</td><td>/SMEMW</td><td>OUT</td><td>Originally intended as /MEMw, but may now be a general Write*</td></tr>
