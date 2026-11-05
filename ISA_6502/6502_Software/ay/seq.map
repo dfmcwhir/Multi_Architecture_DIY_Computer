@@ -1,0 +1,28 @@
+Modules list:
+-------------
+seq.o:
+    CODE              Offs=000000  Size=00160F  Align=00001  Fill=0000
+    BSS               Offs=000000  Size=000242  Align=00001  Fill=0000
+
+
+Segment list:
+-------------
+Name                   Start     End    Size  Align
+----------------------------------------------------
+CODE                  000500  001B0E  00160F  00001
+BSS                   001B0F  001D50  000242  00001
+
+
+Exports list by name:
+---------------------
+
+
+
+Exports list by value:
+----------------------
+
+
+
+Imports list:
+-------------
+

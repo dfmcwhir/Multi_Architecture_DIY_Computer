@@ -1,0 +1,969 @@
+ca65 V2.19 - Git a6530f4
+Main file   : aytest.s
+Current file: aytest.s
+
+000000r 1               ; ============================================================================
+000000r 1               ; aytest.s - AYTEST: a test program for the AY-3-8910 sound card
+000000r 1               ;
+000000r 1               ;   build:  make.bat  (or make)        run:  L AYTEST 0500   then   R
+000000r 1               ;
+000000r 1               ; A menu of tests, each of which says what you should hear:
+000000r 1               ;   1  each channel on its own (A, B, C at 440 Hz): checks the three outputs
+000000r 1               ;   2  a scale on channel A (tone periods)
+000000r 1               ;   3  a chord on A, B and C together, then arpeggios
+000000r 1               ;   4  noise on all channels, low to high (noise period, mixer)
+000000r 1               ;   5  the 8 envelope shapes (envelope period and shape registers)
+000000r 1               ;   6  volume 0 to 15 and back (volume registers)
+000000r 1               ;   7  sound effects: laser, explosion, siren, bell
+000000r 1               ;   8  a sweep over every tone period, 4095 down to 1 (all 12 period bits)
+000000r 1               ;   9  all of them, one after another
+000000r 1               ;   Q  quit (to the boot menu)
+000000r 1               ; Any key stops a test and goes back to the menu.  The card is write only,
+000000r 1               ; so the program can't check itself: listen.
+000000r 1               ; ============================================================================
+000000r 1               
+000000r 1                       .setcpu "6502"
+000000r 1                       .include "sbc_api.inc"
+000000r 2               ; sbc_api.inc - fixed ROM entry points of the SBC (see jumptable.s), and the
+000000r 2               ; CPU clock.  Use in your own ca65 programs:  .include "sbc_api.inc"
+000000r 2               ; (the games find it one folder up: their make.bat passes  -I ..  to ca65)
+000000r 2               SBC_CHRIN       = $FE00         ; carry set + A = char, carry clear = none waiting
+000000r 2               SBC_CHROUT      = $FE03         ; print A (A, X, Y preserved)
+000000r 2               SBC_MENU        = $FE06         ; boot menu
+000000r 2               SBC_COLD        = $FE09         ; BASIC cold start
+000000r 2               SBC_WARM        = $FE0C         ; BASIC warm start
+000000r 2               SBC_MONITOR     = $FE0F         ; monitor prompt (or JMP $FF00)
+000000r 2               SBC_PADSTATE    = $FE12         ; A = gamepad buttons held: bit0 A,1 B,2 Select,3 Start,4 Up,5 Down,6 Left,7 Right
+000000r 2               SBC_LOAD        = $FE15         ; load a file: A/Y = parameter block (.word addr, .word max, "NAME.EXT",0)
+000000r 2                                               ;   carry clear = loaded, X/Y = length; carry set = failed, A = error code
+000000r 2               SBC_CWD         = $FE18         ; A/Y = the monitor's current folder: 0-ended, "" (the top) or "/A/B"
+000000r 2                                               ;   (newer ROMs: check for a JMP ($4C) at $FE18 first)
+000000r 2               
+000000r 2               ; The CPU clock in MHz (whole numbers, 1 to 8).  Programs size their delay
+000000r 2               ; loops from it, so a millisecond stays a millisecond.  To build for another
+000000r 2               ; clock, change it here or give it on the command line:  make.bat 1
+000000r 2               .ifndef CLOCK_MHZ
+000000r 2               CLOCK_MHZ       = 2
+000000r 2               .endif
+000000r 2               
+000000r 1               
+000000r 1                       .segment "CODE"
+000000r 1  4C rr rr             jmp     start
+000003r 1               
+000003r 1                       .include "common.s"
+000003r 2               ; ============================================================================
+000003r 2               ; common.s - small helpers shared by AYTEST and YMPLAY: printing, keys, delays
+000003r 2               ; ============================================================================
+000003r 2               
+000003r 2               ; PRINT label: print the 0-ended string at label; keeps X
+000003r 2               .macro  PRINT   str
+000003r 2                       lda     #<str
+000003r 2                       ldy     #>str
+000003r 2                       jsr     print
+000003r 2               .endmacro
+000003r 2               
+000003r 2               ; print the 0-ended string at A (low) / Y (high).  Keeps X.
+000003r 2  8D rr rr     print:  sta     @ld+1
+000006r 2  8C rr rr             sty     @ld+2
+000009r 2  AD FF FF     @ld:    lda     $FFFF
+00000Cr 2  F0 0D                beq     @r
+00000Er 2  20 03 FE             jsr     SBC_CHROUT
+000011r 2  EE rr rr             inc     @ld+1
+000014r 2  D0 F3                bne     @ld
+000016r 2  EE rr rr             inc     @ld+2
+000019r 2  D0 EE                bne     @ld
+00001Br 2  60           @r:     rts
+00001Cr 2               
+00001Cr 2  A9 0D        crlf:   lda     #13
+00001Er 2  20 03 FE             jsr     SBC_CHROUT
+000021r 2  A9 0A                lda     #10
+000023r 2  4C 03 FE             jmp     SBC_CHROUT
+000026r 2               
+000026r 2               ; print A as 2 decimal digits (0-99)
+000026r 2  A2 30        prdec2: ldx     #'0'
+000028r 2  C9 0A        @t:     cmp     #10
+00002Ar 2  90 05                bcc     @u
+00002Cr 2  E9 0A                sbc     #10
+00002Er 2  E8                   inx
+00002Fr 2  D0 F7                bne     @t
+000031r 2  48           @u:     pha
+000032r 2  8A                   txa
+000033r 2  20 03 FE             jsr     SBC_CHROUT
+000036r 2  68                   pla
+000037r 2  09 30                ora     #'0'
+000039r 2  4C 03 FE             jmp     SBC_CHROUT
+00003Cr 2               
+00003Cr 2               ; print A in hex
+00003Cr 2  48           prhex:  pha
+00003Dr 2  4A                   lsr
+00003Er 2  4A                   lsr
+00003Fr 2  4A                   lsr
+000040r 2  4A                   lsr
+000041r 2  20 rr rr             jsr     @d
+000044r 2  68                   pla
+000045r 2  29 0F                and     #$0F
+000047r 2  C9 0A        @d:     cmp     #10
+000049r 2  90 02                bcc     @n
+00004Br 2  69 06                adc     #'A' - '0' - 10 - 1
+00004Dr 2  69 30        @n:     adc     #'0'
+00004Fr 2  4C 03 FE             jmp     SBC_CHROUT
+000052r 2               
+000052r 2               ; a key: carry set and A = the key (letters in upper case), or carry clear
+000052r 2  20 00 FE     getkey: jsr     SBC_CHRIN
+000055r 2  90 0B                bcc     @r
+000057r 2  C9 61                cmp     #'a'
+000059r 2  90 06                bcc     @y
+00005Br 2  C9 7B                cmp     #'z' + 1
+00005Dr 2  B0 02                bcs     @y
+00005Fr 2  29 DF                and     #$DF
+000061r 2  38           @y:     sec
+000062r 2  60           @r:     rts
+000063r 2               
+000063r 2               ; wait for a key; A = the key (upper case)
+000063r 2  20 rr rr     waitkey:jsr     getkey
+000066r 2  90 FB                bcc     waitkey
+000068r 2  60                   rts
+000069r 2               
+000069r 2               ; wait about A ms.  The inner loop is sized for the clock (CLOCK_MHZ in
+000069r 2               ; sbc_api.inc): 5 + 4 * (CLOCK_MHZ - 1) cycles a turn, DELAY_N turns a ms.
+000069r 2               DELAY_N = (1000 * CLOCK_MHZ - 7) / (5 + 4 * (CLOCK_MHZ - 1))
+000069r 2               delay_ms:
+000069r 2  AA                   tax
+00006Ar 2  F0 0A                beq     @done
+00006Cr 2  A0 DD        @o:     ldy     #DELAY_N
+00006Er 2               @i:
+00006Er 2  EA EA        .repeat CLOCK_MHZ - 1
+000070r 2                       nop
+000070r 2                       nop
+000070r 2               .endrepeat
+000070r 2  88                   dey
+000071r 2  D0 FB                bne     @i
+000073r 2  CA                   dex
+000074r 2  D0 F6                bne     @o
+000076r 2  60           @done:  rts
+000077r 2               
+000077r 1                       .include "ay.s"
+000077r 2               ; ============================================================================
+000077r 2               ; ay.s - AY-3-8910 sound chip driver for the 6502 SBC (ca65)
+000077r 2               ;
+000077r 2               ; The card (write only):
+000077r 2               ;   AY_ADDR  $7F22  write the number of the register to use  (BDIR = BC1 = 1)
+000077r 2               ;   AY_DATA  $7F23  write a value to that register           (BDIR = 1, BC1 = 0)
+000077r 2               ;   BC2 and A8 tied high, A9 low; chip clock 2 MHz; the three channels mixed
+000077r 2               ;   together (mono).  The I/O ports aren't used: register 7 keeps them inputs.
+000077r 2               ;
+000077r 2               ; Only plain STA abs is used on the card's addresses: an indexed store
+000077r 2               ; (STA abs,X) can make an extra read cycle there first, and the card decodes
+000077r 2               ; the address without looking at R/W.
+000077r 2               ;
+000077r 2               ; Routines (A, X, Y may change unless it says):
+000077r 2               ;   ay_write    register X = A (A, X, Y kept)
+000077r 2               ;   ay_silence  all channels off, volumes 0, envelope stopped
+000077r 2               ;   ay_regs     registers 0-13 from the 14 bytes at (ay_ptr); register 13 is
+000077r 2               ;               only written when it isn't $FF (writing it restarts the
+000077r 2               ;               envelope)
+000077r 2               ;   ay_tone     channel X (0-2) to tone period A (low) / Y (high)
+000077r 2               ;   ay_note     channel X (0-2) to note A (0 = C1 .. 95 = B8, 45 = A4 440 Hz)
+000077r 2               ;   ay_volume   channel X (0-2) to volume A (0-15; 16 = the envelope)
+000077r 2               ;   ay_mixer    register 7 = A, the I/O port bits kept as inputs
+000077r 2               ;
+000077r 2               ; The registers:
+000077r 2               ;   0/1 2/3 4/5  tone period of A, B, C (12 bits: low, high 4 bits):
+000077r 2               ;                frequency = 2 MHz / (16 * period)
+000077r 2               ;   6            noise period (5 bits)
+000077r 2               ;   7            mixer: bits 0-2 tone A-C off, bits 3-5 noise A-C off
+000077r 2               ;                (0 = on), bits 6-7 I/O port directions (kept 0)
+000077r 2               ;   8 9 10       volume A, B, C (0-15), bit 4 = use the envelope
+000077r 2               ;   11/12        envelope period (16 bits): one ramp (16 steps) lasts
+000077r 2               ;                256 x period / 2 MHz
+000077r 2               ;   13           envelope shape (writing it restarts the envelope)
+000077r 2               ; ============================================================================
+000077r 2               
+000077r 2               AY_ADDR         = $7F22
+000077r 2               AY_DATA         = $7F23
+000077r 2               
+000077r 2               AY_TONE_A       = 0
+000077r 2               AY_NOISE        = 6
+000077r 2               AY_MIXER        = 7
+000077r 2               AY_VOL_A        = 8
+000077r 2               AY_ENV_LO       = 11
+000077r 2               AY_ENV_HI       = 12
+000077r 2               AY_ENV_SHAPE    = 13
+000077r 2               
+000077r 2               ; envelope shapes (register 13)
+000077r 2               ENV_DECAY       = $00           ; \______   fade out once
+000077r 2               ENV_ATTACK      = $0D           ; /~~~~~~   fade in once, then stay up
+000077r 2               ENV_SAW_DOWN    = $08           ; \\\\\\\   repeat
+000077r 2               ENV_SAW_UP      = $0C           ; ///////   repeat
+000077r 2               ENV_TRIANGLE    = $0E           ; /\/\/\/   repeat
+000077r 2               ENV_TRIANGLE2   = $0A           ; \/\/\/\   repeat
+000077r 2               ENV_DECAY_HOLD  = $0B           ; \~~~~~~   fade out, then jump up and stay
+000077r 2               ENV_ATTACK_ZERO = $0F           ; /______   fade in, then drop to 0
+000077r 2               
+000077r 2               ; register X = A.  Keeps A, X and Y.
+000077r 2               ay_write:
+000077r 2  8E 22 7F             stx     AY_ADDR
+00007Ar 2  8D 23 7F             sta     AY_DATA
+00007Dr 2  60                   rts
+00007Er 2               
+00007Er 2               ; everything quiet: tones and noise off, volumes 0, the envelope stopped
+00007Er 2               ay_silence:
+00007Er 2  48                   pha
+00007Fr 2  8A                   txa
+000080r 2  48                   pha
+000081r 2  A9 3F                lda     #$3F            ; mixer: all off (and the ports inputs)
+000083r 2  A2 07                ldx     #AY_MIXER
+000085r 2  20 rr rr             jsr     ay_write
+000088r 2  A9 00                lda     #0
+00008Ar 2  A2 08                ldx     #AY_VOL_A       ; volumes 0
+00008Cr 2  20 rr rr             jsr     ay_write
+00008Fr 2  E8                   inx
+000090r 2  20 rr rr             jsr     ay_write
+000093r 2  E8                   inx
+000094r 2  20 rr rr             jsr     ay_write
+000097r 2  A2 00                ldx     #0              ; tone and noise periods 0
+000099r 2  20 rr rr     @p:     jsr     ay_write
+00009Cr 2  E8                   inx
+00009Dr 2  E0 07                cpx     #AY_MIXER
+00009Fr 2  D0 F8                bne     @p
+0000A1r 2  A2 0B                ldx     #AY_ENV_LO      ; envelope period 0, shape 0 (fades to 0)
+0000A3r 2  20 rr rr             jsr     ay_write
+0000A6r 2  E8                   inx
+0000A7r 2  20 rr rr             jsr     ay_write
+0000AAr 2  E8                   inx
+0000ABr 2  20 rr rr             jsr     ay_write
+0000AEr 2  68                   pla
+0000AFr 2  AA                   tax
+0000B0r 2  68                   pla
+0000B1r 2  60                   rts
+0000B2r 2               
+0000B2r 2               ; registers 0-13 from (ay_ptr); register 13 only if it isn't $FF
+0000B2r 2               ay_regs:
+0000B2r 2  AD rr rr             lda     ay_ptr
+0000B5r 2  8D rr rr             sta     @ld+1
+0000B8r 2  AD rr rr             lda     ay_ptr+1
+0000BBr 2  8D rr rr             sta     @ld+2
+0000BEr 2  A2 00                ldx     #0
+0000C0r 2               @l:
+0000C0r 2  BD FF FF     @ld:    lda     $FFFF,x
+0000C3r 2  E0 0D                cpx     #AY_ENV_SHAPE
+0000C5r 2  D0 04                bne     @w
+0000C7r 2  C9 FF                cmp     #$FF
+0000C9r 2  F0 0B                beq     @r
+0000CBr 2  8E 22 7F     @w:     stx     AY_ADDR
+0000CEr 2  8D 23 7F             sta     AY_DATA
+0000D1r 2  E8                   inx
+0000D2r 2  E0 0E                cpx     #14
+0000D4r 2  D0 EA                bne     @l
+0000D6r 2  60           @r:     rts
+0000D7r 2               
+0000D7r 2               ; channel X (0-2): tone period A (low) / Y (high)
+0000D7r 2               ay_tone:
+0000D7r 2  48                   pha
+0000D8r 2  8A                   txa
+0000D9r 2  0A                   asl
+0000DAr 2  AA                   tax
+0000DBr 2  68                   pla
+0000DCr 2  20 rr rr             jsr     ay_write        ; the low byte
+0000DFr 2  E8                   inx
+0000E0r 2  98                   tya
+0000E1r 2  20 rr rr             jsr     ay_write        ; the high 4 bits
+0000E4r 2  8A                   txa
+0000E5r 2  4A                   lsr
+0000E6r 2  AA                   tax
+0000E7r 2  60                   rts
+0000E8r 2               
+0000E8r 2               ; channel X (0-2): note A (0 = C1 .. 95 = B8)
+0000E8r 2               ay_note:
+0000E8r 2  C9 60                cmp     #AY_NOTES
+0000EAr 2  90 02                bcc     @ok
+0000ECr 2  A9 5F                lda     #AY_NOTES - 1
+0000EEr 2  A8           @ok:    tay
+0000EFr 2  B9 rr rr             lda     note_hi,y
+0000F2r 2  48                   pha
+0000F3r 2  B9 rr rr             lda     note_lo,y
+0000F6r 2  A8                   tay
+0000F7r 2  68                   pla                     ; (A = high, Y = low: swapped for ay_tone)
+0000F8r 2  8D rr rr             sta     ay_tmp
+0000FBr 2  98                   tya
+0000FCr 2  AC rr rr             ldy     ay_tmp
+0000FFr 2  4C rr rr             jmp     ay_tone
+000102r 2               
+000102r 2               ; channel X (0-2): volume A (0-15, 16 = follow the envelope)
+000102r 2               ay_volume:
+000102r 2  48                   pha
+000103r 2  8A                   txa
+000104r 2  18                   clc
+000105r 2  69 08                adc     #AY_VOL_A
+000107r 2  AA                   tax
+000108r 2  68                   pla
+000109r 2  20 rr rr             jsr     ay_write
+00010Cr 2  48                   pha
+00010Dr 2  8A                   txa
+00010Er 2  38                   sec
+00010Fr 2  E9 08                sbc     #AY_VOL_A
+000111r 2  AA                   tax
+000112r 2  68                   pla
+000113r 2  60                   rts
+000114r 2               
+000114r 2               ; mixer (register 7) = A: the port direction bits are always kept 0 (inputs)
+000114r 2               ay_mixer:
+000114r 2  29 3F                and     #$3F
+000116r 2  A2 07                ldx     #AY_MIXER
+000118r 2  4C rr rr             jmp     ay_write
+00011Br 2               
+00011Br 2                       .include "ay_notes.inc"
+00011Br 3               ; generated by tools/gen_notes.py: tone periods for a 2000000 Hz chip clock
+00011Br 3               ; note n = octave * 12 + semitone (C1 = 0 ... B8 = 95); A4 (n = 45) is 440 Hz
+00011Br 3               AY_NOTES = 96
+00011Br 3               note_lo:
+00011Br 3  EE 18 4D 8E          .byte   $EE, $18, $4D, $8E, $DA, $2F, $8F, $F7, $68, $E1, $61, $E9   ; octave 1
+00011Fr 3  DA 2F 8F F7  
+000123r 3  68 E1 61 E9  
+000127r 3  77 0C A7 47          .byte   $77, $0C, $A7, $47, $ED, $98, $47, $FC, $B4, $70, $31, $F4   ; octave 2
+00012Br 3  ED 98 47 FC  
+00012Fr 3  B4 70 31 F4  
+000133r 3  BC 86 53 24          .byte   $BC, $86, $53, $24, $F6, $CC, $A4, $7E, $5A, $38, $18, $FA   ; octave 3
+000137r 3  F6 CC A4 7E  
+00013Br 3  5A 38 18 FA  
+00013Fr 3  DE C3 AA 92          .byte   $DE, $C3, $AA, $92, $7B, $66, $52, $3F, $2D, $1C, $0C, $FD   ; octave 4
+000143r 3  7B 66 52 3F  
+000147r 3  2D 1C 0C FD  
+00014Br 3  EF E1 D5 C9          .byte   $EF, $E1, $D5, $C9, $BE, $B3, $A9, $9F, $96, $8E, $86, $7F   ; octave 5
+00014Fr 3  BE B3 A9 9F  
+000153r 3  96 8E 86 7F  
+000157r 3  77 71 6A 64          .byte   $77, $71, $6A, $64, $5F, $59, $54, $50, $4B, $47, $43, $3F   ; octave 6
+00015Br 3  5F 59 54 50  
+00015Fr 3  4B 47 43 3F  
+000163r 3  3C 38 35 32          .byte   $3C, $38, $35, $32, $2F, $2D, $2A, $28, $26, $24, $22, $20   ; octave 7
+000167r 3  2F 2D 2A 28  
+00016Br 3  26 24 22 20  
+00016Fr 3  1E 1C 1B 19          .byte   $1E, $1C, $1B, $19, $18, $16, $15, $14, $13, $12, $11, $10   ; octave 8
+000173r 3  18 16 15 14  
+000177r 3  13 12 11 10  
+00017Br 3               note_hi:
+00017Br 3  0E 0E 0D 0C          .byte   $0E, $0E, $0D, $0C, $0B, $0B, $0A, $09, $09, $08, $08, $07
+00017Fr 3  0B 0B 0A 09  
+000183r 3  09 08 08 07  
+000187r 3  07 07 06 06          .byte   $07, $07, $06, $06, $05, $05, $05, $04, $04, $04, $04, $03
+00018Br 3  05 05 05 04  
+00018Fr 3  04 04 04 03  
+000193r 3  03 03 03 03          .byte   $03, $03, $03, $03, $02, $02, $02, $02, $02, $02, $02, $01
+000197r 3  02 02 02 02  
+00019Br 3  02 02 02 01  
+00019Fr 3  01 01 01 01          .byte   $01, $01, $01, $01, $01, $01, $01, $01, $01, $01, $01, $00
+0001A3r 3  01 01 01 01  
+0001A7r 3  01 01 01 00  
+0001ABr 3  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+0001AFr 3  00 00 00 00  
+0001B3r 3  00 00 00 00  
+0001B7r 3  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+0001BBr 3  00 00 00 00  
+0001BFr 3  00 00 00 00  
+0001C3r 3  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+0001C7r 3  00 00 00 00  
+0001CBr 3  00 00 00 00  
+0001CFr 3  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+0001D3r 3  00 00 00 00  
+0001D7r 3  00 00 00 00  
+0001DBr 3               
+0001DBr 2               
+0001DBr 2                       .segment "BSS"
+000000r 2  xx xx        ay_ptr:     .res 2              ; ay_regs: where the 14 register values are
+000002r 2  xx           ay_tmp:     .res 1
+000003r 2                       .segment "CODE"
+0001DBr 2               
+0001DBr 1               
+0001DBr 1               ; ---- the menu ----------------------------------------------------------------------
+0001DBr 1  D8           start:  cld
+0001DCr 1  A2 FF                ldx     #$FF
+0001DEr 1  9A                   txs
+0001DFr 1  20 rr rr             jsr     ay_silence
+0001E2r 1  20 rr rr     menu:   jsr     ay_silence
+0001E5r 1  A9 rr A0 rr          PRINT   menu_txt
+0001E9r 1  20 rr rr     
+0001ECr 1  20 rr rr     @k:     jsr     waitkey
+0001EFr 1  C9 51                cmp     #'Q'
+0001F1r 1  D0 0D                bne     @n
+0001F3r 1  20 rr rr             jsr     ay_silence
+0001F6r 1  A9 rr A0 rr          PRINT   bye_txt
+0001FAr 1  20 rr rr     
+0001FDr 1  4C 06 FE             jmp     SBC_MENU
+000200r 1  C9 31        @n:     cmp     #'1'
+000202r 1  90 E8                bcc     @k
+000204r 1  C9 3A                cmp     #'9' + 1
+000206r 1  B0 E4                bcs     @k
+000208r 1  38                   sec
+000209r 1  E9 31                sbc     #'1'
+00020Br 1  C9 08                cmp     #8
+00020Dr 1  F0 06                beq     @all
+00020Fr 1  20 rr rr             jsr     run_test
+000212r 1  4C rr rr             jmp     menu
+000215r 1  A9 00        @all:   lda     #0              ; 9: each in turn, until a key
+000217r 1  48           @a:     pha
+000218r 1  20 rr rr             jsr     run_test
+00021Br 1  68                   pla
+00021Cr 1  2C rr rr             bit     stopped
+00021Fr 1  30 07                bmi     @done
+000221r 1  18                   clc
+000222r 1  69 01                adc     #1
+000224r 1  C9 08                cmp     #8
+000226r 1  D0 EF                bne     @a
+000228r 1  4C rr rr     @done:  jmp     menu
+00022Br 1               
+00022Br 1               ; run test A (0-7)
+00022Br 1               run_test:
+00022Br 1  0A                   asl
+00022Cr 1  AA                   tax
+00022Dr 1  BD rr rr             lda     tests,x
+000230r 1  8D rr rr             sta     @j+1
+000233r 1  BD rr rr             lda     tests+1,x
+000236r 1  8D rr rr             sta     @j+2
+000239r 1  A9 00                lda     #0
+00023Br 1  8D rr rr             sta     stopped
+00023Er 1  20 rr rr             jsr     crlf
+000241r 1  20 rr rr             jsr     ay_silence
+000244r 1  20 FF FF     @j:     jsr     $FFFF
+000247r 1  20 rr rr             jsr     ay_silence
+00024Ar 1  60                   rts
+00024Br 1  rr rr rr rr  tests:  .word   t_channels, t_scale, t_chord, t_noise, t_envelope, t_volume, t_effects, t_sweep
+00024Fr 1  rr rr rr rr  
+000253r 1  rr rr rr rr  
+00025Br 1               
+00025Br 1               ; wait A x 10 ms; a key stops the test: then the carry is set (and stays set
+00025Br 1               ; for the rest of it: stopped has bit 7 set)
+00025Br 1  8D rr rr     wait10: sta     wcount
+00025Er 1  2C rr rr     @l:     bit     stopped
+000261r 1  30 1D                bmi     @stop
+000263r 1  20 rr rr             jsr     getkey
+000266r 1  B0 0C                bcs     @key
+000268r 1  A9 0A                lda     #10
+00026Ar 1  20 rr rr             jsr     delay_ms
+00026Dr 1  CE rr rr             dec     wcount
+000270r 1  D0 EC                bne     @l
+000272r 1  18                   clc
+000273r 1  60                   rts
+000274r 1  A9 80        @key:   lda     #$80
+000276r 1  8D rr rr             sta     stopped
+000279r 1  A9 rr A0 rr          PRINT   stop_txt
+00027Dr 1  20 rr rr     
+000280r 1  38           @stop:  sec
+000281r 1  60                   rts
+000282r 1               
+000282r 1               ; ---- 1: each channel on its own -----------------------------------------------------
+000282r 1               t_channels:
+000282r 1  A9 rr A0 rr          PRINT   t1_txt
+000286r 1  20 rr rr     
+000289r 1  A2 00                ldx     #0
+00028Br 1  8E rr rr     @ch:    stx     chan
+00028Er 1  8A                   txa                     ; "CHANNEL A"
+00028Fr 1  18                   clc
+000290r 1  69 41                adc     #'A'
+000292r 1  8D rr rr             sta     t1_ch
+000295r 1  A9 rr A0 rr          PRINT   t1_line
+000299r 1  20 rr rr     
+00029Cr 1  AE rr rr             ldx     chan            ; the mixer: only this channel's tone
+00029Fr 1  BD rr rr             lda     chan_tone_only,x
+0002A2r 1  20 rr rr             jsr     ay_mixer
+0002A5r 1  AE rr rr             ldx     chan
+0002A8r 1  A9 2D                lda     #45             ; A4, 440 Hz
+0002AAr 1  20 rr rr             jsr     ay_note
+0002ADr 1  AE rr rr             ldx     chan
+0002B0r 1  A9 0F                lda     #15
+0002B2r 1  20 rr rr             jsr     ay_volume
+0002B5r 1  A9 64                lda     #100            ; a second
+0002B7r 1  20 rr rr             jsr     wait10
+0002BAr 1  B0 17                bcs     @r
+0002BCr 1  AE rr rr             ldx     chan
+0002BFr 1  A9 00                lda     #0
+0002C1r 1  20 rr rr             jsr     ay_volume
+0002C4r 1  A9 1E                lda     #30
+0002C6r 1  20 rr rr             jsr     wait10
+0002C9r 1  B0 08                bcs     @r
+0002CBr 1  AE rr rr             ldx     chan
+0002CEr 1  E8                   inx
+0002CFr 1  E0 03                cpx     #3
+0002D1r 1  D0 B8                bne     @ch
+0002D3r 1  60           @r:     rts
+0002D4r 1               
+0002D4r 1               ; ---- 2: a scale ----------------------------------------------------------------------
+0002D4r 1               t_scale:
+0002D4r 1  A9 rr A0 rr          PRINT   t2_txt
+0002D8r 1  20 rr rr     
+0002DBr 1  A9 3E                lda     #%00111110      ; tone A only
+0002DDr 1  20 rr rr             jsr     ay_mixer
+0002E0r 1  A2 00                ldx     #0
+0002E2r 1  A9 0D                lda     #13
+0002E4r 1  20 rr rr             jsr     ay_volume
+0002E7r 1  A0 00                ldy     #0
+0002E9r 1  8C rr rr     @up:    sty     idx
+0002ECr 1  B9 rr rr             lda     scale,y
+0002EFr 1  A2 00                ldx     #0
+0002F1r 1  20 rr rr             jsr     ay_note
+0002F4r 1  A9 1E                lda     #30
+0002F6r 1  20 rr rr             jsr     wait10
+0002F9r 1  B0 08                bcs     @r
+0002FBr 1  AC rr rr             ldy     idx
+0002FEr 1  C8                   iny
+0002FFr 1  C0 0F                cpy     #15
+000301r 1  D0 E6                bne     @up
+000303r 1  60           @r:     rts
+000304r 1  24 26 28 29  scale:  .byte   36, 38, 40, 41, 43, 45, 47, 48, 47, 45, 43, 41, 40, 38, 36   ; C4 .. C5 .. C4
+000308r 1  2B 2D 2F 30  
+00030Cr 1  2F 2D 2B 29  
+000313r 1               
+000313r 1               ; ---- 3: a chord, then arpeggios --------------------------------------------------------
+000313r 1               t_chord:
+000313r 1  A9 rr A0 rr          PRINT   t3_txt
+000317r 1  20 rr rr     
+00031Ar 1  A9 38                lda     #%00111000      ; tones A, B, C
+00031Cr 1  20 rr rr             jsr     ay_mixer
+00031Fr 1  A2 00                ldx     #0
+000321r 1  8E rr rr     @c:     stx     chan
+000324r 1  BD rr rr             lda     chord,x
+000327r 1  20 rr rr             jsr     ay_note
+00032Ar 1  AE rr rr             ldx     chan
+00032Dr 1  A9 0B                lda     #11
+00032Fr 1  20 rr rr             jsr     ay_volume
+000332r 1  AE rr rr             ldx     chan
+000335r 1  E8                   inx
+000336r 1  E0 03                cpx     #3
+000338r 1  D0 E7                bne     @c
+00033Ar 1  A9 C8                lda     #200
+00033Cr 1  20 rr rr             jsr     wait10
+00033Fr 1  B0 2C                bcs     @r
+000341r 1  A9 00                lda     #0              ; arpeggios on A: C, F, G major, 3 octaves
+000343r 1  8D rr rr             sta     idx
+000346r 1  AE rr rr     @a:     ldx     idx
+000349r 1  BD rr rr             lda     arp,x
+00034Cr 1  30 1F                bmi     @r
+00034Er 1  A2 00                ldx     #0
+000350r 1  20 rr rr             jsr     ay_note
+000353r 1  A2 01                ldx     #1
+000355r 1  A9 00                lda     #0
+000357r 1  20 rr rr             jsr     ay_volume
+00035Ar 1  A2 02                ldx     #2
+00035Cr 1  A9 00                lda     #0
+00035Er 1  20 rr rr             jsr     ay_volume
+000361r 1  A9 08                lda     #8
+000363r 1  20 rr rr             jsr     wait10
+000366r 1  B0 05                bcs     @r
+000368r 1  EE rr rr             inc     idx
+00036Br 1  D0 D9                bne     @a
+00036Dr 1  60           @r:     rts
+00036Er 1  24 28 2B     chord:  .byte   36, 40, 43      ; C4 E4 G4
+000371r 1  18 1C 1F 24  arp:    .byte   24, 28, 31, 36, 40, 43, 48, 52, 55, 60, 55, 52, 48, 43, 40, 36, 31, 28
+000375r 1  28 2B 30 34  
+000379r 1  37 3C 37 34  
+000383r 1  1D 21 24 29          .byte   29, 33, 36, 41, 45, 48, 53, 57, 60, 65, 60, 57, 53, 48, 45, 41, 36, 33
+000387r 1  2D 30 35 39  
+00038Br 1  3C 41 3C 39  
+000395r 1  1F 23 26 2B          .byte   31, 35, 38, 43, 47, 50, 55, 59, 62, 67, 62, 59, 55, 50, 47, 43, 38, 35, 36, $FF
+000399r 1  2F 32 37 3B  
+00039Dr 1  3E 43 3E 3B  
+0003A9r 1               
+0003A9r 1               ; ---- 4: noise ------------------------------------------------------------------------
+0003A9r 1               t_noise:
+0003A9r 1  A9 rr A0 rr          PRINT   t4_txt
+0003ADr 1  20 rr rr     
+0003B0r 1  A9 07                lda     #%00000111      ; noise on A, B, C; tones off
+0003B2r 1  20 rr rr             jsr     ay_mixer
+0003B5r 1  A2 00                ldx     #0
+0003B7r 1  A9 0A                lda     #10
+0003B9r 1  20 rr rr             jsr     ay_volume
+0003BCr 1  E8                   inx
+0003BDr 1  20 rr rr             jsr     ay_volume
+0003C0r 1  E8                   inx
+0003C1r 1  20 rr rr             jsr     ay_volume
+0003C4r 1  A9 1F                lda     #31             ; period 31 (low) down to 0 (high)
+0003C6r 1  8D rr rr             sta     idx
+0003C9r 1  AD rr rr     @n:     lda     idx
+0003CCr 1  A2 06                ldx     #AY_NOISE
+0003CEr 1  20 rr rr             jsr     ay_write
+0003D1r 1  A9 0F                lda     #15
+0003D3r 1  20 rr rr             jsr     wait10
+0003D6r 1  B0 05                bcs     @r
+0003D8r 1  CE rr rr             dec     idx
+0003DBr 1  10 EC                bpl     @n
+0003DDr 1  60           @r:     rts
+0003DEr 1               
+0003DEr 1               ; ---- 5: the envelope shapes -------------------------------------------------------------
+0003DEr 1               t_envelope:
+0003DEr 1  A9 rr A0 rr          PRINT   t5_txt
+0003E2r 1  20 rr rr     
+0003E5r 1  A9 3E                lda     #%00111110      ; tone A
+0003E7r 1  20 rr rr             jsr     ay_mixer
+0003EAr 1  A2 00                ldx     #0
+0003ECr 1  A9 18                lda     #24             ; C3
+0003EEr 1  20 rr rr             jsr     ay_note
+0003F1r 1  A2 00                ldx     #0
+0003F3r 1  A9 10                lda     #16             ; volume from the envelope
+0003F5r 1  20 rr rr             jsr     ay_volume
+0003F8r 1  A9 42                lda     #<ENV_HALF      ; one sweep in about half a second
+0003FAr 1  A2 0B                ldx     #AY_ENV_LO
+0003FCr 1  20 rr rr             jsr     ay_write
+0003FFr 1  A9 0F                lda     #>ENV_HALF
+000401r 1  A2 0C                ldx     #AY_ENV_HI
+000403r 1  20 rr rr             jsr     ay_write
+000406r 1  A9 00                lda     #0
+000408r 1  8D rr rr             sta     idx
+00040Br 1  AE rr rr     @s:     ldx     idx
+00040Er 1  BD rr rr             lda     shapes,x
+000411r 1  30 2C                bmi     @r
+000413r 1  8D rr rr             sta     shape
+000416r 1  A9 rr A0 rr          PRINT   t5_line
+00041Ar 1  20 rr rr     
+00041Dr 1  AD rr rr             lda     idx             ; its name
+000420r 1  0A                   asl
+000421r 1  AA                   tax
+000422r 1  BD rr rr             lda     shape_names,x
+000425r 1  BC rr rr             ldy     shape_names+1,x
+000428r 1  20 rr rr             jsr     print
+00042Br 1  AD rr rr             lda     shape
+00042Er 1  A2 0D                ldx     #AY_ENV_SHAPE   ; (writing it starts the envelope)
+000430r 1  20 rr rr             jsr     ay_write
+000433r 1  A9 C8                lda     #200
+000435r 1  20 rr rr             jsr     wait10
+000438r 1  B0 05                bcs     @r
+00043Ar 1  EE rr rr             inc     idx
+00043Dr 1  D0 CC                bne     @s
+00043Fr 1  60           @r:     rts
+000440r 1               ENV_HALF = 3906                 ; one ramp: 256 x 3906 / 2 MHz = 0.5 s
+000440r 1  00 0F 08 0B  shapes: .byte   ENV_DECAY, ENV_ATTACK_ZERO, ENV_SAW_DOWN, ENV_DECAY_HOLD, ENV_TRIANGLE2, ENV_SAW_UP, ENV_ATTACK, ENV_TRIANGLE, $FF
+000444r 1  0A 0C 0D 0E  
+000448r 1  FF           
+000449r 1               shape_names:
+000449r 1  rr rr rr rr          .word   sh0, sh1, sh2, sh3, sh4, sh5, sh6, sh7
+00044Dr 1  rr rr rr rr  
+000451r 1  rr rr rr rr  
+000459r 1               
+000459r 1               ; ---- 6: volume ----------------------------------------------------------------------------
+000459r 1               t_volume:
+000459r 1  A9 rr A0 rr          PRINT   t6_txt
+00045Dr 1  20 rr rr     
+000460r 1  A9 3E                lda     #%00111110
+000462r 1  20 rr rr             jsr     ay_mixer
+000465r 1  A2 00                ldx     #0
+000467r 1  A9 2D                lda     #45
+000469r 1  20 rr rr             jsr     ay_note
+00046Cr 1  A9 00                lda     #0
+00046Er 1  8D rr rr             sta     idx
+000471r 1  AD rr rr     @up:    lda     idx
+000474r 1  A2 00                ldx     #0
+000476r 1  20 rr rr             jsr     ay_volume
+000479r 1  AD rr rr             lda     idx
+00047Cr 1  20 rr rr             jsr     prdec2
+00047Fr 1  A9 20                lda     #' '
+000481r 1  20 03 FE             jsr     SBC_CHROUT
+000484r 1  A9 19                lda     #25
+000486r 1  20 rr rr             jsr     wait10
+000489r 1  B0 21                bcs     @r
+00048Br 1  EE rr rr             inc     idx
+00048Er 1  AD rr rr             lda     idx
+000491r 1  C9 10                cmp     #16
+000493r 1  D0 DC                bne     @up
+000495r 1  CE rr rr     @dn:    dec     idx
+000498r 1  30 12                bmi     @r
+00049Ar 1  AD rr rr             lda     idx
+00049Dr 1  A2 00                ldx     #0
+00049Fr 1  20 rr rr             jsr     ay_volume
+0004A2r 1  A9 0A                lda     #10
+0004A4r 1  20 rr rr             jsr     wait10
+0004A7r 1  B0 03                bcs     @r
+0004A9r 1  4C rr rr             jmp     @dn
+0004ACr 1  4C rr rr     @r:     jmp     crlf
+0004AFr 1               
+0004AFr 1               ; ---- 7: sound effects -----------------------------------------------------------------------
+0004AFr 1               t_effects:
+0004AFr 1  A9 rr A0 rr          PRINT   fx1_txt         ; laser: a falling tone, 3 times
+0004B3r 1  20 rr rr     
+0004B6r 1  A9 3E                lda     #%00111110
+0004B8r 1  20 rr rr             jsr     ay_mixer
+0004BBr 1  A2 00                ldx     #0
+0004BDr 1  A9 0E                lda     #14
+0004BFr 1  20 rr rr             jsr     ay_volume
+0004C2r 1  A9 03                lda     #3
+0004C4r 1  8D rr rr             sta     idx
+0004C7r 1  A9 28        @l1:    lda     #40             ; period 40 .. 400
+0004C9r 1  8D rr rr             sta     per
+0004CCr 1  A9 00                lda     #0
+0004CEr 1  8D rr rr             sta     per+1
+0004D1r 1  AD rr rr     @l2:    lda     per
+0004D4r 1  AC rr rr             ldy     per+1
+0004D7r 1  A2 00                ldx     #0
+0004D9r 1  20 rr rr             jsr     ay_tone
+0004DCr 1  A9 01                lda     #1
+0004DEr 1  20 rr rr             jsr     wait10
+0004E1r 1  B0 61                bcs     @r
+0004E3r 1  AD rr rr             lda     per
+0004E6r 1  18                   clc
+0004E7r 1  69 0C                adc     #12
+0004E9r 1  8D rr rr             sta     per
+0004ECr 1  90 03                bcc     @l3
+0004EEr 1  EE rr rr             inc     per+1
+0004F1r 1  AD rr rr     @l3:    lda     per+1
+0004F4r 1  C9 01                cmp     #>400
+0004F6r 1  90 D9                bcc     @l2
+0004F8r 1  AD rr rr             lda     per
+0004FBr 1  C9 90                cmp     #<400
+0004FDr 1  90 D2                bcc     @l2
+0004FFr 1  CE rr rr             dec     idx
+000502r 1  D0 C3                bne     @l1
+000504r 1  A9 1E                lda     #30
+000506r 1  20 rr rr             jsr     wait10
+000509r 1  B0 39                bcs     @r
+00050Br 1  A9 rr A0 rr          PRINT   fx2_txt         ; explosion: low noise fading out
+00050Fr 1  20 rr rr     
+000512r 1  A9 37                lda     #%00110111      ; noise on A
+000514r 1  20 rr rr             jsr     ay_mixer
+000517r 1  A9 1C                lda     #28
+000519r 1  A2 06                ldx     #AY_NOISE
+00051Br 1  20 rr rr             jsr     ay_write
+00051Er 1  A2 00                ldx     #0
+000520r 1  A9 10                lda     #16
+000522r 1  20 rr rr             jsr     ay_volume
+000525r 1  A9 70                lda     #<6000          ; about 0.75 s
+000527r 1  A2 0B                ldx     #AY_ENV_LO
+000529r 1  20 rr rr             jsr     ay_write
+00052Cr 1  A9 17                lda     #>6000
+00052Er 1  A2 0C                ldx     #AY_ENV_HI
+000530r 1  20 rr rr             jsr     ay_write
+000533r 1  A9 00                lda     #ENV_DECAY
+000535r 1  A2 0D                ldx     #AY_ENV_SHAPE
+000537r 1  20 rr rr             jsr     ay_write
+00053Ar 1  A9 78                lda     #120
+00053Cr 1  20 rr rr             jsr     wait10
+00053Fr 1  B0 03                bcs     @r
+000541r 1  4C rr rr             jmp     fx_siren
+000544r 1  60           @r:     rts
+000545r 1               
+000545r 1               fx_siren:
+000545r 1  A9 rr A0 rr          PRINT   fx3_txt         ; siren: up and down, twice
+000549r 1  20 rr rr     
+00054Cr 1  A9 3E                lda     #%00111110
+00054Er 1  20 rr rr             jsr     ay_mixer
+000551r 1  A2 00                ldx     #0
+000553r 1  A9 0D                lda     #13
+000555r 1  20 rr rr             jsr     ay_volume
+000558r 1  A9 04                lda     #4
+00055Ar 1  8D rr rr             sta     idx
+00055Dr 1  A0 00        @s:     ldy     #0
+00055Fr 1  8C rr rr     @s1:    sty     idx2
+000562r 1  98                   tya
+000563r 1  18                   clc
+000564r 1  69 24                adc     #36             ; C4 .. C5
+000566r 1  C0 0D                cpy     #13
+000568r 1  90 05                bcc     @s2
+00056Ar 1  A9 3C                lda     #36 + 24        ; (and back)
+00056Cr 1  ED rr rr             sbc     idx2
+00056Fr 1  A2 00        @s2:    ldx     #0
+000571r 1  20 rr rr             jsr     ay_note
+000574r 1  A9 04                lda     #4
+000576r 1  20 rr rr             jsr     wait10
+000579r 1  B0 5A                bcs     @r
+00057Br 1  AC rr rr             ldy     idx2
+00057Er 1  C8                   iny
+00057Fr 1  C0 19                cpy     #25
+000581r 1  D0 DC                bne     @s1
+000583r 1  CE rr rr             dec     idx
+000586r 1  D0 D5                bne     @s
+000588r 1  A9 1E                lda     #30
+00058Ar 1  20 rr rr             jsr     wait10
+00058Dr 1  B0 46                bcs     @r
+00058Fr 1  A9 rr A0 rr          PRINT   fx4_txt         ; bell: a tone with a slow decay, a tune
+000593r 1  20 rr rr     
+000596r 1  A9 3E                lda     #%00111110
+000598r 1  20 rr rr             jsr     ay_mixer
+00059Br 1  A2 00                ldx     #0
+00059Dr 1  A9 10                lda     #16
+00059Fr 1  20 rr rr             jsr     ay_volume
+0005A2r 1  A9 C4                lda     #<2500
+0005A4r 1  A2 0B                ldx     #AY_ENV_LO
+0005A6r 1  20 rr rr             jsr     ay_write
+0005A9r 1  A9 09                lda     #>2500
+0005ABr 1  A2 0C                ldx     #AY_ENV_HI
+0005ADr 1  20 rr rr             jsr     ay_write
+0005B0r 1  A9 00                lda     #0
+0005B2r 1  8D rr rr             sta     idx
+0005B5r 1  AE rr rr     @b:     ldx     idx
+0005B8r 1  BD rr rr             lda     bells,x
+0005BBr 1  30 18                bmi     @r
+0005BDr 1  A2 00                ldx     #0
+0005BFr 1  20 rr rr             jsr     ay_note
+0005C2r 1  A9 00                lda     #ENV_DECAY      ; (restarts the envelope: a new strike)
+0005C4r 1  A2 0D                ldx     #AY_ENV_SHAPE
+0005C6r 1  20 rr rr             jsr     ay_write
+0005C9r 1  A9 28                lda     #40
+0005CBr 1  20 rr rr             jsr     wait10
+0005CEr 1  B0 05                bcs     @r
+0005D0r 1  EE rr rr             inc     idx
+0005D3r 1  D0 E0                bne     @b
+0005D5r 1  60           @r:     rts
+0005D6r 1  34 30 32 2B  bells:  .byte   52, 48, 50, 43, 43, 50, 52, 48, $FF
+0005DAr 1  2B 32 34 30  
+0005DEr 1  FF           
+0005DFr 1               
+0005DFr 1               ; ---- 8: every tone period ----------------------------------------------------------------------
+0005DFr 1               t_sweep:
+0005DFr 1  A9 rr A0 rr          PRINT   t8_txt
+0005E3r 1  20 rr rr     
+0005E6r 1  A9 3E                lda     #%00111110
+0005E8r 1  20 rr rr             jsr     ay_mixer
+0005EBr 1  A2 00                ldx     #0
+0005EDr 1  A9 0C                lda     #12
+0005EFr 1  20 rr rr             jsr     ay_volume
+0005F2r 1  A9 FF                lda     #<4095
+0005F4r 1  8D rr rr             sta     per
+0005F7r 1  A9 0F                lda     #>4095
+0005F9r 1  8D rr rr             sta     per+1
+0005FCr 1  AD rr rr     @p:     lda     per
+0005FFr 1  AC rr rr             ldy     per+1
+000602r 1  A2 00                ldx     #0
+000604r 1  20 rr rr             jsr     ay_tone
+000607r 1  A9 01                lda     #1              ; 10 ms each step; the step shrinks with the period
+000609r 1  20 rr rr             jsr     wait10
+00060Cr 1  B0 31                bcs     @r
+00060Er 1  AD rr rr             lda     per+1           ; step = period / 64 + 1
+000611r 1  8D rr rr             sta     tmp
+000614r 1  AD rr rr             lda     per
+000617r 1  A2 06                ldx     #6
+000619r 1  4E rr rr     @d:     lsr     tmp
+00061Cr 1  6A                   ror
+00061Dr 1  CA                   dex
+00061Er 1  D0 F9                bne     @d
+000620r 1  18                   clc
+000621r 1  69 01                adc     #1
+000623r 1  8D rr rr             sta     tmp
+000626r 1  AD rr rr             lda     per
+000629r 1  38                   sec
+00062Ar 1  ED rr rr             sbc     tmp
+00062Dr 1  8D rr rr             sta     per
+000630r 1  AD rr rr             lda     per+1
+000633r 1  E9 00                sbc     #0
+000635r 1  8D rr rr             sta     per+1
+000638r 1  90 05                bcc     @r              ; (below 0: done)
+00063Ar 1  0D rr rr             ora     per
+00063Dr 1  D0 BD                bne     @p
+00063Fr 1  60           @r:     rts
+000640r 1               
+000640r 1               ; ---- data -----------------------------------------------------------------------------------
+000640r 1  3E 3D 3B     chan_tone_only: .byte %00111110, %00111101, %00111011
+000643r 1               
+000643r 1               menu_txt:
+000643r 1  0C 41 59 2D          .byte   12, "AY-3-8910 SOUND CARD TEST   (registers at $7F22, data at $7F23)", 13, 10, 13, 10
+000647r 1  33 2D 38 39  
+00064Br 1  31 30 20 53  
+000687r 1  20 20 31 20          .byte   "  1  EACH CHANNEL ON ITS OWN (A, B, C AT 440 HZ)", 13, 10
+00068Br 1  20 45 41 43  
+00068Fr 1  48 20 43 48  
+0006B9r 1  20 20 32 20          .byte   "  2  A SCALE ON CHANNEL A", 13, 10
+0006BDr 1  20 41 20 53  
+0006C1r 1  43 41 4C 45  
+0006D4r 1  20 20 33 20          .byte   "  3  A CHORD ON A, B AND C, THEN ARPEGGIOS", 13, 10
+0006D8r 1  20 41 20 43  
+0006DCr 1  48 4F 52 44  
+000700r 1  20 20 34 20          .byte   "  4  NOISE, LOW TO HIGH", 13, 10
+000704r 1  20 4E 4F 49  
+000708r 1  53 45 2C 20  
+000719r 1  20 20 35 20          .byte   "  5  THE 8 ENVELOPE SHAPES", 13, 10
+00071Dr 1  20 54 48 45  
+000721r 1  20 38 20 45  
+000735r 1  20 20 36 20          .byte   "  6  VOLUME 0 TO 15 AND BACK", 13, 10
+000739r 1  20 56 4F 4C  
+00073Dr 1  55 4D 45 20  
+000753r 1  20 20 37 20          .byte   "  7  SOUND EFFECTS: LASER, EXPLOSION, SIREN, BELL", 13, 10
+000757r 1  20 53 4F 55  
+00075Br 1  4E 44 20 45  
+000786r 1  20 20 38 20          .byte   "  8  A SWEEP OVER EVERY TONE PERIOD", 13, 10
+00078Ar 1  20 41 20 53  
+00078Er 1  57 45 45 50  
+0007ABr 1  20 20 39 20          .byte   "  9  ALL OF THEM", 13, 10
+0007AFr 1  20 41 4C 4C  
+0007B3r 1  20 4F 46 20  
+0007BDr 1  20 20 51 20          .byte   "  Q  QUIT", 13, 10, 13, 10
+0007C1r 1  20 51 55 49  
+0007C5r 1  54 0D 0A 0D  
+0007CAr 1  41 4E 59 20          .byte   "ANY KEY STOPS A TEST.  CHOOSE: ", 0
+0007CEr 1  4B 45 59 20  
+0007D2r 1  53 54 4F 50  
+0007EAr 1  0D 0A 42 59  bye_txt:.byte   13, 10, "BYE", 13, 10, 0
+0007EEr 1  45 0D 0A 00  
+0007F2r 1  20 28 53 54  stop_txt:.byte  " (STOPPED)", 13, 10, 0
+0007F6r 1  4F 50 50 45  
+0007FAr 1  44 29 0D 0A  
+0007FFr 1  31 3A 20 45  t1_txt: .byte   "1: EACH CHANNEL ALONE, 1 SECOND EACH. YOU SHOULD HEAR THE SAME NOTE 3 TIMES.", 13, 10, 0
+000803r 1  41 43 48 20  
+000807r 1  43 48 41 4E  
+00084Er 1  20 20 20 43  t1_line:.byte   "   CHANNEL "
+000852r 1  48 41 4E 4E  
+000856r 1  45 4C 20     
+000859r 1  41 0D 0A 00  t1_ch:  .byte   "A", 13, 10, 0
+00085Dr 1  32 3A 20 43  t2_txt: .byte   "2: C MAJOR SCALE UP AND DOWN ON CHANNEL A.", 13, 10, 0
+000861r 1  20 4D 41 4A  
+000865r 1  4F 52 20 53  
+00088Ar 1  33 3A 20 43  t3_txt: .byte   "3: C MAJOR CHORD (C E G) ON A B C FOR 2 SECONDS, THEN ARPEGGIOS ON A.", 13, 10, 0
+00088Er 1  20 4D 41 4A  
+000892r 1  4F 52 20 43  
+0008D2r 1  34 3A 20 4E  t4_txt: .byte   "4: NOISE ON ALL CHANNELS, FROM A LOW RUMBLE TO A HIGH HISS.", 13, 10, 0
+0008D6r 1  4F 49 53 45  
+0008DAr 1  20 4F 4E 20  
+000910r 1  35 3A 20 45  t5_txt: .byte   "5: ENVELOPE SHAPES ON A LOW C, 2 SECONDS EACH:", 13, 10, 0
+000914r 1  4E 56 45 4C  
+000918r 1  4F 50 45 20  
+000941r 1  20 20 20 00  t5_line:.byte   "   ", 0
+000945r 1  5C 5F 5F 5F  sh0:    .byte   "\___  FADE OUT ONCE", 13, 10, 0
+000949r 1  20 20 46 41  
+00094Dr 1  44 45 20 4F  
+00095Br 1  2F 5F 5F 5F  sh1:    .byte   "/___  FADE IN, THEN SILENT", 13, 10, 0
+00095Fr 1  20 20 46 41  
+000963r 1  44 45 20 49  
+000978r 1  5C 5C 5C 5C  sh2:    .byte   "\\\\  FADE OUT, OVER AND OVER", 13, 10, 0
+00097Cr 1  20 20 46 41  
+000980r 1  44 45 20 4F  
+000998r 1  5C 7E 7E 7E  sh3:    .byte   "\~~~  FADE OUT, THEN LOUD", 13, 10, 0
+00099Cr 1  20 20 46 41  
+0009A0r 1  44 45 20 4F  
+0009B4r 1  5C 2F 5C 2F  sh4:    .byte   "\/\/  DOWN AND UP", 13, 10, 0
+0009B8r 1  20 20 44 4F  
+0009BCr 1  57 4E 20 41  
+0009C8r 1  2F 2F 2F 2F  sh5:    .byte   "////  FADE IN, OVER AND OVER", 13, 10, 0
+0009CCr 1  20 20 46 41  
+0009D0r 1  44 45 20 49  
+0009E7r 1  2F 7E 7E 7E  sh6:    .byte   "/~~~  FADE IN, THEN STAY LOUD", 13, 10, 0
+0009EBr 1  20 20 46 41  
+0009EFr 1  44 45 20 49  
+000A07r 1  2F 5C 2F 5C  sh7:    .byte   "/\/\  UP AND DOWN", 13, 10, 0
+000A0Br 1  20 20 55 50  
+000A0Fr 1  20 41 4E 44  
+000A1Br 1  36 3A 20 34  t6_txt: .byte   "6: 440 HZ, VOLUME 0 TO 15 AND BACK DOWN:", 13, 10, "   ", 0
+000A1Fr 1  34 30 20 48  
+000A23r 1  5A 2C 20 56  
+000A49r 1  37 3A 20 4C  fx1_txt:.byte   "7: LASER", 13, 10, 0
+000A4Dr 1  41 53 45 52  
+000A51r 1  0D 0A 00     
+000A54r 1  20 20 20 45  fx2_txt:.byte   "   EXPLOSION", 13, 10, 0
+000A58r 1  58 50 4C 4F  
+000A5Cr 1  53 49 4F 4E  
+000A63r 1  20 20 20 53  fx3_txt:.byte   "   SIREN", 13, 10, 0
+000A67r 1  49 52 45 4E  
+000A6Br 1  0D 0A 00     
+000A6Er 1  20 20 20 42  fx4_txt:.byte   "   BELLS", 13, 10, 0
+000A72r 1  45 4C 4C 53  
+000A76r 1  0D 0A 00     
+000A79r 1  38 3A 20 54  t8_txt: .byte   "8: TONE FROM VERY LOW (PERIOD 4095, 30 HZ) TO VERY HIGH, SMOOTHLY.", 13, 10
+000A7Dr 1  4F 4E 45 20  
+000A81r 1  46 52 4F 4D  
+000ABDr 1  20 20 20 4A          .byte   "   JUMPS OR SILENT PATCHES MEAN A TONE PERIOD BIT ISN'T GETTING THROUGH.", 13, 10, 0
+000AC1r 1  55 4D 50 53  
+000AC5r 1  20 4F 52 20  
+000B08r 1               
+000B08r 1                       .segment "BSS"
+000003r 1  xx           stopped:    .res 1
+000004r 1  xx           wcount:     .res 1
+000005r 1  xx           chan:       .res 1
+000006r 1  xx           idx:        .res 1
+000007r 1  xx           idx2:       .res 1
+000008r 1  xx           shape:      .res 1
+000009r 1  xx xx        per:        .res 2
+00000Br 1  xx           tmp:        .res 1
+00000Br 1               

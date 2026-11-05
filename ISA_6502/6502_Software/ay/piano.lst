@@ -1,0 +1,1653 @@
+ca65 V2.19 - Git a6530f4
+Main file   : piano.s
+Current file: piano.s
+
+000000r 1               ; ============================================================================
+000000r 1               ; piano.s - PIANO: play the AY-3-8910 card from the keyboard
+000000r 1               ;
+000000r 1               ;   build:  make.bat  (or make)        run:  L PIANO 0500   then   R
+000000r 1               ;
+000000r 1               ; Two rows of the keyboard are two octaves of a piano, as in the old trackers:
+000000r 1               ;
+000000r 1               ;      2 3   5 6 7   9 0                S D   G H J
+000000r 1               ;     Q W E R T Y U I O P   (higher)   Z X C V B N M ,   (lower)
+000000r 1               ;
+000000r 1               ; The lower row starts at C of the octave shown, the upper row an octave up
+000000r 1               ; (Q and , are the same C).  The picture of the keyboard shows the keys, and
+000000r 1               ; each key lights up while its note sounds.
+000000r 1               ;
+000000r 1               ;   [ ]  or Tab   the sound: PIANO HARP ORGAN STRINGS CHIP CHORD BUZZ DRUMS
+000000r 1               ;   - =           octave down / up (1-6)
+000000r 1               ;   space         all notes off
+000000r 1               ;   Esc           quit
+000000r 1               ;
+000000r 1               ; The terminal says when a key is pressed, never when it is let go, so every
+000000r 1               ; note ends by itself: each sound has its own shape (the attack, a fall to a
+000000r 1               ; sustain level, how long that lasts, then the release).  Holding a key down
+000000r 1               ; still holds the note: the keyboard repeats the key, and a repeat of a note
+000000r 1               ; that is still sounding keeps it going instead of starting it again.
+000000r 1               ;
+000000r 1               ; Three notes at once (the chip's three channels): a new note takes a free
+000000r 1               ; channel, or the one that has sounded longest.  BUZZ uses the chip's envelope
+000000r 1               ; as a saw wave (one at a time, on channel A).  DRUMS: each pair of keys is a
+000000r 1               ; drum: kick, snare, closed hi-hat, open hi-hat, tom (it follows the key),
+000000r 1               ; crash.
+000000r 1               ;
+000000r 1               ; Timing: VIA timer 2, polled (its interrupt stays off), 100 ticks a second;
+000000r 1               ; the sounds move on every other tick.  Keys are read all the time, and a note
+000000r 1               ; starts the moment its key comes in.
+000000r 1               ; ============================================================================
+000000r 1               
+000000r 1                       .setcpu "6502"
+000000r 1                       .include "sbc_api.inc"
+000000r 2               ; sbc_api.inc - fixed ROM entry points of the SBC (see jumptable.s), and the
+000000r 2               ; CPU clock.  Use in your own ca65 programs:  .include "sbc_api.inc"
+000000r 2               ; (the games find it one folder up: their make.bat passes  -I ..  to ca65)
+000000r 2               SBC_CHRIN       = $FE00         ; carry set + A = char, carry clear = none waiting
+000000r 2               SBC_CHROUT      = $FE03         ; print A (A, X, Y preserved)
+000000r 2               SBC_MENU        = $FE06         ; boot menu
+000000r 2               SBC_COLD        = $FE09         ; BASIC cold start
+000000r 2               SBC_WARM        = $FE0C         ; BASIC warm start
+000000r 2               SBC_MONITOR     = $FE0F         ; monitor prompt (or JMP $FF00)
+000000r 2               SBC_PADSTATE    = $FE12         ; A = gamepad buttons held: bit0 A,1 B,2 Select,3 Start,4 Up,5 Down,6 Left,7 Right
+000000r 2               SBC_LOAD        = $FE15         ; load a file: A/Y = parameter block (.word addr, .word max, "NAME.EXT",0)
+000000r 2                                               ;   carry clear = loaded, X/Y = length; carry set = failed, A = error code
+000000r 2               SBC_CWD         = $FE18         ; A/Y = the monitor's current folder: 0-ended, "" (the top) or "/A/B"
+000000r 2                                               ;   (newer ROMs: check for a JMP ($4C) at $FE18 first)
+000000r 2               
+000000r 2               ; The CPU clock in MHz (whole numbers, 1 to 8).  Programs size their delay
+000000r 2               ; loops from it, so a millisecond stays a millisecond.  To build for another
+000000r 2               ; clock, change it here or give it on the command line:  make.bat 1
+000000r 2               .ifndef CLOCK_MHZ
+000000r 2               CLOCK_MHZ       = 2
+000000r 2               .endif
+000000r 2               
+000000r 1               
+000000r 1               VIA_T2CL        = $7F08
+000000r 1               VIA_T2CH        = $7F09
+000000r 1               VIA_ACR         = $7F0B
+000000r 1               VIA_IFR         = $7F0D
+000000r 1               VIA_IER         = $7F0E
+000000r 1               TICK            = CLOCK_MHZ * 10000 - 2     ; 1/100 s (the timer runs count + 2)
+000000r 1               .assert TICK < 65536, error, "the clock is too fast for a 1/100 s tick"
+000000r 1               
+000000r 1               ; the screen
+000000r 1               SOUND_ROW       = 2
+000000r 1               OCT_ROW         = 3
+000000r 1               KB_COL          = 6             ; the keyboard picture: 68 columns,
+000000r 1               KB_TOP          = 7             ;  rows 7-14; its labels on 6 and 15
+000000r 1               CH_ROW          = 17            ; the channels: "A  C-4  bar", rows 17-19
+000000r 1               BAR_COL         = 9
+000000r 1               HELP_ROW        = 21
+000000r 1               CELLS_MAX       = 10            ; screen changes sent at most a frame
+000000r 1               
+000000r 1                       .segment "CODE"
+000000r 1  4C rr rr             jmp     start
+000003r 1               
+000003r 1                       .include "common.s"
+000003r 2               ; ============================================================================
+000003r 2               ; common.s - small helpers shared by AYTEST and YMPLAY: printing, keys, delays
+000003r 2               ; ============================================================================
+000003r 2               
+000003r 2               ; PRINT label: print the 0-ended string at label; keeps X
+000003r 2               .macro  PRINT   str
+000003r 2                       lda     #<str
+000003r 2                       ldy     #>str
+000003r 2                       jsr     print
+000003r 2               .endmacro
+000003r 2               
+000003r 2               ; print the 0-ended string at A (low) / Y (high).  Keeps X.
+000003r 2  8D rr rr     print:  sta     @ld+1
+000006r 2  8C rr rr             sty     @ld+2
+000009r 2  AD FF FF     @ld:    lda     $FFFF
+00000Cr 2  F0 0D                beq     @r
+00000Er 2  20 03 FE             jsr     SBC_CHROUT
+000011r 2  EE rr rr             inc     @ld+1
+000014r 2  D0 F3                bne     @ld
+000016r 2  EE rr rr             inc     @ld+2
+000019r 2  D0 EE                bne     @ld
+00001Br 2  60           @r:     rts
+00001Cr 2               
+00001Cr 2  A9 0D        crlf:   lda     #13
+00001Er 2  20 03 FE             jsr     SBC_CHROUT
+000021r 2  A9 0A                lda     #10
+000023r 2  4C 03 FE             jmp     SBC_CHROUT
+000026r 2               
+000026r 2               ; print A as 2 decimal digits (0-99)
+000026r 2  A2 30        prdec2: ldx     #'0'
+000028r 2  C9 0A        @t:     cmp     #10
+00002Ar 2  90 05                bcc     @u
+00002Cr 2  E9 0A                sbc     #10
+00002Er 2  E8                   inx
+00002Fr 2  D0 F7                bne     @t
+000031r 2  48           @u:     pha
+000032r 2  8A                   txa
+000033r 2  20 03 FE             jsr     SBC_CHROUT
+000036r 2  68                   pla
+000037r 2  09 30                ora     #'0'
+000039r 2  4C 03 FE             jmp     SBC_CHROUT
+00003Cr 2               
+00003Cr 2               ; print A in hex
+00003Cr 2  48           prhex:  pha
+00003Dr 2  4A                   lsr
+00003Er 2  4A                   lsr
+00003Fr 2  4A                   lsr
+000040r 2  4A                   lsr
+000041r 2  20 rr rr             jsr     @d
+000044r 2  68                   pla
+000045r 2  29 0F                and     #$0F
+000047r 2  C9 0A        @d:     cmp     #10
+000049r 2  90 02                bcc     @n
+00004Br 2  69 06                adc     #'A' - '0' - 10 - 1
+00004Dr 2  69 30        @n:     adc     #'0'
+00004Fr 2  4C 03 FE             jmp     SBC_CHROUT
+000052r 2               
+000052r 2               ; a key: carry set and A = the key (letters in upper case), or carry clear
+000052r 2  20 00 FE     getkey: jsr     SBC_CHRIN
+000055r 2  90 0B                bcc     @r
+000057r 2  C9 61                cmp     #'a'
+000059r 2  90 06                bcc     @y
+00005Br 2  C9 7B                cmp     #'z' + 1
+00005Dr 2  B0 02                bcs     @y
+00005Fr 2  29 DF                and     #$DF
+000061r 2  38           @y:     sec
+000062r 2  60           @r:     rts
+000063r 2               
+000063r 2               ; wait for a key; A = the key (upper case)
+000063r 2  20 rr rr     waitkey:jsr     getkey
+000066r 2  90 FB                bcc     waitkey
+000068r 2  60                   rts
+000069r 2               
+000069r 2               ; wait about A ms.  The inner loop is sized for the clock (CLOCK_MHZ in
+000069r 2               ; sbc_api.inc): 5 + 4 * (CLOCK_MHZ - 1) cycles a turn, DELAY_N turns a ms.
+000069r 2               DELAY_N = (1000 * CLOCK_MHZ - 7) / (5 + 4 * (CLOCK_MHZ - 1))
+000069r 2               delay_ms:
+000069r 2  AA                   tax
+00006Ar 2  F0 0A                beq     @done
+00006Cr 2  A0 DD        @o:     ldy     #DELAY_N
+00006Er 2               @i:
+00006Er 2  EA EA        .repeat CLOCK_MHZ - 1
+000070r 2                       nop
+000070r 2                       nop
+000070r 2               .endrepeat
+000070r 2  88                   dey
+000071r 2  D0 FB                bne     @i
+000073r 2  CA                   dex
+000074r 2  D0 F6                bne     @o
+000076r 2  60           @done:  rts
+000077r 2               
+000077r 1                       .include "ay.s"
+000077r 2               ; ============================================================================
+000077r 2               ; ay.s - AY-3-8910 sound chip driver for the 6502 SBC (ca65)
+000077r 2               ;
+000077r 2               ; The card (write only):
+000077r 2               ;   AY_ADDR  $7F22  write the number of the register to use  (BDIR = BC1 = 1)
+000077r 2               ;   AY_DATA  $7F23  write a value to that register           (BDIR = 1, BC1 = 0)
+000077r 2               ;   BC2 and A8 tied high, A9 low; chip clock 2 MHz; the three channels mixed
+000077r 2               ;   together (mono).  The I/O ports aren't used: register 7 keeps them inputs.
+000077r 2               ;
+000077r 2               ; Only plain STA abs is used on the card's addresses: an indexed store
+000077r 2               ; (STA abs,X) can make an extra read cycle there first, and the card decodes
+000077r 2               ; the address without looking at R/W.
+000077r 2               ;
+000077r 2               ; Routines (A, X, Y may change unless it says):
+000077r 2               ;   ay_write    register X = A (A, X, Y kept)
+000077r 2               ;   ay_silence  all channels off, volumes 0, envelope stopped
+000077r 2               ;   ay_regs     registers 0-13 from the 14 bytes at (ay_ptr); register 13 is
+000077r 2               ;               only written when it isn't $FF (writing it restarts the
+000077r 2               ;               envelope)
+000077r 2               ;   ay_tone     channel X (0-2) to tone period A (low) / Y (high)
+000077r 2               ;   ay_note     channel X (0-2) to note A (0 = C1 .. 95 = B8, 45 = A4 440 Hz)
+000077r 2               ;   ay_volume   channel X (0-2) to volume A (0-15; 16 = the envelope)
+000077r 2               ;   ay_mixer    register 7 = A, the I/O port bits kept as inputs
+000077r 2               ;
+000077r 2               ; The registers:
+000077r 2               ;   0/1 2/3 4/5  tone period of A, B, C (12 bits: low, high 4 bits):
+000077r 2               ;                frequency = 2 MHz / (16 * period)
+000077r 2               ;   6            noise period (5 bits)
+000077r 2               ;   7            mixer: bits 0-2 tone A-C off, bits 3-5 noise A-C off
+000077r 2               ;                (0 = on), bits 6-7 I/O port directions (kept 0)
+000077r 2               ;   8 9 10       volume A, B, C (0-15), bit 4 = use the envelope
+000077r 2               ;   11/12        envelope period (16 bits): one ramp (16 steps) lasts
+000077r 2               ;                256 x period / 2 MHz
+000077r 2               ;   13           envelope shape (writing it restarts the envelope)
+000077r 2               ; ============================================================================
+000077r 2               
+000077r 2               AY_ADDR         = $7F22
+000077r 2               AY_DATA         = $7F23
+000077r 2               
+000077r 2               AY_TONE_A       = 0
+000077r 2               AY_NOISE        = 6
+000077r 2               AY_MIXER        = 7
+000077r 2               AY_VOL_A        = 8
+000077r 2               AY_ENV_LO       = 11
+000077r 2               AY_ENV_HI       = 12
+000077r 2               AY_ENV_SHAPE    = 13
+000077r 2               
+000077r 2               ; envelope shapes (register 13)
+000077r 2               ENV_DECAY       = $00           ; \______   fade out once
+000077r 2               ENV_ATTACK      = $0D           ; /~~~~~~   fade in once, then stay up
+000077r 2               ENV_SAW_DOWN    = $08           ; \\\\\\\   repeat
+000077r 2               ENV_SAW_UP      = $0C           ; ///////   repeat
+000077r 2               ENV_TRIANGLE    = $0E           ; /\/\/\/   repeat
+000077r 2               ENV_TRIANGLE2   = $0A           ; \/\/\/\   repeat
+000077r 2               ENV_DECAY_HOLD  = $0B           ; \~~~~~~   fade out, then jump up and stay
+000077r 2               ENV_ATTACK_ZERO = $0F           ; /______   fade in, then drop to 0
+000077r 2               
+000077r 2               ; register X = A.  Keeps A, X and Y.
+000077r 2               ay_write:
+000077r 2  8E 22 7F             stx     AY_ADDR
+00007Ar 2  8D 23 7F             sta     AY_DATA
+00007Dr 2  60                   rts
+00007Er 2               
+00007Er 2               ; everything quiet: tones and noise off, volumes 0, the envelope stopped
+00007Er 2               ay_silence:
+00007Er 2  48                   pha
+00007Fr 2  8A                   txa
+000080r 2  48                   pha
+000081r 2  A9 3F                lda     #$3F            ; mixer: all off (and the ports inputs)
+000083r 2  A2 07                ldx     #AY_MIXER
+000085r 2  20 rr rr             jsr     ay_write
+000088r 2  A9 00                lda     #0
+00008Ar 2  A2 08                ldx     #AY_VOL_A       ; volumes 0
+00008Cr 2  20 rr rr             jsr     ay_write
+00008Fr 2  E8                   inx
+000090r 2  20 rr rr             jsr     ay_write
+000093r 2  E8                   inx
+000094r 2  20 rr rr             jsr     ay_write
+000097r 2  A2 00                ldx     #0              ; tone and noise periods 0
+000099r 2  20 rr rr     @p:     jsr     ay_write
+00009Cr 2  E8                   inx
+00009Dr 2  E0 07                cpx     #AY_MIXER
+00009Fr 2  D0 F8                bne     @p
+0000A1r 2  A2 0B                ldx     #AY_ENV_LO      ; envelope period 0, shape 0 (fades to 0)
+0000A3r 2  20 rr rr             jsr     ay_write
+0000A6r 2  E8                   inx
+0000A7r 2  20 rr rr             jsr     ay_write
+0000AAr 2  E8                   inx
+0000ABr 2  20 rr rr             jsr     ay_write
+0000AEr 2  68                   pla
+0000AFr 2  AA                   tax
+0000B0r 2  68                   pla
+0000B1r 2  60                   rts
+0000B2r 2               
+0000B2r 2               ; registers 0-13 from (ay_ptr); register 13 only if it isn't $FF
+0000B2r 2               ay_regs:
+0000B2r 2  AD rr rr             lda     ay_ptr
+0000B5r 2  8D rr rr             sta     @ld+1
+0000B8r 2  AD rr rr             lda     ay_ptr+1
+0000BBr 2  8D rr rr             sta     @ld+2
+0000BEr 2  A2 00                ldx     #0
+0000C0r 2               @l:
+0000C0r 2  BD FF FF     @ld:    lda     $FFFF,x
+0000C3r 2  E0 0D                cpx     #AY_ENV_SHAPE
+0000C5r 2  D0 04                bne     @w
+0000C7r 2  C9 FF                cmp     #$FF
+0000C9r 2  F0 0B                beq     @r
+0000CBr 2  8E 22 7F     @w:     stx     AY_ADDR
+0000CEr 2  8D 23 7F             sta     AY_DATA
+0000D1r 2  E8                   inx
+0000D2r 2  E0 0E                cpx     #14
+0000D4r 2  D0 EA                bne     @l
+0000D6r 2  60           @r:     rts
+0000D7r 2               
+0000D7r 2               ; channel X (0-2): tone period A (low) / Y (high)
+0000D7r 2               ay_tone:
+0000D7r 2  48                   pha
+0000D8r 2  8A                   txa
+0000D9r 2  0A                   asl
+0000DAr 2  AA                   tax
+0000DBr 2  68                   pla
+0000DCr 2  20 rr rr             jsr     ay_write        ; the low byte
+0000DFr 2  E8                   inx
+0000E0r 2  98                   tya
+0000E1r 2  20 rr rr             jsr     ay_write        ; the high 4 bits
+0000E4r 2  8A                   txa
+0000E5r 2  4A                   lsr
+0000E6r 2  AA                   tax
+0000E7r 2  60                   rts
+0000E8r 2               
+0000E8r 2               ; channel X (0-2): note A (0 = C1 .. 95 = B8)
+0000E8r 2               ay_note:
+0000E8r 2  C9 60                cmp     #AY_NOTES
+0000EAr 2  90 02                bcc     @ok
+0000ECr 2  A9 5F                lda     #AY_NOTES - 1
+0000EEr 2  A8           @ok:    tay
+0000EFr 2  B9 rr rr             lda     note_hi,y
+0000F2r 2  48                   pha
+0000F3r 2  B9 rr rr             lda     note_lo,y
+0000F6r 2  A8                   tay
+0000F7r 2  68                   pla                     ; (A = high, Y = low: swapped for ay_tone)
+0000F8r 2  8D rr rr             sta     ay_tmp
+0000FBr 2  98                   tya
+0000FCr 2  AC rr rr             ldy     ay_tmp
+0000FFr 2  4C rr rr             jmp     ay_tone
+000102r 2               
+000102r 2               ; channel X (0-2): volume A (0-15, 16 = follow the envelope)
+000102r 2               ay_volume:
+000102r 2  48                   pha
+000103r 2  8A                   txa
+000104r 2  18                   clc
+000105r 2  69 08                adc     #AY_VOL_A
+000107r 2  AA                   tax
+000108r 2  68                   pla
+000109r 2  20 rr rr             jsr     ay_write
+00010Cr 2  48                   pha
+00010Dr 2  8A                   txa
+00010Er 2  38                   sec
+00010Fr 2  E9 08                sbc     #AY_VOL_A
+000111r 2  AA                   tax
+000112r 2  68                   pla
+000113r 2  60                   rts
+000114r 2               
+000114r 2               ; mixer (register 7) = A: the port direction bits are always kept 0 (inputs)
+000114r 2               ay_mixer:
+000114r 2  29 3F                and     #$3F
+000116r 2  A2 07                ldx     #AY_MIXER
+000118r 2  4C rr rr             jmp     ay_write
+00011Br 2               
+00011Br 2                       .include "ay_notes.inc"
+00011Br 3               ; generated by tools/gen_notes.py: tone periods for a 2000000 Hz chip clock
+00011Br 3               ; note n = octave * 12 + semitone (C1 = 0 ... B8 = 95); A4 (n = 45) is 440 Hz
+00011Br 3               AY_NOTES = 96
+00011Br 3               note_lo:
+00011Br 3  EE 18 4D 8E          .byte   $EE, $18, $4D, $8E, $DA, $2F, $8F, $F7, $68, $E1, $61, $E9   ; octave 1
+00011Fr 3  DA 2F 8F F7  
+000123r 3  68 E1 61 E9  
+000127r 3  77 0C A7 47          .byte   $77, $0C, $A7, $47, $ED, $98, $47, $FC, $B4, $70, $31, $F4   ; octave 2
+00012Br 3  ED 98 47 FC  
+00012Fr 3  B4 70 31 F4  
+000133r 3  BC 86 53 24          .byte   $BC, $86, $53, $24, $F6, $CC, $A4, $7E, $5A, $38, $18, $FA   ; octave 3
+000137r 3  F6 CC A4 7E  
+00013Br 3  5A 38 18 FA  
+00013Fr 3  DE C3 AA 92          .byte   $DE, $C3, $AA, $92, $7B, $66, $52, $3F, $2D, $1C, $0C, $FD   ; octave 4
+000143r 3  7B 66 52 3F  
+000147r 3  2D 1C 0C FD  
+00014Br 3  EF E1 D5 C9          .byte   $EF, $E1, $D5, $C9, $BE, $B3, $A9, $9F, $96, $8E, $86, $7F   ; octave 5
+00014Fr 3  BE B3 A9 9F  
+000153r 3  96 8E 86 7F  
+000157r 3  77 71 6A 64          .byte   $77, $71, $6A, $64, $5F, $59, $54, $50, $4B, $47, $43, $3F   ; octave 6
+00015Br 3  5F 59 54 50  
+00015Fr 3  4B 47 43 3F  
+000163r 3  3C 38 35 32          .byte   $3C, $38, $35, $32, $2F, $2D, $2A, $28, $26, $24, $22, $20   ; octave 7
+000167r 3  2F 2D 2A 28  
+00016Br 3  26 24 22 20  
+00016Fr 3  1E 1C 1B 19          .byte   $1E, $1C, $1B, $19, $18, $16, $15, $14, $13, $12, $11, $10   ; octave 8
+000173r 3  18 16 15 14  
+000177r 3  13 12 11 10  
+00017Br 3               note_hi:
+00017Br 3  0E 0E 0D 0C          .byte   $0E, $0E, $0D, $0C, $0B, $0B, $0A, $09, $09, $08, $08, $07
+00017Fr 3  0B 0B 0A 09  
+000183r 3  09 08 08 07  
+000187r 3  07 07 06 06          .byte   $07, $07, $06, $06, $05, $05, $05, $04, $04, $04, $04, $03
+00018Br 3  05 05 05 04  
+00018Fr 3  04 04 04 03  
+000193r 3  03 03 03 03          .byte   $03, $03, $03, $03, $02, $02, $02, $02, $02, $02, $02, $01
+000197r 3  02 02 02 02  
+00019Br 3  02 02 02 01  
+00019Fr 3  01 01 01 01          .byte   $01, $01, $01, $01, $01, $01, $01, $01, $01, $01, $01, $00
+0001A3r 3  01 01 01 01  
+0001A7r 3  01 01 01 00  
+0001ABr 3  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+0001AFr 3  00 00 00 00  
+0001B3r 3  00 00 00 00  
+0001B7r 3  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+0001BBr 3  00 00 00 00  
+0001BFr 3  00 00 00 00  
+0001C3r 3  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+0001C7r 3  00 00 00 00  
+0001CBr 3  00 00 00 00  
+0001CFr 3  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+0001D3r 3  00 00 00 00  
+0001D7r 3  00 00 00 00  
+0001DBr 3               
+0001DBr 2               
+0001DBr 2                       .segment "BSS"
+000000r 2  xx xx        ay_ptr:     .res 2              ; ay_regs: where the 14 register values are
+000002r 2  xx           ay_tmp:     .res 1
+000003r 2                       .segment "CODE"
+0001DBr 2               
+0001DBr 1                       .include "synth.s"
+0001DBr 2               ; ============================================================================
+0001DBr 2               ; synth.s - the sounds of PIANO and SEQ: 8 sounds and a drum kit on the three
+0001DBr 2               ; channels, each note with its own shape (attack, decay to a sustain level, a
+0001DBr 2               ; time held, release), vibrato, octave and chord arpeggios, falling pitch,
+0001DBr 2               ; noise, and the envelope as a saw wave (BUZZ).
+0001DBr 2               ;
+0001DBr 2               ;   syn_init    all off
+0001DBr 2               ;   syn_start   start a note: sound k_ins, note k_note, on channel X
+0001DBr 2               ;   step_all    every 1/50 s: every channel a frame on, the registers written
+0001DBr 2               ;   all_off     all the notes off now
+0001DBr 2               ;   chan_out    channel X's registers from its state
+0001DBr 2               ;   hold,x      frames a note stays in its sustain (beyond its own time)
+0001DBr 2               ;   gate_mode   1: a note sustains only while hold,x lasts (SEQ's steps)
+0001DBr 2               ;
+0001DBr 2               ; Needs ay.s (ay_write, ay_tone, ay_volume, ay_mixer, the note table).
+0001DBr 2               ; ============================================================================
+0001DBr 2               
+0001DBr 2               ; the sounds: 16 bytes each
+0001DBr 2               I_ATK           = 0             ; attack: added to the volume a frame (240 = at once)
+0001DBr 2               I_DEC           = 1             ; decay: taken off a frame, down to
+0001DBr 2               I_SUS           = 2             ;  the sustain level (volume x 16, 0-240)
+0001DBr 2               I_SUST          = 3             ; frames it sustains at least (more while held)
+0001DBr 2               I_REL           = 4             ; release: taken off a frame
+0001DBr 2               I_FLAGS         = 5
+0001DBr 2               I_VIB           = 6             ; vibrato: the period / 2^n either way
+0001DBr 2               I_VDEL          = 7             ;  after this many frames
+0001DBr 2               I_SWEEP         = 8             ; the pitch falls: period += period / 2^n a frame
+0001DBr 2               I_NOISE         = 9             ; the noise period to set (0: not)
+0001DBr 2               I_NOTE          = 10            ; a fixed note ($FF: the key's)
+0001DBr 2               I_NFR           = 11            ; noise only for this many frames (0: all along)
+0001DBr 2               I_REP           = 12            ; a key again within this many frames: a repeat
+0001DBr 2               
+0001DBr 2               F_NOISE         = 1
+0001DBr 2               F_NOTONE        = 2
+0001DBr 2               F_BUZZ          = 4             ; the envelope as a saw wave at the note
+0001DBr 2               F_OCT           = 8             ; the octave above every other frame
+0001DBr 2               F_CHORD         = 16            ; a major chord, a note a frame
+0001DBr 2               F_SWEEP         = 32
+0001DBr 2               F_DRUMS         = 64            ; the key picks a drum
+0001DBr 2               F_VIB           = 128
+0001DBr 2               
+0001DBr 2               N_SOUNDS        = 8             ; the ones to choose from
+0001DBr 2               DRUM_KIT        = 8             ; the drums after them
+0001DBr 2               HOLD            = 8             ; frames a key repeat holds a note for
+0001DBr 2               
+0001DBr 2               ST_OFF          = 0
+0001DBr 2               ST_ATK          = 1
+0001DBr 2               ST_DEC          = 2
+0001DBr 2               ST_SUS          = 3
+0001DBr 2               ST_REL          = 4
+0001DBr 2               
+0001DBr 2               ; all off: the channels silent, tones on, noise off
+0001DBr 2               syn_init:
+0001DBr 2  A9 38                lda     #$38
+0001DDr 2  8D rr rr             sta     mixer
+0001E0r 2  20 rr rr             jsr     ay_mixer
+0001E3r 2  A2 02                ldx     #2
+0001E5r 2  A9 00        @c:     lda     #ST_OFF
+0001E7r 2  9D rr rr             sta     st,x
+0001EAr 2  9D rr rr             sta     vol,x
+0001EDr 2  9D rr rr             sta     hold,x
+0001F0r 2  CA                   dex
+0001F1r 2  10 F2                bpl     @c
+0001F3r 2  A9 00                lda     #0
+0001F5r 2  8D rr rr             sta     frame
+0001F8r 2  8D rr rr             sta     arp3
+0001FBr 2  8D rr rr             sta     gate_mode
+0001FEr 2  60                   rts
+0001FFr 2               
+0001FFr 2               ; start a note: sound k_ins, note k_note (or the sound's own) on channel X;
+0001FFr 2               ; its registers are written at once
+0001FFr 2               syn_start:
+0001FFr 2  AD rr rr             lda     k_ins
+000202r 2  9D rr rr             sta     ins,x
+000205r 2  20 rr rr             jsr     ins_ptr
+000208r 2  A0 0A                ldy     #I_NOTE
+00020Ar 2  B9 rr rr             lda     cur_ins,y
+00020Dr 2  C9 FF                cmp     #$FF
+00020Fr 2  D0 03                bne     @fix
+000211r 2  AD rr rr             lda     k_note
+000214r 2  9D rr rr     @fix:   sta     note,x
+000217r 2  A8                   tay
+000218r 2  B9 rr rr             lda     note_lo,y       ; the period, for the sweeps
+00021Br 2  9D rr rr             sta     per_lo,x
+00021Er 2  B9 rr rr             lda     note_hi,y
+000221r 2  9D rr rr             sta     per_hi,x
+000224r 2  A9 00                lda     #0
+000226r 2  9D rr rr             sta     t,x
+000229r 2  9D rr rr             sta     age,x
+00022Cr 2  9D rr rr             sta     last,x
+00022Fr 2  9D rr rr             sta     hold,x
+000232r 2  A9 01                lda     #ST_ATK
+000234r 2  9D rr rr             sta     st,x
+000237r 2  A0 00                ldy     #I_ATK          ; at once: straight to the decay
+000239r 2  B9 rr rr             lda     cur_ins,y
+00023Cr 2  C9 F0                cmp     #240
+00023Er 2  90 0A                bcc     @noise
+000240r 2  A9 F0                lda     #240
+000242r 2  9D rr rr             sta     vol,x
+000245r 2  A9 02                lda     #ST_DEC
+000247r 2  9D rr rr             sta     st,x
+00024Ar 2  A0 09        @noise: ldy     #I_NOISE
+00024Cr 2  B9 rr rr             lda     cur_ins,y
+00024Fr 2  F0 0B                beq     @buzz
+000251r 2  8E rr rr             stx     s_t1
+000254r 2  A2 06                ldx     #AY_NOISE
+000256r 2  20 rr rr             jsr     ay_write
+000259r 2  AE rr rr             ldx     s_t1
+00025Cr 2  A0 05        @buzz:  ldy     #I_FLAGS
+00025Er 2  B9 rr rr             lda     cur_ins,y
+000261r 2  29 04                and     #F_BUZZ
+000263r 2  F0 38                beq     @out
+000265r 2  8E rr rr             stx     s_t1             ; the envelope period: the tone period / 16
+000268r 2  BD rr rr             lda     per_lo,x
+00026Br 2  18                   clc
+00026Cr 2  69 08                adc     #8
+00026Er 2  8D rr rr             sta     s_t2
+000271r 2  BD rr rr             lda     per_hi,x
+000274r 2  69 00                adc     #0
+000276r 2  4A                   lsr
+000277r 2  6E rr rr             ror     s_t2
+00027Ar 2  4A                   lsr
+00027Br 2  6E rr rr             ror     s_t2
+00027Er 2  4A                   lsr
+00027Fr 2  6E rr rr             ror     s_t2
+000282r 2  4A                   lsr
+000283r 2  6E rr rr             ror     s_t2
+000286r 2  A2 0C                ldx     #AY_ENV_HI
+000288r 2  20 rr rr             jsr     ay_write
+00028Br 2  AD rr rr             lda     s_t2
+00028Er 2  A2 0B                ldx     #AY_ENV_LO
+000290r 2  20 rr rr             jsr     ay_write
+000293r 2  A9 08                lda     #ENV_SAW_DOWN   ; (starts it)
+000295r 2  A2 0D                ldx     #AY_ENV_SHAPE
+000297r 2  20 rr rr             jsr     ay_write
+00029Ar 2  AE rr rr             ldx     s_t1
+00029Dr 2  4C rr rr     @out:   jmp     chan_out        ; on the chip now
+0002A0r 2               
+0002A0r 2               ; cur_ins = the sound A's 16 bytes (keeps X)
+0002A0r 2               ins_ptr:
+0002A0r 2  0A                   asl
+0002A1r 2  0A                   asl
+0002A2r 2  0A                   asl
+0002A3r 2  0A                   asl
+0002A4r 2  A8                   tay
+0002A5r 2  8E rr rr             stx     @x
+0002A8r 2  A2 00                ldx     #0
+0002AAr 2  B9 rr rr     @c:     lda     ins_tab,y
+0002ADr 2  9D rr rr             sta     cur_ins,x
+0002B0r 2  C8                   iny
+0002B1r 2  E8                   inx
+0002B2r 2  E0 10                cpx     #16
+0002B4r 2  D0 F4                bne     @c
+0002B6r 2  AE rr rr             ldx     @x
+0002B9r 2  60                   rts
+0002BAr 2  00           @x:     .byte   0
+0002BBr 2               
+0002BBr 2               ; A = A mod 12
+0002BBr 2  C9 0C        mod12:  cmp     #12
+0002BDr 2  90 04                bcc     @r
+0002BFr 2  E9 0C                sbc     #12
+0002C1r 2  B0 F8                bcs     mod12
+0002C3r 2  60           @r:     rts
+0002C4r 2               
+0002C4r 2               ; all the notes off at once
+0002C4r 2               all_off:
+0002C4r 2  A2 02                ldx     #2
+0002C6r 2  A9 00        @c:     lda     #ST_OFF
+0002C8r 2  9D rr rr             sta     st,x
+0002CBr 2  9D rr rr             sta     vol,x
+0002CEr 2  20 rr rr             jsr     chan_out
+0002D1r 2  CA                   dex
+0002D2r 2  10 F2                bpl     @c
+0002D4r 2  60                   rts
+0002D5r 2               
+0002D5r 2               
+0002D5r 2               ; ---- the sounds, a frame on ------------------------------------------------------------
+0002D5r 2               step_all:
+0002D5r 2  EE rr rr             inc     frame
+0002D8r 2  EE rr rr             inc     arp3            ; (0 1 2: the chord's notes)
+0002DBr 2  AD rr rr             lda     arp3
+0002DEr 2  C9 03                cmp     #3
+0002E0r 2  90 05                bcc     @a
+0002E2r 2  A9 00                lda     #0
+0002E4r 2  8D rr rr             sta     arp3
+0002E7r 2  A2 02        @a:     ldx     #2
+0002E9r 2  20 rr rr     @c:     jsr     chan_step
+0002ECr 2  20 rr rr             jsr     chan_out
+0002EFr 2  CA                   dex
+0002F0r 2  10 F7                bpl     @c
+0002F2r 2  60                   rts
+0002F3r 2               
+0002F3r 2               ; channel X: its volume a frame on (attack, decay, sustain, release)
+0002F3r 2               chan_step:
+0002F3r 2  BD rr rr             lda     age,x           ; (the counts, kept at 255)
+0002F6r 2  C9 FF                cmp     #255
+0002F8r 2  F0 03                beq     :+
+0002FAr 2  FE rr rr             inc     age,x
+0002FDr 2  BD rr rr     :       lda     last,x
+000300r 2  C9 FF                cmp     #255
+000302r 2  F0 03                beq     :+
+000304r 2  FE rr rr             inc     last,x
+000307r 2  BD rr rr     :       lda     hold,x
+00030Ar 2  F0 03                beq     :+
+00030Cr 2  DE rr rr             dec     hold,x
+00030Fr 2  BD rr rr     :       lda     st,x
+000312r 2  D0 01                bne     :+
+000314r 2  60                   rts
+000315r 2  BD rr rr     :       lda     ins,x
+000318r 2  20 rr rr             jsr     ins_ptr
+00031Br 2  BD rr rr             lda     st,x
+00031Er 2  C9 01                cmp     #ST_ATK
+000320r 2  D0 1E                bne     @dec
+000322r 2  A0 00                ldy     #I_ATK
+000324r 2  BD rr rr             lda     vol,x
+000327r 2  18                   clc
+000328r 2  79 rr rr             adc     cur_ins,y
+00032Br 2  B0 04                bcs     @top
+00032Dr 2  C9 F0                cmp     #240
+00032Fr 2  90 0B                bcc     @sv
+000331r 2  A9 F0        @top:   lda     #240
+000333r 2  9D rr rr             sta     vol,x
+000336r 2  A9 02                lda     #ST_DEC
+000338r 2  9D rr rr             sta     st,x
+00033Br 2  60                   rts
+00033Cr 2  9D rr rr     @sv:    sta     vol,x
+00033Fr 2  60                   rts
+000340r 2  C9 02        @dec:   cmp     #ST_DEC
+000342r 2  D0 35                bne     @sus
+000344r 2  A0 01                ldy     #I_DEC
+000346r 2  B9 rr rr             lda     cur_ins,y
+000349r 2  F0 19                beq     @tosus          ; (no decay: straight to the sustain level)
+00034Br 2  8D rr rr             sta     s_t1
+00034Er 2  BD rr rr             lda     vol,x
+000351r 2  38                   sec
+000352r 2  ED rr rr             sbc     s_t1
+000355r 2  90 0D                bcc     @tosus
+000357r 2  A0 02                ldy     #I_SUS
+000359r 2  D9 rr rr             cmp     cur_ins,y
+00035Cr 2  90 06                bcc     @tosus
+00035Er 2  F0 04                beq     @tosus
+000360r 2  9D rr rr             sta     vol,x
+000363r 2  60                   rts
+000364r 2  A0 02        @tosus: ldy     #I_SUS
+000366r 2  B9 rr rr             lda     cur_ins,y
+000369r 2  9D rr rr             sta     vol,x
+00036Cr 2  F0 44                beq     @off            ; (sustain 0: the note is over)
+00036Er 2  A9 03                lda     #ST_SUS
+000370r 2  9D rr rr             sta     st,x
+000373r 2  A9 00                lda     #0
+000375r 2  9D rr rr             sta     t,x
+000378r 2  60                   rts
+000379r 2  C9 03        @sus:   cmp     #ST_SUS
+00037Br 2  D0 24                bne     @rel
+00037Dr 2  BD rr rr             lda     t,x
+000380r 2  C9 FF                cmp     #255
+000382r 2  F0 03                beq     :+
+000384r 2  FE rr rr             inc     t,x
+000387r 2  BD rr rr     :       lda     hold,x          ; held: stay
+00038Ar 2  D0 14                bne     @r
+00038Cr 2  AD rr rr             lda     gate_mode       ; (SEQ: only as long as held)
+00038Fr 2  D0 0A                bne     @torel
+000391r 2  A0 03                ldy     #I_SUST
+000393r 2  BD rr rr             lda     t,x
+000396r 2  D9 rr rr             cmp     cur_ins,y
+000399r 2  90 05                bcc     @r
+00039Br 2  A9 04        @torel: lda     #ST_REL
+00039Dr 2  9D rr rr             sta     st,x
+0003A0r 2  60           @r:     rts
+0003A1r 2  A0 04        @rel:   ldy     #I_REL
+0003A3r 2  BD rr rr             lda     vol,x
+0003A6r 2  38                   sec
+0003A7r 2  F9 rr rr             sbc     cur_ins,y
+0003AAr 2  90 06                bcc     @off
+0003ACr 2  F0 04                beq     @off
+0003AEr 2  9D rr rr             sta     vol,x
+0003B1r 2  60                   rts
+0003B2r 2  A9 00        @off:   lda     #ST_OFF
+0003B4r 2  9D rr rr             sta     st,x
+0003B7r 2  A9 00                lda     #0
+0003B9r 2  9D rr rr             sta     vol,x
+0003BCr 2  60                   rts
+0003BDr 2               
+0003BDr 2               ; channel X's registers from how it is now: tone period, volume, the mixer
+0003BDr 2               chan_out:
+0003BDr 2  8E rr rr             stx     cx
+0003C0r 2  BD rr rr             lda     st,x
+0003C3r 2  D0 08                bne     @on
+0003C5r 2  A9 00                lda     #0              ; off: volume 0
+0003C7r 2  20 rr rr             jsr     ay_volume
+0003CAr 2  4C rr rr             jmp     @mix
+0003CDr 2  BD rr rr     @on:    lda     ins,x
+0003D0r 2  20 rr rr             jsr     ins_ptr
+0003D3r 2  A0 05                ldy     #I_FLAGS
+0003D5r 2  B9 rr rr             lda     cur_ins,y
+0003D8r 2  8D rr rr             sta     fl
+0003DBr 2  29 20                and     #F_SWEEP        ; the pitch falling: per += per >> n
+0003DDr 2  F0 45                beq     @pitch
+0003DFr 2  A0 08                ldy     #I_SWEEP
+0003E1r 2  B9 rr rr             lda     cur_ins,y
+0003E4r 2  A8                   tay
+0003E5r 2  BD rr rr             lda     per_lo,x
+0003E8r 2  8D rr rr             sta     s_t1
+0003EBr 2  BD rr rr             lda     per_hi,x
+0003EEr 2  8D rr rr             sta     s_t2
+0003F1r 2  4E rr rr     @sh:    lsr     s_t2
+0003F4r 2  6E rr rr             ror     s_t1
+0003F7r 2  88                   dey
+0003F8r 2  D0 F7                bne     @sh
+0003FAr 2  BD rr rr             lda     per_lo,x
+0003FDr 2  18                   clc
+0003FEr 2  6D rr rr             adc     s_t1
+000401r 2  9D rr rr             sta     per_lo,x
+000404r 2  8D rr rr             sta     p_lo
+000407r 2  BD rr rr             lda     per_hi,x
+00040Ar 2  6D rr rr             adc     s_t2
+00040Dr 2  C9 10                cmp     #$10            ; (12 bits at most)
+00040Fr 2  90 0A                bcc     @sw
+000411r 2  A9 FF                lda     #$FF
+000413r 2  9D rr rr             sta     per_lo,x
+000416r 2  8D rr rr             sta     p_lo
+000419r 2  A9 0F                lda     #$0F
+00041Br 2  9D rr rr     @sw:    sta     per_hi,x
+00041Er 2  8D rr rr             sta     p_hi
+000421r 2  4C rr rr             jmp     @tone
+000424r 2  BD rr rr     @pitch: lda     note,x          ; the note, or a note of the chord
+000427r 2  AC rr rr             ldy     fl
+00042Ar 2  C0 10                cpy     #F_CHORD
+00042Cr 2  D0 0D                bne     @n
+00042Er 2  AC rr rr             ldy     arp3
+000431r 2  18                   clc
+000432r 2  79 rr rr             adc     chord,y
+000435r 2  C9 60                cmp     #AY_NOTES
+000437r 2  90 02                bcc     @n
+000439r 2  A9 5F                lda     #AY_NOTES - 1
+00043Br 2  A8           @n:     tay
+00043Cr 2  B9 rr rr             lda     note_lo,y
+00043Fr 2  8D rr rr             sta     p_lo
+000442r 2  B9 rr rr             lda     note_hi,y
+000445r 2  8D rr rr             sta     p_hi
+000448r 2  AD rr rr             lda     fl              ; the octave above, every other frame
+00044Br 2  29 08                and     #F_OCT
+00044Dr 2  F0 0C                beq     @vib
+00044Fr 2  AD rr rr             lda     frame
+000452r 2  4A                   lsr
+000453r 2  90 06                bcc     @vib
+000455r 2  4E rr rr             lsr     p_hi
+000458r 2  6E rr rr             ror     p_lo
+00045Br 2  AD rr rr     @vib:   lda     fl              ; vibrato: + d, 0, - d, 0 ...
+00045Er 2  10 5B                bpl     @tone
+000460r 2  A0 07                ldy     #I_VDEL
+000462r 2  BD rr rr             lda     age,x
+000465r 2  D9 rr rr             cmp     cur_ins,y
+000468r 2  90 51                bcc     @tone
+00046Ar 2  A0 06                ldy     #I_VIB
+00046Cr 2  B9 rr rr             lda     cur_ins,y
+00046Fr 2  A8                   tay
+000470r 2  AD rr rr             lda     p_lo
+000473r 2  8D rr rr             sta     s_t1
+000476r 2  AD rr rr             lda     p_hi
+000479r 2  8D rr rr             sta     s_t2
+00047Cr 2  4E rr rr     @vs:    lsr     s_t2
+00047Fr 2  6E rr rr             ror     s_t1
+000482r 2  88                   dey
+000483r 2  D0 F7                bne     @vs
+000485r 2  AD rr rr             lda     frame
+000488r 2  29 06                and     #6
+00048Ar 2  C9 02                cmp     #2
+00048Cr 2  F0 1A                beq     @vup
+00048Er 2  C9 06                cmp     #6
+000490r 2  D0 29                bne     @tone
+000492r 2  AD rr rr             lda     p_lo            ; down: - d
+000495r 2  38                   sec
+000496r 2  ED rr rr             sbc     s_t1
+000499r 2  8D rr rr             sta     p_lo
+00049Cr 2  AD rr rr             lda     p_hi
+00049Fr 2  ED rr rr             sbc     s_t2
+0004A2r 2  8D rr rr             sta     p_hi
+0004A5r 2  4C rr rr             jmp     @tone
+0004A8r 2  AD rr rr     @vup:   lda     p_lo
+0004ABr 2  18                   clc
+0004ACr 2  6D rr rr             adc     s_t1
+0004AFr 2  8D rr rr             sta     p_lo
+0004B2r 2  AD rr rr             lda     p_hi
+0004B5r 2  6D rr rr             adc     s_t2
+0004B8r 2  8D rr rr             sta     p_hi
+0004BBr 2  AD rr rr     @tone:  lda     p_lo
+0004BEr 2  AC rr rr             ldy     p_hi
+0004C1r 2  AE rr rr             ldx     cx
+0004C4r 2  20 rr rr             jsr     ay_tone
+0004C7r 2  AD rr rr             lda     fl              ; the volume (BUZZ: the envelope)
+0004CAr 2  29 04                and     #F_BUZZ
+0004CCr 2  F0 04                beq     @v
+0004CEr 2  A9 10                lda     #16
+0004D0r 2  D0 07                bne     @vw
+0004D2r 2  BD rr rr     @v:     lda     vol,x
+0004D5r 2  4A                   lsr
+0004D6r 2  4A                   lsr
+0004D7r 2  4A                   lsr
+0004D8r 2  4A                   lsr
+0004D9r 2  20 rr rr     @vw:    jsr     ay_volume
+0004DCr 2  AE rr rr     @mix:   ldx     cx              ; the mixer: this channel's bits
+0004DFr 2  AD rr rr             lda     mixer
+0004E2r 2  1D rr rr             ora     tone_bit,x      ; (off to start with)
+0004E5r 2  1D rr rr             ora     noise_bit,x
+0004E8r 2  8D rr rr             sta     mixer
+0004EBr 2  BD rr rr             lda     st,x
+0004EEr 2  F0 2E                beq     @mw             ; (off: both off)
+0004F0r 2  AD rr rr             lda     fl
+0004F3r 2  29 02                and     #F_NOTONE
+0004F5r 2  D0 09                bne     @nz
+0004F7r 2  AD rr rr             lda     mixer
+0004FAr 2  3D rr rr             and     tone_off,x
+0004FDr 2  8D rr rr             sta     mixer
+000500r 2  AD rr rr     @nz:    lda     fl
+000503r 2  29 01                and     #F_NOISE
+000505r 2  F0 17                beq     @mw
+000507r 2  A0 0B                ldy     #I_NFR
+000509r 2  B9 rr rr             lda     cur_ins,y
+00050Cr 2  F0 07                beq     @non
+00050Er 2  DD rr rr             cmp     age,x
+000511r 2  90 0B                bcc     @mw
+000513r 2  F0 09                beq     @mw
+000515r 2  AD rr rr     @non:   lda     mixer
+000518r 2  3D rr rr             and     noise_off,x
+00051Br 2  8D rr rr             sta     mixer
+00051Er 2  AD rr rr     @mw:    lda     mixer
+000521r 2  20 rr rr             jsr     ay_mixer
+000524r 2  AE rr rr             ldx     cx
+000527r 2  60                   rts
+000528r 2               
+000528r 2  01 02 04     tone_bit:   .byte   1, 2, 4
+00052Br 2  08 10 20     noise_bit:  .byte   8, 16, 32
+00052Er 2  FE FD FB     tone_off:   .byte   $FE, $FD, $FB
+000531r 2  F7 EF DF     noise_off:  .byte   $F7, $EF, $DF
+000534r 2  00 04 07     chord:      .byte   0, 4, 7
+000537r 2               
+000537r 2               ; the sounds' names (8 characters each) and the sounds
+000537r 2  50 49 41 4E  names:      .byte   "PIANO   HARP    ORGAN   STRINGS CHIP    CHORD   BUZZ    DRUMS   "
+00053Br 2  4F 20 20 20  
+00053Fr 2  48 41 52 50  
+000577r 2               
+000577r 2               ; the sounds: attack, decay, sustain, sustain frames, release, flags,
+000577r 2               ; vibrato shift and delay, sweep shift, noise period, fixed note, noise frames,
+000577r 2               ; repeat window, (3 spare)
+000577r 2               ins_tab:
+000577r 2  F0 06 60 00          .byte   240,  6,  96,  0,   2, 0,                  0,  0, 0, 0, $FF, 0,  6, 0,0,0  ; PIANO
+00057Br 2  02 00 00 00  
+00057Fr 2  00 00 FF 00  
+000587r 2  F0 0C 28 00          .byte   240, 12,  40,  0,   3, 0,                  0,  0, 0, 0, $FF, 0,  6, 0,0,0  ; HARP
+00058Br 2  03 00 00 00  
+00058Fr 2  00 00 FF 00  
+000597r 2  3C 00 D0 1E          .byte    60,  0, 208, 30,   8, 0,                  0,  0, 0, 0, $FF, 0, 40, 0,0,0  ; ORGAN
+00059Br 2  08 00 00 00  
+00059Fr 2  00 00 FF 00  
+0005A7r 2  0C 00 C0 28          .byte    12,  0, 192, 40,   4, F_VIB,              7, 15, 0, 0, $FF, 0, 40, 0,0,0  ; STRINGS
+0005ABr 2  04 80 07 0F  
+0005AFr 2  00 00 FF 00  
+0005B7r 2  F0 04 A0 14          .byte   240,  4, 160, 20,   4, F_OCT,              0,  0, 0, 0, $FF, 0,  6, 0,0,0  ; CHIP
+0005BBr 2  04 08 00 00  
+0005BFr 2  00 00 FF 00  
+0005C7r 2  F0 04 A0 14          .byte   240,  4, 160, 20,   4, F_CHORD,            0,  0, 0, 0, $FF, 0,  6, 0,0,0  ; CHORD
+0005CBr 2  04 10 00 00  
+0005CFr 2  00 00 FF 00  
+0005D7r 2  F0 00 F0 19          .byte   240,  0, 240, 25, 240, F_BUZZ|F_NOTONE,    0,  0, 0, 0, $FF, 0, 40, 0,0,0  ; BUZZ
+0005DBr 2  F0 06 00 00  
+0005DFr 2  00 00 FF 00  
+0005E7r 2  F0 28 00 00          .byte   240, 40,   0,  0,   0, F_DRUMS,            0,  0, 0, 0, $FF, 0,  6, 0,0,0  ; DRUMS (the kit:)
+0005EBr 2  00 40 00 00  
+0005EFr 2  00 00 FF 00  
+0005F7r 2  F0 18 00 00          .byte   240, 24,   0,  0,   0, F_SWEEP,            0,  0, 2, 0,  31, 0,  6, 0,0,0  ; kick
+0005FBr 2  00 20 00 00  
+0005FFr 2  02 00 1F 00  
+000607r 2  F0 0E 00 00          .byte   240, 14,   0,  0,   0, F_NOISE|F_SWEEP,    0,  0, 4, 6,  43, 0,  6, 0,0,0  ; snare
+00060Br 2  00 21 00 00  
+00060Fr 2  04 06 2B 00  
+000617r 2  F0 28 00 00          .byte   240, 40,   0,  0,   0, F_NOISE|F_NOTONE,   0,  0, 0, 1, $FF, 0,  6, 0,0,0  ; closed hi-hat
+00061Br 2  00 03 00 00  
+00061Fr 2  00 01 FF 00  
+000627r 2  F0 0A 00 00          .byte   240, 10,   0,  0,   0, F_NOISE|F_NOTONE,   0,  0, 0, 1, $FF, 0,  6, 0,0,0  ; open hi-hat
+00062Br 2  00 03 00 00  
+00062Fr 2  00 01 FF 00  
+000637r 2  F0 0C 00 00          .byte   240, 12,   0,  0,   0, F_SWEEP,            0,  0, 4, 0, $FF, 0,  6, 0,0,0  ; tom
+00063Br 2  00 20 00 00  
+00063Fr 2  04 00 FF 00  
+000647r 2  F0 05 00 00          .byte   240,  5,   0,  0,   0, F_NOISE|F_NOTONE,   0,  0, 0, 3, $FF, 0,  6, 0,0,0  ; crash
+00064Br 2  00 03 00 00  
+00064Fr 2  00 03 FF 00  
+000657r 2               
+000657r 2               
+000657r 2                       .segment "BSS"
+000003r 2  xx           frame:      .res 1
+000004r 2  xx           arp3:       .res 1
+000005r 2  xx           mixer:      .res 1
+000006r 2  xx           cx:         .res 1
+000007r 2  xx           fl:         .res 1
+000008r 2  xx           p_lo:       .res 1
+000009r 2  xx           p_hi:       .res 1
+00000Ar 2  xx           k_note:     .res 1
+00000Br 2  xx           k_ins:      .res 1
+00000Cr 2  xx xx xx xx  cur_ins:    .res 16             ; the sound in use (ins_ptr)
+000010r 2  xx xx xx xx  
+000014r 2  xx xx xx xx  
+00001Cr 2  xx xx xx     st:         .res 3              ; each channel: the stage,
+00001Fr 2  xx xx xx     note:       .res 3              ;  the note,
+000022r 2  xx xx xx     ins:        .res 3              ;  the sound
+000025r 2  xx xx xx     vol:        .res 3              ;  the volume x 16
+000028r 2  xx xx xx     t:          .res 3              ;  frames in the sustain
+00002Br 2  xx xx xx     age:        .res 3              ;  frames since it started
+00002Er 2  xx xx xx     last:       .res 3              ;  frames since its key was last pressed
+000031r 2  xx xx xx     hold:       .res 3              ;  frames still held by key repeats
+000034r 2  xx xx xx     per_lo:     .res 3              ;  the period (the sweeps)
+000037r 2  xx xx xx     per_hi:     .res 3
+00003Ar 2  xx           s_t1:       .res 1
+00003Br 2  xx           gate_mode:  .res 1
+00003Cr 2  xx           s_t2:       .res 1
+00003Dr 2                       .segment "CODE"
+000657r 2               
+000657r 1               
+000657r 1               ; ---- start ---------------------------------------------------------------------------
+000657r 1  D8           start:  cld
+000658r 1  A2 FF                ldx     #$FF
+00065Ar 1  9A                   txs
+00065Br 1  20 rr rr             jsr     ay_silence
+00065Er 1  20 rr rr             jsr     syn_init
+000661r 1  AD 0B 7F             lda     VIA_ACR         ; timer 2: one shot, its interrupt off
+000664r 1  29 DF                and     #$DF
+000666r 1  8D 0B 7F             sta     VIA_ACR
+000669r 1  A9 20                lda     #$20
+00066Br 1  8D 0E 7F             sta     VIA_IER
+00066Er 1  A2 02                ldx     #2
+000670r 1  A9 FF        @c:     lda     #$FF
+000672r 1  9D rr rr             sta     key,x
+000675r 1  CA                   dex
+000676r 1  10 F8                bpl     @c
+000678r 1  A9 00                lda     #0
+00067Ar 1  8D rr rr             sta     sound
+00067Dr 1  A9 03                lda     #3
+00067Fr 1  8D rr rr             sta     octave
+000682r 1  20 rr rr             jsr     draw_screen
+000685r 1  20 rr rr             jsr     t_start
+000688r 1               
+000688r 1               ; ---- the main loop: keys all the time, the sounds every other tick ----------------------
+000688r 1  20 rr rr     main:   jsr     getkey
+00068Br 1  90 03                bcc     @t
+00068Dr 1  20 rr rr             jsr     do_key
+000690r 1  AD 0D 7F     @t:     lda     VIA_IFR
+000693r 1  29 20                and     #$20
+000695r 1  F0 F1                beq     main
+000697r 1  20 rr rr             jsr     t_start
+00069Ar 1  AD rr rr             lda     tick
+00069Dr 1  49 01                eor     #1
+00069Fr 1  8D rr rr             sta     tick
+0006A2r 1  F0 E4                beq     main
+0006A4r 1  20 rr rr             jsr     step_all
+0006A7r 1  20 rr rr             jsr     show
+0006AAr 1  4C rr rr             jmp     main
+0006ADr 1               
+0006ADr 1  A9 1E        t_start:lda     #<TICK
+0006AFr 1  8D 08 7F             sta     VIA_T2CL
+0006B2r 1  A9 4E                lda     #>TICK
+0006B4r 1  8D 09 7F             sta     VIA_T2CH        ; (starts it, clears the flag)
+0006B7r 1  60                   rts
+0006B8r 1               
+0006B8r 1               ; ---- keys ----------------------------------------------------------------------------
+0006B8r 1  C9 1B        do_key: cmp     #27
+0006BAr 1  D0 03                bne     @k1
+0006BCr 1  4C rr rr             jmp     quit
+0006BFr 1  A2 1D        @k1:    ldx     #N_KEYS - 1     ; a note key?
+0006C1r 1  DD rr rr     @f:     cmp     key_chr,x
+0006C4r 1  F0 23                beq     @note
+0006C6r 1  CA                   dex
+0006C7r 1  10 F8                bpl     @f
+0006C9r 1  C9 20                cmp     #' '
+0006CBr 1  D0 03                bne     :+
+0006CDr 1  4C rr rr             jmp     all_off
+0006D0r 1               :
+0006D0r 1  C9 5B                cmp     #'['
+0006D2r 1  F0 1B                beq     @prev
+0006D4r 1  C9 5D                cmp     #']'
+0006D6r 1  F0 27                beq     @next
+0006D8r 1  C9 09                cmp     #9
+0006DAr 1  F0 23                beq     @next
+0006DCr 1  C9 2D                cmp     #'-'
+0006DEr 1  F0 33                beq     @down
+0006E0r 1  C9 3D                cmp     #'='
+0006E2r 1  F0 3C                beq     @up
+0006E4r 1  C9 2B                cmp     #'+'
+0006E6r 1  F0 38                beq     @up
+0006E8r 1  60                   rts
+0006E9r 1  BD rr rr     @note:  lda     key_ofs,x
+0006ECr 1  4C rr rr             jmp     note_on
+0006EFr 1  20 rr rr     @prev:  jsr     sound_off_hl
+0006F2r 1  CE rr rr             dec     sound
+0006F5r 1  10 05                bpl     @s
+0006F7r 1  A9 07                lda     #N_SOUNDS - 1
+0006F9r 1  8D rr rr             sta     sound
+0006FCr 1  4C rr rr     @s:     jmp     sound_on_hl
+0006FFr 1  20 rr rr     @next:  jsr     sound_off_hl
+000702r 1  EE rr rr             inc     sound
+000705r 1  AD rr rr             lda     sound
+000708r 1  C9 08                cmp     #N_SOUNDS
+00070Ar 1  90 F0                bcc     @s
+00070Cr 1  A9 00                lda     #0
+00070Er 1  8D rr rr             sta     sound
+000711r 1  F0 E9                beq     @s
+000713r 1  AD rr rr     @down:  lda     octave
+000716r 1  C9 02                cmp     #2
+000718r 1  90 13                bcc     @r
+00071Ar 1  CE rr rr             dec     octave
+00071Dr 1  4C rr rr             jmp     show_oct
+000720r 1  AD rr rr     @up:    lda     octave
+000723r 1  C9 06                cmp     #6
+000725r 1  B0 06                bcs     @r
+000727r 1  EE rr rr             inc     octave
+00072Ar 1  4C rr rr             jmp     show_oct
+00072Dr 1  60           @r:     rts
+00072Er 1               
+00072Er 1               ; the key with offset A (0-28 from C of the octave) pressed
+00072Er 1               note_on:
+00072Er 1  8D rr rr             sta     k_ofs
+000731r 1  AD rr rr             lda     octave          ; the note: (octave - 1) x 12 + the offset
+000734r 1  38                   sec
+000735r 1  E9 01                sbc     #1
+000737r 1  8D rr rr             sta     tmp
+00073Ar 1  0A                   asl
+00073Br 1  6D rr rr             adc     tmp             ; x 3
+00073Er 1  0A                   asl
+00073Fr 1  0A                   asl                     ; x 12
+000740r 1  18                   clc
+000741r 1  6D rr rr             adc     k_ofs
+000744r 1  8D rr rr             sta     k_note
+000747r 1  AD rr rr             lda     sound           ; the sound (DRUMS: the drum for the key)
+00074Ar 1  C9 07                cmp     #DRUM_KIT - 1
+00074Cr 1  D0 0A                bne     @ins
+00074Er 1  AD rr rr             lda     k_ofs
+000751r 1  20 rr rr             jsr     mod12
+000754r 1  4A                   lsr
+000755r 1  18                   clc
+000756r 1  69 08                adc     #DRUM_KIT
+000758r 1  8D rr rr     @ins:   sta     k_ins
+00075Br 1  20 rr rr             jsr     ins_ptr
+00075Er 1  A2 02                ldx     #2              ; is the key's note still sounding?
+000760r 1  BD rr rr     @same:  lda     st,x
+000763r 1  F0 10                beq     @sn
+000765r 1  BD rr rr             lda     key,x
+000768r 1  CD rr rr             cmp     k_ofs
+00076Br 1  D0 08                bne     @sn
+00076Dr 1  BD rr rr             lda     ins,x
+000770r 1  CD rr rr             cmp     k_ins
+000773r 1  F0 3B                beq     @rep
+000775r 1  CA           @sn:    dex
+000776r 1  10 E8                bpl     @same
+000778r 1  A0 05                ldy     #I_FLAGS        ; BUZZ: always channel A
+00077Ar 1  B9 rr rr             lda     cur_ins,y
+00077Dr 1  29 04                and     #F_BUZZ
+00077Fr 1  F0 04                beq     @free
+000781r 1  A2 00                ldx     #0
+000783r 1  F0 22                beq     @go
+000785r 1  A2 02        @free:  ldx     #2              ; a free channel
+000787r 1  BD rr rr     @fr:    lda     st,x
+00078Ar 1  F0 1B                beq     @go
+00078Cr 1  CA                   dex
+00078Dr 1  10 F8                bpl     @fr
+00078Fr 1  A2 00                ldx     #0              ; or the one that has sounded longest
+000791r 1  AD rr rr             lda     age
+000794r 1  CD rr rr             cmp     age+1
+000797r 1  B0 05                bcs     @o1
+000799r 1  A2 01                ldx     #1
+00079Br 1  AD rr rr             lda     age+1
+00079Er 1  CD rr rr     @o1:    cmp     age+2
+0007A1r 1  B0 04                bcs     @go
+0007A3r 1  A2 02                ldx     #2
+0007A5r 1  D0 00                bne     @go
+0007A7r 1  AD rr rr     @go:    lda     k_ofs           ; (for lighting its key)
+0007AAr 1  9D rr rr             sta     key,x
+0007ADr 1  4C rr rr             jmp     syn_start
+0007B0r 1  A0 0C        @rep:   ldy     #I_REP          ; again soon after: a key repeat, it holds
+0007B2r 1  BD rr rr             lda     last,x
+0007B5r 1  D9 rr rr             cmp     cur_ins,y
+0007B8r 1  B0 ED                bcs     @go             ; (later: played again)
+0007BAr 1  A9 08                lda     #HOLD
+0007BCr 1  9D rr rr             sta     hold,x
+0007BFr 1  A9 00                lda     #0
+0007C1r 1  9D rr rr             sta     last,x
+0007C4r 1  60                   rts
+0007C5r 1               
+0007C5r 1               ; ---- the screen ------------------------------------------------------------------------
+0007C5r 1               ; the cursor to column X, row Y (keeps A, X, Y)
+0007C5r 1  48           goto:   pha
+0007C6r 1  A9 0E                lda     #$0E
+0007C8r 1  20 03 FE             jsr     SBC_CHROUT
+0007CBr 1  8A                   txa
+0007CCr 1  20 03 FE             jsr     SBC_CHROUT
+0007CFr 1  A9 0F                lda     #$0F
+0007D1r 1  20 03 FE             jsr     SBC_CHROUT
+0007D4r 1  98                   tya
+0007D5r 1  20 03 FE             jsr     SBC_CHROUT
+0007D8r 1  68                   pla
+0007D9r 1  60                   rts
+0007DAr 1               
+0007DAr 1               ; the attribute A (only sent when it changes; keeps X, Y)
+0007DAr 1               set_attr:
+0007DAr 1  CD rr rr             cmp     cur_attr
+0007DDr 1  F0 0D                beq     @r
+0007DFr 1  8D rr rr             sta     cur_attr
+0007E2r 1  48                   pha
+0007E3r 1  A9 18                lda     #$18
+0007E5r 1  20 03 FE             jsr     SBC_CHROUT
+0007E8r 1  68                   pla
+0007E9r 1  20 03 FE             jsr     SBC_CHROUT
+0007ECr 1  60           @r:     rts
+0007EDr 1               
+0007EDr 1               ; a graphics cell A (under $20: as 1A n)
+0007EDr 1  C9 20        gcell:  cmp     #$20
+0007EFr 1  B0 07                bcs     @p
+0007F1r 1  48                   pha
+0007F2r 1  A9 1A                lda     #$1A
+0007F4r 1  20 03 FE             jsr     SBC_CHROUT
+0007F7r 1  68                   pla
+0007F8r 1  4C 03 FE     @p:     jmp     SBC_CHROUT
+0007FBr 1               
+0007FBr 1               draw_screen:
+0007FBr 1  A9 FF                lda     #$FF
+0007FDr 1  8D rr rr             sta     cur_attr
+000800r 1  A9 00                lda     #0
+000802r 1  20 rr rr             jsr     set_attr
+000805r 1  A9 0C                lda     #12
+000807r 1  20 03 FE             jsr     SBC_CHROUT
+00080Ar 1  A9 rr A0 rr          PRINT   title_txt
+00080Er 1  20 rr rr     
+000811r 1  20 rr rr             jsr     draw_sounds
+000814r 1  20 rr rr             jsr     show_oct
+000817r 1  A2 00                ldx     #0
+000819r 1  A0 15                ldy     #HELP_ROW
+00081Br 1  20 rr rr             jsr     goto
+00081Er 1  A9 rr A0 rr          PRINT   help_txt
+000822r 1  20 rr rr     
+000825r 1  A2 05                ldx     #KB_COL - 1     ; the labels: black keys above, white below
+000827r 1  A0 06                ldy     #KB_TOP - 1
+000829r 1  20 rr rr             jsr     goto
+00082Cr 1  A9 rr A0 rr          PRINT   black_txt
+000830r 1  20 rr rr     
+000833r 1  A2 05                ldx     #KB_COL - 1
+000835r 1  A0 0F                ldy     #KB_TOP + 8
+000837r 1  20 rr rr             jsr     goto
+00083Ar 1  A9 rr A0 rr          PRINT   white_txt
+00083Er 1  20 rr rr     
+000841r 1  A2 00                ldx     #0              ; the channels
+000843r 1  8E rr rr     @ch:    stx     cx
+000846r 1  AC rr rr             ldy     cx
+000849r 1  98                   tya
+00084Ar 1  18                   clc
+00084Br 1  69 11                adc     #CH_ROW
+00084Dr 1  A8                   tay
+00084Er 1  A2 00                ldx     #0
+000850r 1  20 rr rr             jsr     goto
+000853r 1  AD rr rr             lda     cx
+000856r 1  18                   clc
+000857r 1  69 41                adc     #'A'
+000859r 1  20 03 FE             jsr     SBC_CHROUT
+00085Cr 1  AE rr rr             ldx     cx
+00085Fr 1  A9 FE                lda     #$FE            ; (to be shown)
+000861r 1  9D rr rr             sta     note_shown,x
+000864r 1  E8                   inx
+000865r 1  E0 03                cpx     #3
+000867r 1  D0 DA                bne     @ch
+000869r 1  A2 00                ldx     #0              ; nothing lit, the bars empty
+00086Br 1  A9 00                lda     #0
+00086Dr 1  9D rr rr     @z:     sta     lit_shown,x
+000870r 1  E8                   inx
+000871r 1  E0 1D                cpx     #29
+000873r 1  D0 F8                bne     @z
+000875r 1  A2 17                ldx     #23
+000877r 1  9D rr rr     @zb:    sta     bar_shown,x
+00087Ar 1  CA                   dex
+00087Br 1  10 FA                bpl     @zb
+00087Dr 1                       ; the keyboard: 8 rows of 68 cells
+00087Dr 1  A9 rr                lda     #<kb_cells
+00087Fr 1  8D rr rr             sta     @ld+1
+000882r 1  A9 rr                lda     #>kb_cells
+000884r 1  8D rr rr             sta     @ld+2
+000887r 1  A9 00                lda     #0
+000889r 1  8D rr rr             sta     tmp2            ; the row
+00088Cr 1  A2 06        @row:   ldx     #KB_COL
+00088Er 1  AD rr rr             lda     tmp2
+000891r 1  18                   clc
+000892r 1  69 07                adc     #KB_TOP
+000894r 1  A8                   tay
+000895r 1  20 rr rr             jsr     goto
+000898r 1  A9 80                lda     #$80
+00089Ar 1  20 rr rr             jsr     set_attr
+00089Dr 1  A2 44                ldx     #68
+00089Fr 1  AD FF FF     @ld:    lda     $FFFF
+0008A2r 1  20 rr rr             jsr     gcell
+0008A5r 1  EE rr rr             inc     @ld+1
+0008A8r 1  D0 03                bne     :+
+0008AAr 1  EE rr rr             inc     @ld+2
+0008ADr 1  CA           :       dex
+0008AEr 1  D0 EF                bne     @ld
+0008B0r 1  EE rr rr             inc     tmp2
+0008B3r 1  AD rr rr             lda     tmp2
+0008B6r 1  C9 08                cmp     #8
+0008B8r 1  D0 D2                bne     @row
+0008BAr 1  A9 00                lda     #0
+0008BCr 1  4C rr rr             jmp     set_attr
+0008BFr 1               
+0008BFr 1               ; the sound names, the one in use in reverse
+0008BFr 1               draw_sounds:
+0008BFr 1  AD rr rr             lda     sound
+0008C2r 1  48                   pha
+0008C3r 1  A9 00                lda     #0
+0008C5r 1  8D rr rr             sta     sound
+0008C8r 1  20 rr rr     @l:     jsr     sound_off_hl
+0008CBr 1  EE rr rr             inc     sound
+0008CEr 1  AD rr rr             lda     sound
+0008D1r 1  C9 08                cmp     #N_SOUNDS
+0008D3r 1  D0 F3                bne     @l
+0008D5r 1  68                   pla
+0008D6r 1  8D rr rr             sta     sound
+0008D9r 1  4C rr rr             jmp     sound_on_hl
+0008DCr 1               
+0008DCr 1               sound_on_hl:
+0008DCr 1  20 rr rr             jsr     sound_at
+0008DFr 1  A9 rr A0 rr          PRINT   rev_txt
+0008E3r 1  20 rr rr     
+0008E6r 1  20 rr rr             jsr     sound_name
+0008E9r 1  A9 rr A0 rr          PRINT   norm_txt
+0008EDr 1  20 rr rr     
+0008F0r 1  60                   rts
+0008F1r 1               sound_off_hl:
+0008F1r 1  20 rr rr             jsr     sound_at
+0008F4r 1  4C rr rr             jmp     sound_name
+0008F7r 1               
+0008F7r 1               ; the cursor to the name of sound (sound): column 9 x n
+0008F7r 1               sound_at:
+0008F7r 1  AD rr rr             lda     sound
+0008FAr 1  0A                   asl
+0008FBr 1  0A                   asl
+0008FCr 1  0A                   asl
+0008FDr 1  6D rr rr             adc     sound
+000900r 1  AA                   tax
+000901r 1  A0 02                ldy     #SOUND_ROW
+000903r 1  4C rr rr             jmp     goto
+000906r 1               
+000906r 1               ; print the name of sound (sound)
+000906r 1               sound_name:
+000906r 1  AD rr rr             lda     sound
+000909r 1  0A                   asl
+00090Ar 1  0A                   asl
+00090Br 1  0A                   asl
+00090Cr 1  18                   clc
+00090Dr 1  69 rr                adc     #<names
+00090Fr 1  48                   pha
+000910r 1  A9 00                lda     #0
+000912r 1  69 rr                adc     #>names
+000914r 1  A8                   tay
+000915r 1  68                   pla
+000916r 1  4C rr rr             jmp     print8
+000919r 1               
+000919r 1               ; print 8 characters at A/Y
+000919r 1  8D rr rr     print8: sta     @ld+1
+00091Cr 1  8C rr rr             sty     @ld+2
+00091Fr 1  A2 00                ldx     #0
+000921r 1  BD FF FF     @ld:    lda     $FFFF,x
+000924r 1  20 03 FE             jsr     SBC_CHROUT
+000927r 1  E8                   inx
+000928r 1  E0 08                cpx     #8
+00092Ar 1  D0 F5                bne     @ld
+00092Cr 1  60                   rts
+00092Dr 1               
+00092Dr 1               show_oct:
+00092Dr 1  A2 00                ldx     #0
+00092Fr 1  A0 03                ldy     #OCT_ROW
+000931r 1  20 rr rr             jsr     goto
+000934r 1  A9 rr A0 rr          PRINT   oct_txt
+000938r 1  20 rr rr     
+00093Br 1  AD rr rr             lda     octave
+00093Er 1  09 30                ora     #'0'
+000940r 1  20 03 FE             jsr     SBC_CHROUT
+000943r 1  A9 rr A0 rr          PRINT   oct2_txt
+000947r 1  20 rr rr     
+00094Ar 1  AD rr rr             lda     octave          ; the lower row's C, and the top of the upper
+00094Dr 1  09 30                ora     #'0'
+00094Fr 1  20 03 FE             jsr     SBC_CHROUT
+000952r 1  A9 rr A0 rr          PRINT   oct3_txt
+000956r 1  20 rr rr     
+000959r 1  AD rr rr             lda     octave
+00095Cr 1  18                   clc
+00095Dr 1  69 32                adc     #'2'
+00095Fr 1  4C 03 FE             jmp     SBC_CHROUT
+000962r 1               
+000962r 1               ; once a frame: what changed, at most CELLS_MAX things
+000962r 1  A9 0A        show:   lda     #CELLS_MAX
+000964r 1  8D rr rr             sta     n_left
+000967r 1  A2 1C                ldx     #28             ; the keys lit: those of the notes sounding
+000969r 1  A9 00                lda     #0
+00096Br 1  9D rr rr     @w0:    sta     lit_want,x
+00096Er 1  CA                   dex
+00096Fr 1  10 FA                bpl     @w0
+000971r 1  A2 02                ldx     #2
+000973r 1  BD rr rr     @w1:    lda     st,x
+000976r 1  F0 08                beq     @w2
+000978r 1  BC rr rr             ldy     key,x
+00097Br 1  A9 01                lda     #1
+00097Dr 1  99 rr rr             sta     lit_want,y
+000980r 1  CA           @w2:    dex
+000981r 1  10 F0                bpl     @w1
+000983r 1  A2 00                ldx     #0
+000985r 1  BD rr rr     @k:     lda     lit_want,x
+000988r 1  DD rr rr             cmp     lit_shown,x
+00098Br 1  F0 38                beq     @kn
+00098Dr 1  9D rr rr             sta     lit_shown,x
+000990r 1  8E rr rr             stx     tmp3
+000993r 1  A9 90                lda     #$90            ; (block graphics, repeated twice)
+000995r 1  20 rr rr             jsr     set_attr
+000998r 1  BD rr rr             lda     mk_row,x
+00099Br 1  18                   clc
+00099Cr 1  69 07                adc     #KB_TOP
+00099Er 1  A8                   tay
+00099Fr 1  BD rr rr             lda     mk_col,x
+0009A2r 1  18                   clc
+0009A3r 1  69 06                adc     #KB_COL
+0009A5r 1  AA                   tax
+0009A6r 1  20 rr rr             jsr     goto
+0009A9r 1  AE rr rr             ldx     tmp3
+0009ACr 1  BD rr rr             lda     mk_norm,x
+0009AFr 1  BC rr rr             ldy     lit_shown,x
+0009B2r 1  F0 03                beq     :+
+0009B4r 1  BD rr rr             lda     mk_on,x
+0009B7r 1  20 rr rr     :       jsr     gcell
+0009BAr 1  CE rr rr             dec     n_left
+0009BDr 1  D0 03                bne     :+
+0009BFr 1  4C rr rr             jmp     @done
+0009C2r 1  AE rr rr     :       ldx     tmp3
+0009C5r 1  E8           @kn:    inx
+0009C6r 1  E0 1D                cpx     #29
+0009C8r 1  D0 BB                bne     @k
+0009CAr 1  A2 00                ldx     #0              ; the channels: the note's name and a bar
+0009CCr 1  8E rr rr     @c:     stx     cx
+0009CFr 1  A9 FF                lda     #$FF            ; (off: "---")
+0009D1r 1  BC rr rr             ldy     st,x
+0009D4r 1  F0 03                beq     :+
+0009D6r 1  BD rr rr             lda     note,x
+0009D9r 1  DD rr rr     :       cmp     note_shown,x
+0009DCr 1  F0 1F                beq     @bar
+0009DEr 1  9D rr rr             sta     note_shown,x
+0009E1r 1  48                   pha
+0009E2r 1  A9 00                lda     #0
+0009E4r 1  20 rr rr             jsr     set_attr
+0009E7r 1  8A                   txa
+0009E8r 1  18                   clc
+0009E9r 1  69 11                adc     #CH_ROW
+0009EBr 1  A8                   tay
+0009ECr 1  A2 03                ldx     #3
+0009EEr 1  20 rr rr             jsr     goto
+0009F1r 1  68                   pla
+0009F2r 1  20 rr rr             jsr     pr_note
+0009F5r 1  AE rr rr             ldx     cx
+0009F8r 1  CE rr rr             dec     n_left
+0009FBr 1  F0 75                beq     @done
+0009FDr 1  BD rr rr     @bar:   lda     vol,x           ; the bar: the volume, 8 cells of 2 levels
+000A00r 1  4A                   lsr
+000A01r 1  4A                   lsr
+000A02r 1  4A                   lsr
+000A03r 1  4A                   lsr
+000A04r 1  8D rr rr             sta     tmp             ; level 0-15
+000A07r 1  8A                   txa
+000A08r 1  0A                   asl
+000A09r 1  0A                   asl
+000A0Ar 1  0A                   asl
+000A0Br 1  8D rr rr             sta     tmp3            ; the channel's first cell
+000A0Er 1  A9 01                lda     #1
+000A10r 1  8D rr rr             sta     tmp2            ; the cell's lower level
+000A13r 1  A9 00        @bc:    lda     #0
+000A15r 1  AC rr rr             ldy     tmp
+000A18r 1  CC rr rr             cpy     tmp2
+000A1Br 1  90 0D                bcc     @bv
+000A1Dr 1  A9 55                lda     #$55            ; (the left half)
+000A1Fr 1  F0 09                beq     @bv
+000A21r 1  C8                   iny
+000A22r 1  88                   dey
+000A23r 1  CC rr rr             cpy     tmp2
+000A26r 1  F0 02                beq     @bv
+000A28r 1  A9 FF                lda     #$FF
+000A2Ar 1  AC rr rr     @bv:    ldy     tmp3
+000A2Dr 1  D9 rr rr             cmp     bar_shown,y
+000A30r 1  F0 25                beq     @bn
+000A32r 1  99 rr rr             sta     bar_shown,y
+000A35r 1  48                   pha
+000A36r 1  A9 80                lda     #$80
+000A38r 1  20 rr rr             jsr     set_attr
+000A3Br 1  AD rr rr             lda     cx
+000A3Er 1  18                   clc
+000A3Fr 1  69 11                adc     #CH_ROW
+000A41r 1  A8                   tay
+000A42r 1  AD rr rr             lda     tmp3
+000A45r 1  29 07                and     #7
+000A47r 1  18                   clc
+000A48r 1  69 09                adc     #BAR_COL
+000A4Ar 1  AA                   tax
+000A4Br 1  20 rr rr             jsr     goto
+000A4Er 1  68                   pla
+000A4Fr 1  20 rr rr             jsr     gcell
+000A52r 1  CE rr rr             dec     n_left
+000A55r 1  F0 1B                beq     @done
+000A57r 1  EE rr rr     @bn:    inc     tmp3
+000A5Ar 1  EE rr rr             inc     tmp2
+000A5Dr 1  EE rr rr             inc     tmp2
+000A60r 1  AD rr rr             lda     tmp3
+000A63r 1  29 07                and     #7
+000A65r 1  D0 AC                bne     @bc
+000A67r 1  AE rr rr             ldx     cx
+000A6Ar 1  E8                   inx
+000A6Br 1  E0 03                cpx     #3
+000A6Dr 1  F0 03                beq     @done
+000A6Fr 1  4C rr rr             jmp     @c
+000A72r 1  A9 00        @done:  lda     #0
+000A74r 1  4C rr rr             jmp     set_attr
+000A77r 1               
+000A77r 1               ; print note A as "C#4" ($FF: "---")
+000A77r 1               pr_note:
+000A77r 1  C9 FF                cmp     #$FF
+000A79r 1  D0 08                bne     @n
+000A7Br 1  A9 rr A0 rr          PRINT   none_txt
+000A7Fr 1  20 rr rr     
+000A82r 1  60                   rts
+000A83r 1  A2 01        @n:     ldx     #1              ; the octave: note / 12 + 1
+000A85r 1  C9 0C        @o:     cmp     #12
+000A87r 1  90 05                bcc     @s
+000A89r 1  E9 0C                sbc     #12
+000A8Br 1  E8                   inx
+000A8Cr 1  D0 F7                bne     @o
+000A8Er 1  0A           @s:     asl
+000A8Fr 1  A8                   tay
+000A90r 1  B9 rr rr             lda     note_names,y
+000A93r 1  20 03 FE             jsr     SBC_CHROUT
+000A96r 1  B9 rr rr             lda     note_names+1,y
+000A99r 1  20 03 FE             jsr     SBC_CHROUT
+000A9Cr 1  8A                   txa
+000A9Dr 1  09 30                ora     #'0'
+000A9Fr 1  4C 03 FE             jmp     SBC_CHROUT
+000AA2r 1               
+000AA2r 1  20 rr rr     quit:   jsr     ay_silence
+000AA5r 1  A9 00                lda     #0
+000AA7r 1  20 rr rr             jsr     set_attr
+000AAAr 1  A9 rr A0 rr          PRINT   norm_txt
+000AAEr 1  20 rr rr     
+000AB1r 1  A9 0C                lda     #12
+000AB3r 1  20 03 FE             jsr     SBC_CHROUT
+000AB6r 1  A9 rr A0 rr          PRINT   bye_txt
+000ABAr 1  20 rr rr     
+000ABDr 1  4C 06 FE             jmp     SBC_MENU
+000AC0r 1               
+000AC0r 1               ; ---- tables ---------------------------------------------------------------------------
+000AC0r 1               ; the note keys and their offsets from C of the octave
+000AC0r 1  5A 53 58 44  key_chr:    .byte   "ZSXDCVGBHNJM,"
+000AC4r 1  43 56 47 42  
+000AC8r 1  48 4E 4A 4D  
+000ACDr 1  51 32 57 33              .byte   "Q2W3ER5T6Y7UI9O0P"
+000AD1r 1  45 52 35 54  
+000AD5r 1  36 59 37 55  
+000ADEr 1  00 01 02 03  key_ofs:    .byte   0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12
+000AE2r 1  04 05 06 07  
+000AE6r 1  08 09 0A 0B  
+000AEBr 1  0C 0D 0E 0F              .byte   12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28
+000AEFr 1  10 11 12 13  
+000AF3r 1  14 15 16 17  
+000AFCr 1               N_KEYS      = key_ofs - key_chr
+000AFCr 1               
+000AFCr 1  43 2D 43 23  note_names: .byte   "C-C#D-D#E-F-F#G-G#A-A#B-"
+000B00r 1  44 2D 44 23  
+000B04r 1  45 2D 46 2D  
+000B14r 1               
+000B14r 1               ; the keyboard picture: 8 rows of 68 cells (2 x 4 pixels each), white keys
+000B14r 1               ; 8 pixels wide, black keys 4 wide and 20 high; then where each key's marker
+000B14r 1               ; goes (a key lights up by these 2 cells changing)
+000B14r 1               kb_cells:
+000B14r 1  FF FF FF 00          .byte   $FF, $FF, $FF, $00, $00, $FF, $FF, $00, $00, $FF, $FF, $55, $FF, $FF, $FF, $00, $00
+000B18r 1  00 FF FF 00  
+000B1Cr 1  00 FF FF 55  
+000B25r 1  FF FF 00 00          .byte   $FF, $FF, $00, $00, $FF, $FF, $00, $00, $FF, $FF, $55, $FF, $FF, $FF, $00, $00, $FF
+000B29r 1  FF FF 00 00  
+000B2Dr 1  FF FF 55 FF  
+000B36r 1  FF 00 00 FF          .byte   $FF, $00, $00, $FF, $FF, $55, $FF, $FF, $FF, $00, $00, $FF, $FF, $00, $00, $FF, $FF
+000B3Ar 1  FF 55 FF FF  
+000B3Er 1  FF 00 00 FF  
+000B47r 1  00 00 FF FF          .byte   $00, $00, $FF, $FF, $55, $FF, $FF, $FF, $00, $00, $FF, $FF, $00, $00, $FF, $FF, $55
+000B4Br 1  55 FF FF FF  
+000B4Fr 1  00 00 FF FF  
+000B58r 1  FF FF FF 00          .byte   $FF, $FF, $FF, $00, $00, $FF, $FF, $00, $00, $FF, $FF, $55, $FF, $FF, $FF, $00, $00
+000B5Cr 1  00 FF FF 00  
+000B60r 1  00 FF FF 55  
+000B69r 1  FF FF 00 00          .byte   $FF, $FF, $00, $00, $FF, $FF, $00, $00, $FF, $FF, $55, $FF, $FF, $FF, $00, $00, $FF
+000B6Dr 1  FF FF 00 00  
+000B71r 1  FF FF 55 FF  
+000B7Ar 1  FF 00 00 FF          .byte   $FF, $00, $00, $FF, $FF, $55, $FF, $FF, $FF, $00, $00, $FF, $FF, $00, $00, $FF, $FF
+000B7Er 1  FF 55 FF FF  
+000B82r 1  FF 00 00 FF  
+000B8Br 1  00 00 FF FF          .byte   $00, $00, $FF, $FF, $55, $FF, $FF, $FF, $00, $00, $FF, $FF, $00, $00, $FF, $FF, $55
+000B8Fr 1  55 FF FF FF  
+000B93r 1  00 00 FF FF  
+000B9Cr 1  FF FF FF 00          .byte   $FF, $FF, $FF, $00, $00, $FF, $FF, $00, $00, $FF, $FF, $55, $FF, $FF, $FF, $00, $00
+000BA0r 1  00 FF FF 00  
+000BA4r 1  00 FF FF 55  
+000BADr 1  FF FF 00 00          .byte   $FF, $FF, $00, $00, $FF, $FF, $00, $00, $FF, $FF, $55, $FF, $FF, $FF, $00, $00, $FF
+000BB1r 1  FF FF 00 00  
+000BB5r 1  FF FF 55 FF  
+000BBEr 1  FF 00 00 FF          .byte   $FF, $00, $00, $FF, $FF, $55, $FF, $FF, $FF, $00, $00, $FF, $FF, $00, $00, $FF, $FF
+000BC2r 1  FF 55 FF FF  
+000BC6r 1  FF 00 00 FF  
+000BCFr 1  00 00 FF FF          .byte   $00, $00, $FF, $FF, $55, $FF, $FF, $FF, $00, $00, $FF, $FF, $00, $00, $FF, $FF, $55
+000BD3r 1  55 FF FF FF  
+000BD7r 1  00 00 FF FF  
+000BE0r 1  FF FF FF 00          .byte   $FF, $FF, $FF, $00, $00, $FF, $FF, $00, $00, $FF, $FF, $55, $FF, $FF, $FF, $00, $00
+000BE4r 1  00 FF FF 00  
+000BE8r 1  00 FF FF 55  
+000BF1r 1  FF FF 00 00          .byte   $FF, $FF, $00, $00, $FF, $FF, $00, $00, $FF, $FF, $55, $FF, $FF, $FF, $00, $00, $FF
+000BF5r 1  FF FF 00 00  
+000BF9r 1  FF FF 55 FF  
+000C02r 1  FF 00 00 FF          .byte   $FF, $00, $00, $FF, $FF, $55, $FF, $FF, $FF, $00, $00, $FF, $FF, $00, $00, $FF, $FF
+000C06r 1  FF 55 FF FF  
+000C0Ar 1  FF 00 00 FF  
+000C13r 1  00 00 FF FF          .byte   $00, $00, $FF, $FF, $55, $FF, $FF, $FF, $00, $00, $FF, $FF, $00, $00, $FF, $FF, $55
+000C17r 1  55 FF FF FF  
+000C1Br 1  00 00 FF FF  
+000C24r 1  FF FF FF 00          .byte   $FF, $FF, $FF, $00, $00, $FF, $FF, $00, $00, $FF, $FF, $55, $FF, $FF, $FF, $00, $00
+000C28r 1  00 FF FF 00  
+000C2Cr 1  00 FF FF 55  
+000C35r 1  FF FF 00 00          .byte   $FF, $FF, $00, $00, $FF, $FF, $00, $00, $FF, $FF, $55, $FF, $FF, $FF, $00, $00, $FF
+000C39r 1  FF FF 00 00  
+000C3Dr 1  FF FF 55 FF  
+000C46r 1  FF 00 00 FF          .byte   $FF, $00, $00, $FF, $FF, $55, $FF, $FF, $FF, $00, $00, $FF, $FF, $00, $00, $FF, $FF
+000C4Ar 1  FF 55 FF FF  
+000C4Er 1  FF 00 00 FF  
+000C57r 1  00 00 FF FF          .byte   $00, $00, $FF, $FF, $55, $FF, $FF, $FF, $00, $00, $FF, $FF, $00, $00, $FF, $FF, $55
+000C5Br 1  55 FF FF FF  
+000C5Fr 1  00 00 FF FF  
+000C68r 1  FF FF FF 55          .byte   $FF, $FF, $FF, $55, $FF, $FF, $FF, $55, $FF, $FF, $FF, $55, $FF, $FF, $FF, $55, $FF
+000C6Cr 1  FF FF FF 55  
+000C70r 1  FF FF FF 55  
+000C79r 1  FF FF 55 FF          .byte   $FF, $FF, $55, $FF, $FF, $FF, $55, $FF, $FF, $FF, $55, $FF, $FF, $FF, $55, $FF, $FF
+000C7Dr 1  FF FF 55 FF  
+000C81r 1  FF FF 55 FF  
+000C8Ar 1  FF 55 FF FF          .byte   $FF, $55, $FF, $FF, $FF, $55, $FF, $FF, $FF, $55, $FF, $FF, $FF, $55, $FF, $FF, $FF
+000C8Er 1  FF 55 FF FF  
+000C92r 1  FF 55 FF FF  
+000C9Br 1  55 FF FF FF          .byte   $55, $FF, $FF, $FF, $55, $FF, $FF, $FF, $55, $FF, $FF, $FF, $55, $FF, $FF, $FF, $55
+000C9Fr 1  55 FF FF FF  
+000CA3r 1  55 FF FF FF  
+000CACr 1  FF FF FF 55          .byte   $FF, $FF, $FF, $55, $FF, $FF, $FF, $55, $FF, $FF, $FF, $55, $FF, $FF, $FF, $55, $FF
+000CB0r 1  FF FF FF 55  
+000CB4r 1  FF FF FF 55  
+000CBDr 1  FF FF 55 FF          .byte   $FF, $FF, $55, $FF, $FF, $FF, $55, $FF, $FF, $FF, $55, $FF, $FF, $FF, $55, $FF, $FF
+000CC1r 1  FF FF 55 FF  
+000CC5r 1  FF FF 55 FF  
+000CCEr 1  FF 55 FF FF          .byte   $FF, $55, $FF, $FF, $FF, $55, $FF, $FF, $FF, $55, $FF, $FF, $FF, $55, $FF, $FF, $FF
+000CD2r 1  FF 55 FF FF  
+000CD6r 1  FF 55 FF FF  
+000CDFr 1  55 FF FF FF          .byte   $55, $FF, $FF, $FF, $55, $FF, $FF, $FF, $55, $FF, $FF, $FF, $55, $FF, $FF, $FF, $55
+000CE3r 1  55 FF FF FF  
+000CE7r 1  55 FF FF FF  
+000CF0r 1  FF FF FF 55          .byte   $FF, $FF, $FF, $55, $FF, $FF, $FF, $55, $FF, $FF, $FF, $55, $FF, $FF, $FF, $55, $FF
+000CF4r 1  FF FF FF 55  
+000CF8r 1  FF FF FF 55  
+000D01r 1  FF FF 55 FF          .byte   $FF, $FF, $55, $FF, $FF, $FF, $55, $FF, $FF, $FF, $55, $FF, $FF, $FF, $55, $FF, $FF
+000D05r 1  FF FF 55 FF  
+000D09r 1  FF FF 55 FF  
+000D12r 1  FF 55 FF FF          .byte   $FF, $55, $FF, $FF, $FF, $55, $FF, $FF, $FF, $55, $FF, $FF, $FF, $55, $FF, $FF, $FF
+000D16r 1  FF 55 FF FF  
+000D1Ar 1  FF 55 FF FF  
+000D23r 1  55 FF FF FF          .byte   $55, $FF, $FF, $FF, $55, $FF, $FF, $FF, $55, $FF, $FF, $FF, $55, $FF, $FF, $FF, $55
+000D27r 1  55 FF FF FF  
+000D2Br 1  55 FF FF FF  
+000D34r 1               ; markers, for key offsets 0-28: column, row, the cell as drawn, pressed
+000D34r 1  01 03 05 07  mk_col: .byte   1, 3, 5, 7, 9, 13, 15, 17, 19, 21, 23, 25, 29, 31, 33, 35, 37, 41, 43, 45, 47, 49, 51, 53, 57, 59, 61, 63, 65
+000D38r 1  09 0D 0F 11  
+000D3Cr 1  13 15 17 19  
+000D51r 1  07 04 07 04  mk_row: .byte   7, 4, 7, 4, 7, 7, 4, 7, 4, 7, 4, 7, 7, 4, 7, 4, 7, 7, 4, 7, 4, 7, 4, 7, 7, 4, 7, 4, 7
+000D55r 1  07 07 04 07  
+000D59r 1  04 07 04 07  
+000D6Er 1  FF 00 FF 00  mk_norm:.byte   $FF, $00, $FF, $00, $FF, $FF, $00, $FF, $00, $FF, $00, $FF, $FF, $00, $FF, $00, $FF, $FF, $00, $FF, $00, $FF, $00, $FF, $FF, $00, $FF, $00, $FF
+000D72r 1  FF FF 00 FF  
+000D76r 1  00 FF 00 FF  
+000D8Br 1  0F FF 0F FF  mk_on:  .byte   $0F, $FF, $0F, $FF, $0F, $0F, $FF, $0F, $FF, $0F, $FF, $0F, $0F, $FF, $0F, $FF, $0F, $0F, $FF, $0F, $FF, $0F, $FF, $0F, $0F, $FF, $0F, $FF, $0F
+000D8Fr 1  0F 0F FF 0F  
+000D93r 1  FF 0F FF 0F  
+000DA8r 1               
+000DA8r 1               ; ---- text -----------------------------------------------------------------------------
+000DA8r 1  50 49 41 4E  title_txt:  .byte   "PIANO - PLAY THE AY-3-8910 FROM THE KEYBOARD", 0
+000DACr 1  4F 20 2D 20  
+000DB0r 1  50 4C 41 59  
+000DD5r 1  4F 43 54 41  oct_txt:    .byte   "OCTAVE ", 0
+000DD9r 1  56 45 20 00  
+000DDDr 1  20 20 20 20  oct2_txt:   .byte   "    Z = C", 0
+000DE1r 1  5A 20 3D 20  
+000DE5r 1  43 00        
+000DE7r 1  20 20 20 50  oct3_txt:   .byte   "   P = E", 0
+000DEBr 1  20 3D 20 45  
+000DEFr 1  00           
+000DF0r 1  5B 20 5D 20  help_txt:   .byte   "[ ] OR TAB: SOUND   - =: OCTAVE   SPACE: ALL OFF   ESC: QUIT", 13, 10
+000DF4r 1  4F 52 20 54  
+000DF8r 1  41 42 3A 20  
+000E2Er 1  4E 4F 54 45              .byte   "NOTES END BY THEMSELVES; HOLD A KEY DOWN TO HOLD ITS NOTE", 0
+000E32r 1  53 20 45 4E  
+000E36r 1  44 20 42 59  
+000E68r 1  20 20 20 20  black_txt:  .byte   "    S   D       G   H   J       2   3       5   6   7       9   0", 0
+000E6Cr 1  53 20 20 20  
+000E70r 1  44 20 20 20  
+000EAAr 1  20 20 5A 20  white_txt:  .byte   "  Z   X   C   V   B   N   M   Q   W   E   R   T   Y   U   I   O   P", 0
+000EAEr 1  20 20 58 20  
+000EB2r 1  20 20 43 20  
+000EEEr 1  2D 2D 2D 00  none_txt:   .byte   "---", 0
+000EF2r 1  1B 5B 37 6D  rev_txt:    .byte   27, "[7m", 0
+000EF6r 1  00           
+000EF7r 1  1B 5B 30 6D  norm_txt:   .byte   27, "[0m", 0
+000EFBr 1  00           
+000EFCr 1  42 59 45 0D  bye_txt:    .byte   "BYE", 13, 10, 0
+000F00r 1  0A 00        
+000F02r 1               
+000F02r 1               ; ---- variables -------------------------------------------------------------------------
+000F02r 1                       .segment "BSS"
+00003Dr 1  xx           sound:      .res 1
+00003Er 1  xx           octave:     .res 1
+00003Fr 1  xx           tick:       .res 1
+000040r 1  xx           tmp:        .res 1
+000041r 1  xx           tmp2:       .res 1
+000042r 1  xx           tmp3:       .res 1
+000043r 1  xx           k_ofs:      .res 1
+000044r 1  xx           n_left:     .res 1
+000045r 1  xx           cur_attr:   .res 1
+000046r 1  xx xx xx     key:        .res 3              ;  the key (offset), for lighting it
+000049r 1  xx xx xx     note_shown: .res 3
+00004Cr 1  xx xx xx xx  lit_want:   .res 29
+000050r 1  xx xx xx xx  
+000054r 1  xx xx xx xx  
+000069r 1  xx xx xx xx  lit_shown:  .res 29
+00006Dr 1  xx xx xx xx  
+000071r 1  xx xx xx xx  
+000086r 1  xx xx xx xx  bar_shown:  .res 24
+00008Ar 1  xx xx xx xx  
+00008Er 1  xx xx xx xx  
+000086r 1               

@@ -1,0 +1,28 @@
+Modules list:
+-------------
+ymplay.o:
+    CODE              Offs=000000  Size=0013C6  Align=00001  Fill=0000
+    BSS               Offs=000000  Size=000368  Align=00001  Fill=0000
+
+
+Segment list:
+-------------
+Name                   Start     End    Size  Align
+----------------------------------------------------
+CODE                  000500  0018C5  0013C6  00001
+BSS                   0018C6  001C2D  000368  00001
+
+
+Exports list by name:
+---------------------
+
+
+
+Exports list by value:
+----------------------
+
+
+
+Imports list:
+-------------
+

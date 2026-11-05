@@ -1,0 +1,2713 @@
+ca65 V2.19 - Git a6530f4
+Main file   : seq.s
+Current file: seq.s
+
+000000r 1               ; ============================================================================
+000000r 1               ; seq.s - SEQ: a step sequencer for the AY-3-8910 card (a small "Fruity Loops")
+000000r 1               ;
+000000r 1               ;   build:  make.bat  (or make)        run:  L SEQ 0500   then   R
+000000r 1               ;
+000000r 1               ; A pattern is 16 steps (16th notes) of 7 tracks: five drums (KICK, SNARE,
+000000r 1               ; HI-HAT, OPEN HAT, CRASH) and two note tracks (BASS and LEAD), each with a
+000000r 1               ; sound from PIANO's eight.  There are 4 patterns, A-D: playing goes through
+000000r 1               ; the ones in use, A to the last that has anything in it, and round again (or
+000000r 1               ; ";" keeps it on the pattern on screen).  The sounds are PIANO's (synth.s).
+000000r 1               ;
+000000r 1               ;   arrows          move (up/down: the track, left/right: the step)
+000000r 1               ;   note keys       a note on BASS or LEAD (as in PIANO: Z S X D C V G B H N
+000000r 1               ;                   J M , and Q 2 W 3 E R 5 T 6 Y 7 U I 9 O 0 P), heard as it
+000000r 1               ;                   goes in, and on to the next step; on a drum: the drum on
+000000r 1               ;   space           a drum on/off, a note out
+000000r 1               ;   .               a note held on from the step before
+000000r 1               ;   Backspace       out, and back a step
+000000r 1               ;   Enter           play / stop                ;  all patterns / this one
+000000r 1               ;   - =             tempo (40-250)             [ ]  octave of the note keys
+000000r 1               ;   K L             the pattern: A B C D       Tab  the sound of BASS/LEAD
+000000r 1               ;   F               files: S save, L load (to BEAT1.SEQ ... BEAT9.SEQ in the
+000000r 1               ;                   monitor's current folder), N new, C copy the pattern before
+000000r 1               ;   Esc             quit (it asks)
+000000r 1               ;
+000000r 1               ; The three channels: A plays BASS, B plays LEAD, C the drums (one at a time:
+000000r 1               ; on a step with more than one, kick, then snare, crash, open hat, hi-hat).
+000000r 1               ; A note sounds for its step, longer if the next steps hold it (".").
+000000r 1               ;
+000000r 1               ; Timing: VIA timer 2, polled, 100 ticks a second; the steps come from the
+000000r 1               ; tempo with an exact running count (no drift), the sounds move every other
+000000r 1               ; tick.
+000000r 1               ; ============================================================================
+000000r 1               
+000000r 1                       .setcpu "6502"
+000000r 1                       .include "sbc_api.inc"
+000000r 2               ; sbc_api.inc - fixed ROM entry points of the SBC (see jumptable.s), and the
+000000r 2               ; CPU clock.  Use in your own ca65 programs:  .include "sbc_api.inc"
+000000r 2               ; (the games find it one folder up: their make.bat passes  -I ..  to ca65)
+000000r 2               SBC_CHRIN       = $FE00         ; carry set + A = char, carry clear = none waiting
+000000r 2               SBC_CHROUT      = $FE03         ; print A (A, X, Y preserved)
+000000r 2               SBC_MENU        = $FE06         ; boot menu
+000000r 2               SBC_COLD        = $FE09         ; BASIC cold start
+000000r 2               SBC_WARM        = $FE0C         ; BASIC warm start
+000000r 2               SBC_MONITOR     = $FE0F         ; monitor prompt (or JMP $FF00)
+000000r 2               SBC_PADSTATE    = $FE12         ; A = gamepad buttons held: bit0 A,1 B,2 Select,3 Start,4 Up,5 Down,6 Left,7 Right
+000000r 2               SBC_LOAD        = $FE15         ; load a file: A/Y = parameter block (.word addr, .word max, "NAME.EXT",0)
+000000r 2                                               ;   carry clear = loaded, X/Y = length; carry set = failed, A = error code
+000000r 2               SBC_CWD         = $FE18         ; A/Y = the monitor's current folder: 0-ended, "" (the top) or "/A/B"
+000000r 2                                               ;   (newer ROMs: check for a JMP ($4C) at $FE18 first)
+000000r 2               
+000000r 2               ; The CPU clock in MHz (whole numbers, 1 to 8).  Programs size their delay
+000000r 2               ; loops from it, so a millisecond stays a millisecond.  To build for another
+000000r 2               ; clock, change it here or give it on the command line:  make.bat 1
+000000r 2               .ifndef CLOCK_MHZ
+000000r 2               CLOCK_MHZ       = 2
+000000r 2               .endif
+000000r 2               
+000000r 1               CH_WRITE        = 1             ; (ch376r.s: writing too)
+000000r 1               
+000000r 1               VIA_T2CL        = $7F08
+000000r 1               VIA_T2CH        = $7F09
+000000r 1               VIA_ACR         = $7F0B
+000000r 1               VIA_IFR         = $7F0D
+000000r 1               VIA_IER         = $7F0E
+000000r 1               TICK            = CLOCK_MHZ * 10000 - 2     ; 1/100 s (the timer runs count + 2)
+000000r 1               .assert TICK < 65536, error, "the clock is too fast for a 1/100 s tick"
+000000r 1               .ifndef SBC_CWD
+000000r 1               SBC_CWD         = $FE18
+000000r 1               .endif
+000000r 1               CWD_MAX         = 31
+000000r 1               
+000000r 1               N_TRACKS        = 7
+000000r 1               N_DRUMS         = 5
+000000r 1               T_BASS          = 5
+000000r 1               T_LEAD          = 6
+000000r 1               STEPS           = 16
+000000r 1               N_PATS          = 4
+000000r 1               EMPTY           = $FF           ; a note step: nothing
+000000r 1               TIE             = $FE           ;  the note before, held on
+000000r 1               
+000000r 1               ; the screen
+000000r 1               GRID_COL        = 11            ; step s at GRID_COL + 4 s + s / 4
+000000r 1               NUM_ROW         = 3
+000000r 1               HEAD_ROW        = 4
+000000r 1               TRACK_ROW       = 5             ; the tracks: rows 5-11
+000000r 1               SND_ROW         = 13
+000000r 1               HELP_ROW        = 15
+000000r 1               MSG_ROW         = 20
+000000r 1               
+000000r 1                       .segment "CODE"
+000000r 1  4C rr rr             jmp     start
+000003r 1               
+000003r 1                       .include "common.s"
+000003r 2               ; ============================================================================
+000003r 2               ; common.s - small helpers shared by AYTEST and YMPLAY: printing, keys, delays
+000003r 2               ; ============================================================================
+000003r 2               
+000003r 2               ; PRINT label: print the 0-ended string at label; keeps X
+000003r 2               .macro  PRINT   str
+000003r 2                       lda     #<str
+000003r 2                       ldy     #>str
+000003r 2                       jsr     print
+000003r 2               .endmacro
+000003r 2               
+000003r 2               ; print the 0-ended string at A (low) / Y (high).  Keeps X.
+000003r 2  8D rr rr     print:  sta     @ld+1
+000006r 2  8C rr rr             sty     @ld+2
+000009r 2  AD FF FF     @ld:    lda     $FFFF
+00000Cr 2  F0 0D                beq     @r
+00000Er 2  20 03 FE             jsr     SBC_CHROUT
+000011r 2  EE rr rr             inc     @ld+1
+000014r 2  D0 F3                bne     @ld
+000016r 2  EE rr rr             inc     @ld+2
+000019r 2  D0 EE                bne     @ld
+00001Br 2  60           @r:     rts
+00001Cr 2               
+00001Cr 2  A9 0D        crlf:   lda     #13
+00001Er 2  20 03 FE             jsr     SBC_CHROUT
+000021r 2  A9 0A                lda     #10
+000023r 2  4C 03 FE             jmp     SBC_CHROUT
+000026r 2               
+000026r 2               ; print A as 2 decimal digits (0-99)
+000026r 2  A2 30        prdec2: ldx     #'0'
+000028r 2  C9 0A        @t:     cmp     #10
+00002Ar 2  90 05                bcc     @u
+00002Cr 2  E9 0A                sbc     #10
+00002Er 2  E8                   inx
+00002Fr 2  D0 F7                bne     @t
+000031r 2  48           @u:     pha
+000032r 2  8A                   txa
+000033r 2  20 03 FE             jsr     SBC_CHROUT
+000036r 2  68                   pla
+000037r 2  09 30                ora     #'0'
+000039r 2  4C 03 FE             jmp     SBC_CHROUT
+00003Cr 2               
+00003Cr 2               ; print A in hex
+00003Cr 2  48           prhex:  pha
+00003Dr 2  4A                   lsr
+00003Er 2  4A                   lsr
+00003Fr 2  4A                   lsr
+000040r 2  4A                   lsr
+000041r 2  20 rr rr             jsr     @d
+000044r 2  68                   pla
+000045r 2  29 0F                and     #$0F
+000047r 2  C9 0A        @d:     cmp     #10
+000049r 2  90 02                bcc     @n
+00004Br 2  69 06                adc     #'A' - '0' - 10 - 1
+00004Dr 2  69 30        @n:     adc     #'0'
+00004Fr 2  4C 03 FE             jmp     SBC_CHROUT
+000052r 2               
+000052r 2               ; a key: carry set and A = the key (letters in upper case), or carry clear
+000052r 2  20 00 FE     getkey: jsr     SBC_CHRIN
+000055r 2  90 0B                bcc     @r
+000057r 2  C9 61                cmp     #'a'
+000059r 2  90 06                bcc     @y
+00005Br 2  C9 7B                cmp     #'z' + 1
+00005Dr 2  B0 02                bcs     @y
+00005Fr 2  29 DF                and     #$DF
+000061r 2  38           @y:     sec
+000062r 2  60           @r:     rts
+000063r 2               
+000063r 2               ; wait for a key; A = the key (upper case)
+000063r 2  20 rr rr     waitkey:jsr     getkey
+000066r 2  90 FB                bcc     waitkey
+000068r 2  60                   rts
+000069r 2               
+000069r 2               ; wait about A ms.  The inner loop is sized for the clock (CLOCK_MHZ in
+000069r 2               ; sbc_api.inc): 5 + 4 * (CLOCK_MHZ - 1) cycles a turn, DELAY_N turns a ms.
+000069r 2               DELAY_N = (1000 * CLOCK_MHZ - 7) / (5 + 4 * (CLOCK_MHZ - 1))
+000069r 2               delay_ms:
+000069r 2  AA                   tax
+00006Ar 2  F0 0A                beq     @done
+00006Cr 2  A0 DD        @o:     ldy     #DELAY_N
+00006Er 2               @i:
+00006Er 2  EA EA        .repeat CLOCK_MHZ - 1
+000070r 2                       nop
+000070r 2                       nop
+000070r 2               .endrepeat
+000070r 2  88                   dey
+000071r 2  D0 FB                bne     @i
+000073r 2  CA                   dex
+000074r 2  D0 F6                bne     @o
+000076r 2  60           @done:  rts
+000077r 2               
+000077r 1                       .include "ay.s"
+000077r 2               ; ============================================================================
+000077r 2               ; ay.s - AY-3-8910 sound chip driver for the 6502 SBC (ca65)
+000077r 2               ;
+000077r 2               ; The card (write only):
+000077r 2               ;   AY_ADDR  $7F22  write the number of the register to use  (BDIR = BC1 = 1)
+000077r 2               ;   AY_DATA  $7F23  write a value to that register           (BDIR = 1, BC1 = 0)
+000077r 2               ;   BC2 and A8 tied high, A9 low; chip clock 2 MHz; the three channels mixed
+000077r 2               ;   together (mono).  The I/O ports aren't used: register 7 keeps them inputs.
+000077r 2               ;
+000077r 2               ; Only plain STA abs is used on the card's addresses: an indexed store
+000077r 2               ; (STA abs,X) can make an extra read cycle there first, and the card decodes
+000077r 2               ; the address without looking at R/W.
+000077r 2               ;
+000077r 2               ; Routines (A, X, Y may change unless it says):
+000077r 2               ;   ay_write    register X = A (A, X, Y kept)
+000077r 2               ;   ay_silence  all channels off, volumes 0, envelope stopped
+000077r 2               ;   ay_regs     registers 0-13 from the 14 bytes at (ay_ptr); register 13 is
+000077r 2               ;               only written when it isn't $FF (writing it restarts the
+000077r 2               ;               envelope)
+000077r 2               ;   ay_tone     channel X (0-2) to tone period A (low) / Y (high)
+000077r 2               ;   ay_note     channel X (0-2) to note A (0 = C1 .. 95 = B8, 45 = A4 440 Hz)
+000077r 2               ;   ay_volume   channel X (0-2) to volume A (0-15; 16 = the envelope)
+000077r 2               ;   ay_mixer    register 7 = A, the I/O port bits kept as inputs
+000077r 2               ;
+000077r 2               ; The registers:
+000077r 2               ;   0/1 2/3 4/5  tone period of A, B, C (12 bits: low, high 4 bits):
+000077r 2               ;                frequency = 2 MHz / (16 * period)
+000077r 2               ;   6            noise period (5 bits)
+000077r 2               ;   7            mixer: bits 0-2 tone A-C off, bits 3-5 noise A-C off
+000077r 2               ;                (0 = on), bits 6-7 I/O port directions (kept 0)
+000077r 2               ;   8 9 10       volume A, B, C (0-15), bit 4 = use the envelope
+000077r 2               ;   11/12        envelope period (16 bits): one ramp (16 steps) lasts
+000077r 2               ;                256 x period / 2 MHz
+000077r 2               ;   13           envelope shape (writing it restarts the envelope)
+000077r 2               ; ============================================================================
+000077r 2               
+000077r 2               AY_ADDR         = $7F22
+000077r 2               AY_DATA         = $7F23
+000077r 2               
+000077r 2               AY_TONE_A       = 0
+000077r 2               AY_NOISE        = 6
+000077r 2               AY_MIXER        = 7
+000077r 2               AY_VOL_A        = 8
+000077r 2               AY_ENV_LO       = 11
+000077r 2               AY_ENV_HI       = 12
+000077r 2               AY_ENV_SHAPE    = 13
+000077r 2               
+000077r 2               ; envelope shapes (register 13)
+000077r 2               ENV_DECAY       = $00           ; \______   fade out once
+000077r 2               ENV_ATTACK      = $0D           ; /~~~~~~   fade in once, then stay up
+000077r 2               ENV_SAW_DOWN    = $08           ; \\\\\\\   repeat
+000077r 2               ENV_SAW_UP      = $0C           ; ///////   repeat
+000077r 2               ENV_TRIANGLE    = $0E           ; /\/\/\/   repeat
+000077r 2               ENV_TRIANGLE2   = $0A           ; \/\/\/\   repeat
+000077r 2               ENV_DECAY_HOLD  = $0B           ; \~~~~~~   fade out, then jump up and stay
+000077r 2               ENV_ATTACK_ZERO = $0F           ; /______   fade in, then drop to 0
+000077r 2               
+000077r 2               ; register X = A.  Keeps A, X and Y.
+000077r 2               ay_write:
+000077r 2  8E 22 7F             stx     AY_ADDR
+00007Ar 2  8D 23 7F             sta     AY_DATA
+00007Dr 2  60                   rts
+00007Er 2               
+00007Er 2               ; everything quiet: tones and noise off, volumes 0, the envelope stopped
+00007Er 2               ay_silence:
+00007Er 2  48                   pha
+00007Fr 2  8A                   txa
+000080r 2  48                   pha
+000081r 2  A9 3F                lda     #$3F            ; mixer: all off (and the ports inputs)
+000083r 2  A2 07                ldx     #AY_MIXER
+000085r 2  20 rr rr             jsr     ay_write
+000088r 2  A9 00                lda     #0
+00008Ar 2  A2 08                ldx     #AY_VOL_A       ; volumes 0
+00008Cr 2  20 rr rr             jsr     ay_write
+00008Fr 2  E8                   inx
+000090r 2  20 rr rr             jsr     ay_write
+000093r 2  E8                   inx
+000094r 2  20 rr rr             jsr     ay_write
+000097r 2  A2 00                ldx     #0              ; tone and noise periods 0
+000099r 2  20 rr rr     @p:     jsr     ay_write
+00009Cr 2  E8                   inx
+00009Dr 2  E0 07                cpx     #AY_MIXER
+00009Fr 2  D0 F8                bne     @p
+0000A1r 2  A2 0B                ldx     #AY_ENV_LO      ; envelope period 0, shape 0 (fades to 0)
+0000A3r 2  20 rr rr             jsr     ay_write
+0000A6r 2  E8                   inx
+0000A7r 2  20 rr rr             jsr     ay_write
+0000AAr 2  E8                   inx
+0000ABr 2  20 rr rr             jsr     ay_write
+0000AEr 2  68                   pla
+0000AFr 2  AA                   tax
+0000B0r 2  68                   pla
+0000B1r 2  60                   rts
+0000B2r 2               
+0000B2r 2               ; registers 0-13 from (ay_ptr); register 13 only if it isn't $FF
+0000B2r 2               ay_regs:
+0000B2r 2  AD rr rr             lda     ay_ptr
+0000B5r 2  8D rr rr             sta     @ld+1
+0000B8r 2  AD rr rr             lda     ay_ptr+1
+0000BBr 2  8D rr rr             sta     @ld+2
+0000BEr 2  A2 00                ldx     #0
+0000C0r 2               @l:
+0000C0r 2  BD FF FF     @ld:    lda     $FFFF,x
+0000C3r 2  E0 0D                cpx     #AY_ENV_SHAPE
+0000C5r 2  D0 04                bne     @w
+0000C7r 2  C9 FF                cmp     #$FF
+0000C9r 2  F0 0B                beq     @r
+0000CBr 2  8E 22 7F     @w:     stx     AY_ADDR
+0000CEr 2  8D 23 7F             sta     AY_DATA
+0000D1r 2  E8                   inx
+0000D2r 2  E0 0E                cpx     #14
+0000D4r 2  D0 EA                bne     @l
+0000D6r 2  60           @r:     rts
+0000D7r 2               
+0000D7r 2               ; channel X (0-2): tone period A (low) / Y (high)
+0000D7r 2               ay_tone:
+0000D7r 2  48                   pha
+0000D8r 2  8A                   txa
+0000D9r 2  0A                   asl
+0000DAr 2  AA                   tax
+0000DBr 2  68                   pla
+0000DCr 2  20 rr rr             jsr     ay_write        ; the low byte
+0000DFr 2  E8                   inx
+0000E0r 2  98                   tya
+0000E1r 2  20 rr rr             jsr     ay_write        ; the high 4 bits
+0000E4r 2  8A                   txa
+0000E5r 2  4A                   lsr
+0000E6r 2  AA                   tax
+0000E7r 2  60                   rts
+0000E8r 2               
+0000E8r 2               ; channel X (0-2): note A (0 = C1 .. 95 = B8)
+0000E8r 2               ay_note:
+0000E8r 2  C9 60                cmp     #AY_NOTES
+0000EAr 2  90 02                bcc     @ok
+0000ECr 2  A9 5F                lda     #AY_NOTES - 1
+0000EEr 2  A8           @ok:    tay
+0000EFr 2  B9 rr rr             lda     note_hi,y
+0000F2r 2  48                   pha
+0000F3r 2  B9 rr rr             lda     note_lo,y
+0000F6r 2  A8                   tay
+0000F7r 2  68                   pla                     ; (A = high, Y = low: swapped for ay_tone)
+0000F8r 2  8D rr rr             sta     ay_tmp
+0000FBr 2  98                   tya
+0000FCr 2  AC rr rr             ldy     ay_tmp
+0000FFr 2  4C rr rr             jmp     ay_tone
+000102r 2               
+000102r 2               ; channel X (0-2): volume A (0-15, 16 = follow the envelope)
+000102r 2               ay_volume:
+000102r 2  48                   pha
+000103r 2  8A                   txa
+000104r 2  18                   clc
+000105r 2  69 08                adc     #AY_VOL_A
+000107r 2  AA                   tax
+000108r 2  68                   pla
+000109r 2  20 rr rr             jsr     ay_write
+00010Cr 2  48                   pha
+00010Dr 2  8A                   txa
+00010Er 2  38                   sec
+00010Fr 2  E9 08                sbc     #AY_VOL_A
+000111r 2  AA                   tax
+000112r 2  68                   pla
+000113r 2  60                   rts
+000114r 2               
+000114r 2               ; mixer (register 7) = A: the port direction bits are always kept 0 (inputs)
+000114r 2               ay_mixer:
+000114r 2  29 3F                and     #$3F
+000116r 2  A2 07                ldx     #AY_MIXER
+000118r 2  4C rr rr             jmp     ay_write
+00011Br 2               
+00011Br 2                       .include "ay_notes.inc"
+00011Br 3               ; generated by tools/gen_notes.py: tone periods for a 2000000 Hz chip clock
+00011Br 3               ; note n = octave * 12 + semitone (C1 = 0 ... B8 = 95); A4 (n = 45) is 440 Hz
+00011Br 3               AY_NOTES = 96
+00011Br 3               note_lo:
+00011Br 3  EE 18 4D 8E          .byte   $EE, $18, $4D, $8E, $DA, $2F, $8F, $F7, $68, $E1, $61, $E9   ; octave 1
+00011Fr 3  DA 2F 8F F7  
+000123r 3  68 E1 61 E9  
+000127r 3  77 0C A7 47          .byte   $77, $0C, $A7, $47, $ED, $98, $47, $FC, $B4, $70, $31, $F4   ; octave 2
+00012Br 3  ED 98 47 FC  
+00012Fr 3  B4 70 31 F4  
+000133r 3  BC 86 53 24          .byte   $BC, $86, $53, $24, $F6, $CC, $A4, $7E, $5A, $38, $18, $FA   ; octave 3
+000137r 3  F6 CC A4 7E  
+00013Br 3  5A 38 18 FA  
+00013Fr 3  DE C3 AA 92          .byte   $DE, $C3, $AA, $92, $7B, $66, $52, $3F, $2D, $1C, $0C, $FD   ; octave 4
+000143r 3  7B 66 52 3F  
+000147r 3  2D 1C 0C FD  
+00014Br 3  EF E1 D5 C9          .byte   $EF, $E1, $D5, $C9, $BE, $B3, $A9, $9F, $96, $8E, $86, $7F   ; octave 5
+00014Fr 3  BE B3 A9 9F  
+000153r 3  96 8E 86 7F  
+000157r 3  77 71 6A 64          .byte   $77, $71, $6A, $64, $5F, $59, $54, $50, $4B, $47, $43, $3F   ; octave 6
+00015Br 3  5F 59 54 50  
+00015Fr 3  4B 47 43 3F  
+000163r 3  3C 38 35 32          .byte   $3C, $38, $35, $32, $2F, $2D, $2A, $28, $26, $24, $22, $20   ; octave 7
+000167r 3  2F 2D 2A 28  
+00016Br 3  26 24 22 20  
+00016Fr 3  1E 1C 1B 19          .byte   $1E, $1C, $1B, $19, $18, $16, $15, $14, $13, $12, $11, $10   ; octave 8
+000173r 3  18 16 15 14  
+000177r 3  13 12 11 10  
+00017Br 3               note_hi:
+00017Br 3  0E 0E 0D 0C          .byte   $0E, $0E, $0D, $0C, $0B, $0B, $0A, $09, $09, $08, $08, $07
+00017Fr 3  0B 0B 0A 09  
+000183r 3  09 08 08 07  
+000187r 3  07 07 06 06          .byte   $07, $07, $06, $06, $05, $05, $05, $04, $04, $04, $04, $03
+00018Br 3  05 05 05 04  
+00018Fr 3  04 04 04 03  
+000193r 3  03 03 03 03          .byte   $03, $03, $03, $03, $02, $02, $02, $02, $02, $02, $02, $01
+000197r 3  02 02 02 02  
+00019Br 3  02 02 02 01  
+00019Fr 3  01 01 01 01          .byte   $01, $01, $01, $01, $01, $01, $01, $01, $01, $01, $01, $00
+0001A3r 3  01 01 01 01  
+0001A7r 3  01 01 01 00  
+0001ABr 3  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+0001AFr 3  00 00 00 00  
+0001B3r 3  00 00 00 00  
+0001B7r 3  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+0001BBr 3  00 00 00 00  
+0001BFr 3  00 00 00 00  
+0001C3r 3  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+0001C7r 3  00 00 00 00  
+0001CBr 3  00 00 00 00  
+0001CFr 3  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+0001D3r 3  00 00 00 00  
+0001D7r 3  00 00 00 00  
+0001DBr 3               
+0001DBr 2               
+0001DBr 2                       .segment "BSS"
+000000r 2  xx xx        ay_ptr:     .res 2              ; ay_regs: where the 14 register values are
+000002r 2  xx           ay_tmp:     .res 1
+000003r 2                       .segment "CODE"
+0001DBr 2               
+0001DBr 1                       .include "synth.s"
+0001DBr 2               ; ============================================================================
+0001DBr 2               ; synth.s - the sounds of PIANO and SEQ: 8 sounds and a drum kit on the three
+0001DBr 2               ; channels, each note with its own shape (attack, decay to a sustain level, a
+0001DBr 2               ; time held, release), vibrato, octave and chord arpeggios, falling pitch,
+0001DBr 2               ; noise, and the envelope as a saw wave (BUZZ).
+0001DBr 2               ;
+0001DBr 2               ;   syn_init    all off
+0001DBr 2               ;   syn_start   start a note: sound k_ins, note k_note, on channel X
+0001DBr 2               ;   step_all    every 1/50 s: every channel a frame on, the registers written
+0001DBr 2               ;   all_off     all the notes off now
+0001DBr 2               ;   chan_out    channel X's registers from its state
+0001DBr 2               ;   hold,x      frames a note stays in its sustain (beyond its own time)
+0001DBr 2               ;   gate_mode   1: a note sustains only while hold,x lasts (SEQ's steps)
+0001DBr 2               ;
+0001DBr 2               ; Needs ay.s (ay_write, ay_tone, ay_volume, ay_mixer, the note table).
+0001DBr 2               ; ============================================================================
+0001DBr 2               
+0001DBr 2               ; the sounds: 16 bytes each
+0001DBr 2               I_ATK           = 0             ; attack: added to the volume a frame (240 = at once)
+0001DBr 2               I_DEC           = 1             ; decay: taken off a frame, down to
+0001DBr 2               I_SUS           = 2             ;  the sustain level (volume x 16, 0-240)
+0001DBr 2               I_SUST          = 3             ; frames it sustains at least (more while held)
+0001DBr 2               I_REL           = 4             ; release: taken off a frame
+0001DBr 2               I_FLAGS         = 5
+0001DBr 2               I_VIB           = 6             ; vibrato: the period / 2^n either way
+0001DBr 2               I_VDEL          = 7             ;  after this many frames
+0001DBr 2               I_SWEEP         = 8             ; the pitch falls: period += period / 2^n a frame
+0001DBr 2               I_NOISE         = 9             ; the noise period to set (0: not)
+0001DBr 2               I_NOTE          = 10            ; a fixed note ($FF: the key's)
+0001DBr 2               I_NFR           = 11            ; noise only for this many frames (0: all along)
+0001DBr 2               I_REP           = 12            ; a key again within this many frames: a repeat
+0001DBr 2               
+0001DBr 2               F_NOISE         = 1
+0001DBr 2               F_NOTONE        = 2
+0001DBr 2               F_BUZZ          = 4             ; the envelope as a saw wave at the note
+0001DBr 2               F_OCT           = 8             ; the octave above every other frame
+0001DBr 2               F_CHORD         = 16            ; a major chord, a note a frame
+0001DBr 2               F_SWEEP         = 32
+0001DBr 2               F_DRUMS         = 64            ; the key picks a drum
+0001DBr 2               F_VIB           = 128
+0001DBr 2               
+0001DBr 2               N_SOUNDS        = 8             ; the ones to choose from
+0001DBr 2               DRUM_KIT        = 8             ; the drums after them
+0001DBr 2               HOLD            = 8             ; frames a key repeat holds a note for
+0001DBr 2               
+0001DBr 2               ST_OFF          = 0
+0001DBr 2               ST_ATK          = 1
+0001DBr 2               ST_DEC          = 2
+0001DBr 2               ST_SUS          = 3
+0001DBr 2               ST_REL          = 4
+0001DBr 2               
+0001DBr 2               ; all off: the channels silent, tones on, noise off
+0001DBr 2               syn_init:
+0001DBr 2  A9 38                lda     #$38
+0001DDr 2  8D rr rr             sta     mixer
+0001E0r 2  20 rr rr             jsr     ay_mixer
+0001E3r 2  A2 02                ldx     #2
+0001E5r 2  A9 00        @c:     lda     #ST_OFF
+0001E7r 2  9D rr rr             sta     st,x
+0001EAr 2  9D rr rr             sta     vol,x
+0001EDr 2  9D rr rr             sta     hold,x
+0001F0r 2  CA                   dex
+0001F1r 2  10 F2                bpl     @c
+0001F3r 2  A9 00                lda     #0
+0001F5r 2  8D rr rr             sta     frame
+0001F8r 2  8D rr rr             sta     arp3
+0001FBr 2  8D rr rr             sta     gate_mode
+0001FEr 2  60                   rts
+0001FFr 2               
+0001FFr 2               ; start a note: sound k_ins, note k_note (or the sound's own) on channel X;
+0001FFr 2               ; its registers are written at once
+0001FFr 2               syn_start:
+0001FFr 2  AD rr rr             lda     k_ins
+000202r 2  9D rr rr             sta     ins,x
+000205r 2  20 rr rr             jsr     ins_ptr
+000208r 2  A0 0A                ldy     #I_NOTE
+00020Ar 2  B9 rr rr             lda     cur_ins,y
+00020Dr 2  C9 FF                cmp     #$FF
+00020Fr 2  D0 03                bne     @fix
+000211r 2  AD rr rr             lda     k_note
+000214r 2  9D rr rr     @fix:   sta     note,x
+000217r 2  A8                   tay
+000218r 2  B9 rr rr             lda     note_lo,y       ; the period, for the sweeps
+00021Br 2  9D rr rr             sta     per_lo,x
+00021Er 2  B9 rr rr             lda     note_hi,y
+000221r 2  9D rr rr             sta     per_hi,x
+000224r 2  A9 00                lda     #0
+000226r 2  9D rr rr             sta     t,x
+000229r 2  9D rr rr             sta     age,x
+00022Cr 2  9D rr rr             sta     last,x
+00022Fr 2  9D rr rr             sta     hold,x
+000232r 2  A9 01                lda     #ST_ATK
+000234r 2  9D rr rr             sta     st,x
+000237r 2  A0 00                ldy     #I_ATK          ; at once: straight to the decay
+000239r 2  B9 rr rr             lda     cur_ins,y
+00023Cr 2  C9 F0                cmp     #240
+00023Er 2  90 0A                bcc     @noise
+000240r 2  A9 F0                lda     #240
+000242r 2  9D rr rr             sta     vol,x
+000245r 2  A9 02                lda     #ST_DEC
+000247r 2  9D rr rr             sta     st,x
+00024Ar 2  A0 09        @noise: ldy     #I_NOISE
+00024Cr 2  B9 rr rr             lda     cur_ins,y
+00024Fr 2  F0 0B                beq     @buzz
+000251r 2  8E rr rr             stx     s_t1
+000254r 2  A2 06                ldx     #AY_NOISE
+000256r 2  20 rr rr             jsr     ay_write
+000259r 2  AE rr rr             ldx     s_t1
+00025Cr 2  A0 05        @buzz:  ldy     #I_FLAGS
+00025Er 2  B9 rr rr             lda     cur_ins,y
+000261r 2  29 04                and     #F_BUZZ
+000263r 2  F0 38                beq     @out
+000265r 2  8E rr rr             stx     s_t1             ; the envelope period: the tone period / 16
+000268r 2  BD rr rr             lda     per_lo,x
+00026Br 2  18                   clc
+00026Cr 2  69 08                adc     #8
+00026Er 2  8D rr rr             sta     s_t2
+000271r 2  BD rr rr             lda     per_hi,x
+000274r 2  69 00                adc     #0
+000276r 2  4A                   lsr
+000277r 2  6E rr rr             ror     s_t2
+00027Ar 2  4A                   lsr
+00027Br 2  6E rr rr             ror     s_t2
+00027Er 2  4A                   lsr
+00027Fr 2  6E rr rr             ror     s_t2
+000282r 2  4A                   lsr
+000283r 2  6E rr rr             ror     s_t2
+000286r 2  A2 0C                ldx     #AY_ENV_HI
+000288r 2  20 rr rr             jsr     ay_write
+00028Br 2  AD rr rr             lda     s_t2
+00028Er 2  A2 0B                ldx     #AY_ENV_LO
+000290r 2  20 rr rr             jsr     ay_write
+000293r 2  A9 08                lda     #ENV_SAW_DOWN   ; (starts it)
+000295r 2  A2 0D                ldx     #AY_ENV_SHAPE
+000297r 2  20 rr rr             jsr     ay_write
+00029Ar 2  AE rr rr             ldx     s_t1
+00029Dr 2  4C rr rr     @out:   jmp     chan_out        ; on the chip now
+0002A0r 2               
+0002A0r 2               ; cur_ins = the sound A's 16 bytes (keeps X)
+0002A0r 2               ins_ptr:
+0002A0r 2  0A                   asl
+0002A1r 2  0A                   asl
+0002A2r 2  0A                   asl
+0002A3r 2  0A                   asl
+0002A4r 2  A8                   tay
+0002A5r 2  8E rr rr             stx     @x
+0002A8r 2  A2 00                ldx     #0
+0002AAr 2  B9 rr rr     @c:     lda     ins_tab,y
+0002ADr 2  9D rr rr             sta     cur_ins,x
+0002B0r 2  C8                   iny
+0002B1r 2  E8                   inx
+0002B2r 2  E0 10                cpx     #16
+0002B4r 2  D0 F4                bne     @c
+0002B6r 2  AE rr rr             ldx     @x
+0002B9r 2  60                   rts
+0002BAr 2  00           @x:     .byte   0
+0002BBr 2               
+0002BBr 2               ; A = A mod 12
+0002BBr 2  C9 0C        mod12:  cmp     #12
+0002BDr 2  90 04                bcc     @r
+0002BFr 2  E9 0C                sbc     #12
+0002C1r 2  B0 F8                bcs     mod12
+0002C3r 2  60           @r:     rts
+0002C4r 2               
+0002C4r 2               ; all the notes off at once
+0002C4r 2               all_off:
+0002C4r 2  A2 02                ldx     #2
+0002C6r 2  A9 00        @c:     lda     #ST_OFF
+0002C8r 2  9D rr rr             sta     st,x
+0002CBr 2  9D rr rr             sta     vol,x
+0002CEr 2  20 rr rr             jsr     chan_out
+0002D1r 2  CA                   dex
+0002D2r 2  10 F2                bpl     @c
+0002D4r 2  60                   rts
+0002D5r 2               
+0002D5r 2               
+0002D5r 2               ; ---- the sounds, a frame on ------------------------------------------------------------
+0002D5r 2               step_all:
+0002D5r 2  EE rr rr             inc     frame
+0002D8r 2  EE rr rr             inc     arp3            ; (0 1 2: the chord's notes)
+0002DBr 2  AD rr rr             lda     arp3
+0002DEr 2  C9 03                cmp     #3
+0002E0r 2  90 05                bcc     @a
+0002E2r 2  A9 00                lda     #0
+0002E4r 2  8D rr rr             sta     arp3
+0002E7r 2  A2 02        @a:     ldx     #2
+0002E9r 2  20 rr rr     @c:     jsr     chan_step
+0002ECr 2  20 rr rr             jsr     chan_out
+0002EFr 2  CA                   dex
+0002F0r 2  10 F7                bpl     @c
+0002F2r 2  60                   rts
+0002F3r 2               
+0002F3r 2               ; channel X: its volume a frame on (attack, decay, sustain, release)
+0002F3r 2               chan_step:
+0002F3r 2  BD rr rr             lda     age,x           ; (the counts, kept at 255)
+0002F6r 2  C9 FF                cmp     #255
+0002F8r 2  F0 03                beq     :+
+0002FAr 2  FE rr rr             inc     age,x
+0002FDr 2  BD rr rr     :       lda     last,x
+000300r 2  C9 FF                cmp     #255
+000302r 2  F0 03                beq     :+
+000304r 2  FE rr rr             inc     last,x
+000307r 2  BD rr rr     :       lda     hold,x
+00030Ar 2  F0 03                beq     :+
+00030Cr 2  DE rr rr             dec     hold,x
+00030Fr 2  BD rr rr     :       lda     st,x
+000312r 2  D0 01                bne     :+
+000314r 2  60                   rts
+000315r 2  BD rr rr     :       lda     ins,x
+000318r 2  20 rr rr             jsr     ins_ptr
+00031Br 2  BD rr rr             lda     st,x
+00031Er 2  C9 01                cmp     #ST_ATK
+000320r 2  D0 1E                bne     @dec
+000322r 2  A0 00                ldy     #I_ATK
+000324r 2  BD rr rr             lda     vol,x
+000327r 2  18                   clc
+000328r 2  79 rr rr             adc     cur_ins,y
+00032Br 2  B0 04                bcs     @top
+00032Dr 2  C9 F0                cmp     #240
+00032Fr 2  90 0B                bcc     @sv
+000331r 2  A9 F0        @top:   lda     #240
+000333r 2  9D rr rr             sta     vol,x
+000336r 2  A9 02                lda     #ST_DEC
+000338r 2  9D rr rr             sta     st,x
+00033Br 2  60                   rts
+00033Cr 2  9D rr rr     @sv:    sta     vol,x
+00033Fr 2  60                   rts
+000340r 2  C9 02        @dec:   cmp     #ST_DEC
+000342r 2  D0 35                bne     @sus
+000344r 2  A0 01                ldy     #I_DEC
+000346r 2  B9 rr rr             lda     cur_ins,y
+000349r 2  F0 19                beq     @tosus          ; (no decay: straight to the sustain level)
+00034Br 2  8D rr rr             sta     s_t1
+00034Er 2  BD rr rr             lda     vol,x
+000351r 2  38                   sec
+000352r 2  ED rr rr             sbc     s_t1
+000355r 2  90 0D                bcc     @tosus
+000357r 2  A0 02                ldy     #I_SUS
+000359r 2  D9 rr rr             cmp     cur_ins,y
+00035Cr 2  90 06                bcc     @tosus
+00035Er 2  F0 04                beq     @tosus
+000360r 2  9D rr rr             sta     vol,x
+000363r 2  60                   rts
+000364r 2  A0 02        @tosus: ldy     #I_SUS
+000366r 2  B9 rr rr             lda     cur_ins,y
+000369r 2  9D rr rr             sta     vol,x
+00036Cr 2  F0 44                beq     @off            ; (sustain 0: the note is over)
+00036Er 2  A9 03                lda     #ST_SUS
+000370r 2  9D rr rr             sta     st,x
+000373r 2  A9 00                lda     #0
+000375r 2  9D rr rr             sta     t,x
+000378r 2  60                   rts
+000379r 2  C9 03        @sus:   cmp     #ST_SUS
+00037Br 2  D0 24                bne     @rel
+00037Dr 2  BD rr rr             lda     t,x
+000380r 2  C9 FF                cmp     #255
+000382r 2  F0 03                beq     :+
+000384r 2  FE rr rr             inc     t,x
+000387r 2  BD rr rr     :       lda     hold,x          ; held: stay
+00038Ar 2  D0 14                bne     @r
+00038Cr 2  AD rr rr             lda     gate_mode       ; (SEQ: only as long as held)
+00038Fr 2  D0 0A                bne     @torel
+000391r 2  A0 03                ldy     #I_SUST
+000393r 2  BD rr rr             lda     t,x
+000396r 2  D9 rr rr             cmp     cur_ins,y
+000399r 2  90 05                bcc     @r
+00039Br 2  A9 04        @torel: lda     #ST_REL
+00039Dr 2  9D rr rr             sta     st,x
+0003A0r 2  60           @r:     rts
+0003A1r 2  A0 04        @rel:   ldy     #I_REL
+0003A3r 2  BD rr rr             lda     vol,x
+0003A6r 2  38                   sec
+0003A7r 2  F9 rr rr             sbc     cur_ins,y
+0003AAr 2  90 06                bcc     @off
+0003ACr 2  F0 04                beq     @off
+0003AEr 2  9D rr rr             sta     vol,x
+0003B1r 2  60                   rts
+0003B2r 2  A9 00        @off:   lda     #ST_OFF
+0003B4r 2  9D rr rr             sta     st,x
+0003B7r 2  A9 00                lda     #0
+0003B9r 2  9D rr rr             sta     vol,x
+0003BCr 2  60                   rts
+0003BDr 2               
+0003BDr 2               ; channel X's registers from how it is now: tone period, volume, the mixer
+0003BDr 2               chan_out:
+0003BDr 2  8E rr rr             stx     cx
+0003C0r 2  BD rr rr             lda     st,x
+0003C3r 2  D0 08                bne     @on
+0003C5r 2  A9 00                lda     #0              ; off: volume 0
+0003C7r 2  20 rr rr             jsr     ay_volume
+0003CAr 2  4C rr rr             jmp     @mix
+0003CDr 2  BD rr rr     @on:    lda     ins,x
+0003D0r 2  20 rr rr             jsr     ins_ptr
+0003D3r 2  A0 05                ldy     #I_FLAGS
+0003D5r 2  B9 rr rr             lda     cur_ins,y
+0003D8r 2  8D rr rr             sta     fl
+0003DBr 2  29 20                and     #F_SWEEP        ; the pitch falling: per += per >> n
+0003DDr 2  F0 45                beq     @pitch
+0003DFr 2  A0 08                ldy     #I_SWEEP
+0003E1r 2  B9 rr rr             lda     cur_ins,y
+0003E4r 2  A8                   tay
+0003E5r 2  BD rr rr             lda     per_lo,x
+0003E8r 2  8D rr rr             sta     s_t1
+0003EBr 2  BD rr rr             lda     per_hi,x
+0003EEr 2  8D rr rr             sta     s_t2
+0003F1r 2  4E rr rr     @sh:    lsr     s_t2
+0003F4r 2  6E rr rr             ror     s_t1
+0003F7r 2  88                   dey
+0003F8r 2  D0 F7                bne     @sh
+0003FAr 2  BD rr rr             lda     per_lo,x
+0003FDr 2  18                   clc
+0003FEr 2  6D rr rr             adc     s_t1
+000401r 2  9D rr rr             sta     per_lo,x
+000404r 2  8D rr rr             sta     p_lo
+000407r 2  BD rr rr             lda     per_hi,x
+00040Ar 2  6D rr rr             adc     s_t2
+00040Dr 2  C9 10                cmp     #$10            ; (12 bits at most)
+00040Fr 2  90 0A                bcc     @sw
+000411r 2  A9 FF                lda     #$FF
+000413r 2  9D rr rr             sta     per_lo,x
+000416r 2  8D rr rr             sta     p_lo
+000419r 2  A9 0F                lda     #$0F
+00041Br 2  9D rr rr     @sw:    sta     per_hi,x
+00041Er 2  8D rr rr             sta     p_hi
+000421r 2  4C rr rr             jmp     @tone
+000424r 2  BD rr rr     @pitch: lda     note,x          ; the note, or a note of the chord
+000427r 2  AC rr rr             ldy     fl
+00042Ar 2  C0 10                cpy     #F_CHORD
+00042Cr 2  D0 0D                bne     @n
+00042Er 2  AC rr rr             ldy     arp3
+000431r 2  18                   clc
+000432r 2  79 rr rr             adc     chord,y
+000435r 2  C9 60                cmp     #AY_NOTES
+000437r 2  90 02                bcc     @n
+000439r 2  A9 5F                lda     #AY_NOTES - 1
+00043Br 2  A8           @n:     tay
+00043Cr 2  B9 rr rr             lda     note_lo,y
+00043Fr 2  8D rr rr             sta     p_lo
+000442r 2  B9 rr rr             lda     note_hi,y
+000445r 2  8D rr rr             sta     p_hi
+000448r 2  AD rr rr             lda     fl              ; the octave above, every other frame
+00044Br 2  29 08                and     #F_OCT
+00044Dr 2  F0 0C                beq     @vib
+00044Fr 2  AD rr rr             lda     frame
+000452r 2  4A                   lsr
+000453r 2  90 06                bcc     @vib
+000455r 2  4E rr rr             lsr     p_hi
+000458r 2  6E rr rr             ror     p_lo
+00045Br 2  AD rr rr     @vib:   lda     fl              ; vibrato: + d, 0, - d, 0 ...
+00045Er 2  10 5B                bpl     @tone
+000460r 2  A0 07                ldy     #I_VDEL
+000462r 2  BD rr rr             lda     age,x
+000465r 2  D9 rr rr             cmp     cur_ins,y
+000468r 2  90 51                bcc     @tone
+00046Ar 2  A0 06                ldy     #I_VIB
+00046Cr 2  B9 rr rr             lda     cur_ins,y
+00046Fr 2  A8                   tay
+000470r 2  AD rr rr             lda     p_lo
+000473r 2  8D rr rr             sta     s_t1
+000476r 2  AD rr rr             lda     p_hi
+000479r 2  8D rr rr             sta     s_t2
+00047Cr 2  4E rr rr     @vs:    lsr     s_t2
+00047Fr 2  6E rr rr             ror     s_t1
+000482r 2  88                   dey
+000483r 2  D0 F7                bne     @vs
+000485r 2  AD rr rr             lda     frame
+000488r 2  29 06                and     #6
+00048Ar 2  C9 02                cmp     #2
+00048Cr 2  F0 1A                beq     @vup
+00048Er 2  C9 06                cmp     #6
+000490r 2  D0 29                bne     @tone
+000492r 2  AD rr rr             lda     p_lo            ; down: - d
+000495r 2  38                   sec
+000496r 2  ED rr rr             sbc     s_t1
+000499r 2  8D rr rr             sta     p_lo
+00049Cr 2  AD rr rr             lda     p_hi
+00049Fr 2  ED rr rr             sbc     s_t2
+0004A2r 2  8D rr rr             sta     p_hi
+0004A5r 2  4C rr rr             jmp     @tone
+0004A8r 2  AD rr rr     @vup:   lda     p_lo
+0004ABr 2  18                   clc
+0004ACr 2  6D rr rr             adc     s_t1
+0004AFr 2  8D rr rr             sta     p_lo
+0004B2r 2  AD rr rr             lda     p_hi
+0004B5r 2  6D rr rr             adc     s_t2
+0004B8r 2  8D rr rr             sta     p_hi
+0004BBr 2  AD rr rr     @tone:  lda     p_lo
+0004BEr 2  AC rr rr             ldy     p_hi
+0004C1r 2  AE rr rr             ldx     cx
+0004C4r 2  20 rr rr             jsr     ay_tone
+0004C7r 2  AD rr rr             lda     fl              ; the volume (BUZZ: the envelope)
+0004CAr 2  29 04                and     #F_BUZZ
+0004CCr 2  F0 04                beq     @v
+0004CEr 2  A9 10                lda     #16
+0004D0r 2  D0 07                bne     @vw
+0004D2r 2  BD rr rr     @v:     lda     vol,x
+0004D5r 2  4A                   lsr
+0004D6r 2  4A                   lsr
+0004D7r 2  4A                   lsr
+0004D8r 2  4A                   lsr
+0004D9r 2  20 rr rr     @vw:    jsr     ay_volume
+0004DCr 2  AE rr rr     @mix:   ldx     cx              ; the mixer: this channel's bits
+0004DFr 2  AD rr rr             lda     mixer
+0004E2r 2  1D rr rr             ora     tone_bit,x      ; (off to start with)
+0004E5r 2  1D rr rr             ora     noise_bit,x
+0004E8r 2  8D rr rr             sta     mixer
+0004EBr 2  BD rr rr             lda     st,x
+0004EEr 2  F0 2E                beq     @mw             ; (off: both off)
+0004F0r 2  AD rr rr             lda     fl
+0004F3r 2  29 02                and     #F_NOTONE
+0004F5r 2  D0 09                bne     @nz
+0004F7r 2  AD rr rr             lda     mixer
+0004FAr 2  3D rr rr             and     tone_off,x
+0004FDr 2  8D rr rr             sta     mixer
+000500r 2  AD rr rr     @nz:    lda     fl
+000503r 2  29 01                and     #F_NOISE
+000505r 2  F0 17                beq     @mw
+000507r 2  A0 0B                ldy     #I_NFR
+000509r 2  B9 rr rr             lda     cur_ins,y
+00050Cr 2  F0 07                beq     @non
+00050Er 2  DD rr rr             cmp     age,x
+000511r 2  90 0B                bcc     @mw
+000513r 2  F0 09                beq     @mw
+000515r 2  AD rr rr     @non:   lda     mixer
+000518r 2  3D rr rr             and     noise_off,x
+00051Br 2  8D rr rr             sta     mixer
+00051Er 2  AD rr rr     @mw:    lda     mixer
+000521r 2  20 rr rr             jsr     ay_mixer
+000524r 2  AE rr rr             ldx     cx
+000527r 2  60                   rts
+000528r 2               
+000528r 2  01 02 04     tone_bit:   .byte   1, 2, 4
+00052Br 2  08 10 20     noise_bit:  .byte   8, 16, 32
+00052Er 2  FE FD FB     tone_off:   .byte   $FE, $FD, $FB
+000531r 2  F7 EF DF     noise_off:  .byte   $F7, $EF, $DF
+000534r 2  00 04 07     chord:      .byte   0, 4, 7
+000537r 2               
+000537r 2               ; the sounds' names (8 characters each) and the sounds
+000537r 2  50 49 41 4E  names:      .byte   "PIANO   HARP    ORGAN   STRINGS CHIP    CHORD   BUZZ    DRUMS   "
+00053Br 2  4F 20 20 20  
+00053Fr 2  48 41 52 50  
+000577r 2               
+000577r 2               ; the sounds: attack, decay, sustain, sustain frames, release, flags,
+000577r 2               ; vibrato shift and delay, sweep shift, noise period, fixed note, noise frames,
+000577r 2               ; repeat window, (3 spare)
+000577r 2               ins_tab:
+000577r 2  F0 06 60 00          .byte   240,  6,  96,  0,   2, 0,                  0,  0, 0, 0, $FF, 0,  6, 0,0,0  ; PIANO
+00057Br 2  02 00 00 00  
+00057Fr 2  00 00 FF 00  
+000587r 2  F0 0C 28 00          .byte   240, 12,  40,  0,   3, 0,                  0,  0, 0, 0, $FF, 0,  6, 0,0,0  ; HARP
+00058Br 2  03 00 00 00  
+00058Fr 2  00 00 FF 00  
+000597r 2  3C 00 D0 1E          .byte    60,  0, 208, 30,   8, 0,                  0,  0, 0, 0, $FF, 0, 40, 0,0,0  ; ORGAN
+00059Br 2  08 00 00 00  
+00059Fr 2  00 00 FF 00  
+0005A7r 2  0C 00 C0 28          .byte    12,  0, 192, 40,   4, F_VIB,              7, 15, 0, 0, $FF, 0, 40, 0,0,0  ; STRINGS
+0005ABr 2  04 80 07 0F  
+0005AFr 2  00 00 FF 00  
+0005B7r 2  F0 04 A0 14          .byte   240,  4, 160, 20,   4, F_OCT,              0,  0, 0, 0, $FF, 0,  6, 0,0,0  ; CHIP
+0005BBr 2  04 08 00 00  
+0005BFr 2  00 00 FF 00  
+0005C7r 2  F0 04 A0 14          .byte   240,  4, 160, 20,   4, F_CHORD,            0,  0, 0, 0, $FF, 0,  6, 0,0,0  ; CHORD
+0005CBr 2  04 10 00 00  
+0005CFr 2  00 00 FF 00  
+0005D7r 2  F0 00 F0 19          .byte   240,  0, 240, 25, 240, F_BUZZ|F_NOTONE,    0,  0, 0, 0, $FF, 0, 40, 0,0,0  ; BUZZ
+0005DBr 2  F0 06 00 00  
+0005DFr 2  00 00 FF 00  
+0005E7r 2  F0 28 00 00          .byte   240, 40,   0,  0,   0, F_DRUMS,            0,  0, 0, 0, $FF, 0,  6, 0,0,0  ; DRUMS (the kit:)
+0005EBr 2  00 40 00 00  
+0005EFr 2  00 00 FF 00  
+0005F7r 2  F0 18 00 00          .byte   240, 24,   0,  0,   0, F_SWEEP,            0,  0, 2, 0,  31, 0,  6, 0,0,0  ; kick
+0005FBr 2  00 20 00 00  
+0005FFr 2  02 00 1F 00  
+000607r 2  F0 0E 00 00          .byte   240, 14,   0,  0,   0, F_NOISE|F_SWEEP,    0,  0, 4, 6,  43, 0,  6, 0,0,0  ; snare
+00060Br 2  00 21 00 00  
+00060Fr 2  04 06 2B 00  
+000617r 2  F0 28 00 00          .byte   240, 40,   0,  0,   0, F_NOISE|F_NOTONE,   0,  0, 0, 1, $FF, 0,  6, 0,0,0  ; closed hi-hat
+00061Br 2  00 03 00 00  
+00061Fr 2  00 01 FF 00  
+000627r 2  F0 0A 00 00          .byte   240, 10,   0,  0,   0, F_NOISE|F_NOTONE,   0,  0, 0, 1, $FF, 0,  6, 0,0,0  ; open hi-hat
+00062Br 2  00 03 00 00  
+00062Fr 2  00 01 FF 00  
+000637r 2  F0 0C 00 00          .byte   240, 12,   0,  0,   0, F_SWEEP,            0,  0, 4, 0, $FF, 0,  6, 0,0,0  ; tom
+00063Br 2  00 20 00 00  
+00063Fr 2  04 00 FF 00  
+000647r 2  F0 05 00 00          .byte   240,  5,   0,  0,   0, F_NOISE|F_NOTONE,   0,  0, 0, 3, $FF, 0,  6, 0,0,0  ; crash
+00064Br 2  00 03 00 00  
+00064Fr 2  00 03 FF 00  
+000657r 2               
+000657r 2               
+000657r 2                       .segment "BSS"
+000003r 2  xx           frame:      .res 1
+000004r 2  xx           arp3:       .res 1
+000005r 2  xx           mixer:      .res 1
+000006r 2  xx           cx:         .res 1
+000007r 2  xx           fl:         .res 1
+000008r 2  xx           p_lo:       .res 1
+000009r 2  xx           p_hi:       .res 1
+00000Ar 2  xx           k_note:     .res 1
+00000Br 2  xx           k_ins:      .res 1
+00000Cr 2  xx xx xx xx  cur_ins:    .res 16             ; the sound in use (ins_ptr)
+000010r 2  xx xx xx xx  
+000014r 2  xx xx xx xx  
+00001Cr 2  xx xx xx     st:         .res 3              ; each channel: the stage,
+00001Fr 2  xx xx xx     note:       .res 3              ;  the note,
+000022r 2  xx xx xx     ins:        .res 3              ;  the sound
+000025r 2  xx xx xx     vol:        .res 3              ;  the volume x 16
+000028r 2  xx xx xx     t:          .res 3              ;  frames in the sustain
+00002Br 2  xx xx xx     age:        .res 3              ;  frames since it started
+00002Er 2  xx xx xx     last:       .res 3              ;  frames since its key was last pressed
+000031r 2  xx xx xx     hold:       .res 3              ;  frames still held by key repeats
+000034r 2  xx xx xx     per_lo:     .res 3              ;  the period (the sweeps)
+000037r 2  xx xx xx     per_hi:     .res 3
+00003Ar 2  xx           s_t1:       .res 1
+00003Br 2  xx           gate_mode:  .res 1
+00003Cr 2  xx           s_t2:       .res 1
+00003Dr 2                       .segment "CODE"
+000657r 2               
+000657r 1                       .include "ch376r.s"
+000657r 2               ; ============================================================================
+000657r 2               ; ch376r.s - reading files from the USB drive through the CH376 (parallel
+000657r 2               ; mode, at $7F20 data / $7F21 command and status), for programs loaded from
+000657r 2               ; the monitor: start the chip, list a directory, open, read, seek, close.
+000657r 2               ; The same protocol as the firmware's driver (ch376_abs.s), cut down to
+000657r 2               ; reading.  Every wait has a time-out, so a missing drive can't hang it.
+000657r 2               ;
+000657r 2               ;   ch_check    is the chip there?  carry set if not
+000657r 2               ;   ch_start    check the chip, USB host mode, mount the drive: carry set =
+000657r 2               ;               failed (A = what failed: 1 no chip, 2 mode, 3 no drive).  This
+000657r 2               ;               starts the drive afresh, in its top folder.
+000657r 2               ;   ch_open     open the file whose 0-ended name is at A/Y: "NAME.EXT" in the
+000657r 2               ;               current folder, "/NAME.EXT" in the top one: A = the CH376
+000657r 2               ;               status ($14 = open, $42 = not found)
+000657r 2               ;   ch_read     read ch_len bytes to (ch_ptr): A = $14 when done, ch_got =
+000657r 2               ;               bytes read (fewer at the end of the file)
+000657r 2               ;   ch_seek     to the 32 bit offset in ch_off
+000657r 2               ;   ch_close    close the open file
+000657r 2               ; With CH_WRITE defined, also writing:
+000657r 2               ;   ch_create   make the file whose 0-ended name is at A/Y (emptied if it is
+000657r 2               ;               there), open for writing: A = the status ($14 = made)
+000657r 2               ;   ch_write    write ch_len bytes from (ch_ptr): A = $14 when done
+000657r 2               ;   ch_close_w  close it, with its length kept
+000657r 2               ;   ch_dir      list the files that match the 0-ended name at A/Y ("/*": the
+000657r 2               ;               top folder, "*": the current one): calls (ch_entry_fn) for
+000657r 2               ;               each, with the 32 byte FAT entry in ch_ent (0-7 name, 8-10
+000657r 2               ;               extension, 11 attributes, 28-31 size).  A = $42 when it has
+000657r 2               ;               listed them all, or the status that stopped it (no drive ...)
+000657r 2               ;   ch_enter    make the folder whose 0-ended path is at A/Y ("" the top,
+000657r 2               ;               "/A" or "/A/B") the current one, a level at a time: "/A",
+000657r 2               ;               then "B".  A = $41 (ERR_OPEN_DIR) when it is in, else the
+000657r 2               ;               status that stopped it ($42: a folder isn't there)
+000657r 2               ;
+000657r 2               ; The current folder: the CH376 keeps the last folder opened as its current
+000657r 2               ; one, and names without a "/" are found there.  It isn't kept for long:
+000657r 2               ; opening a file leaves the chip with no current folder that works, so enter
+000657r 2               ; the folder again before each relative name (as the monitor does).
+000657r 2               ; ============================================================================
+000657r 2               
+000657r 2               CH_DATA         = $7F20
+000657r 2               CH_CMD          = $7F21
+000657r 2               
+000657r 2               CMD_CHECK_EXIST = $06
+000657r 2               CMD_SET_USB_MODE= $15
+000657r 2               CMD_GET_STATUS  = $22
+000657r 2               CMD_RD_USB_DATA0= $27
+000657r 2               CMD_SET_FILE_NAME = $2F
+000657r 2               CMD_DISK_CONNECT= $30
+000657r 2               CMD_DISK_MOUNT  = $31
+000657r 2               CMD_FILE_OPEN   = $32
+000657r 2               CMD_FILE_ENUM_GO= $33
+000657r 2               CMD_FILE_CLOSE  = $36
+000657r 2               CMD_BYTE_LOCATE = $39
+000657r 2               CMD_BYTE_READ   = $3A
+000657r 2               CMD_BYTE_RD_GO  = $3B
+000657r 2               CMD_WR_REQ_DATA = $2D
+000657r 2               CMD_FILE_CREATE = $34
+000657r 2               CMD_BYTE_WRITE  = $3C
+000657r 2               CMD_BYTE_WR_GO  = $3D
+000657r 2               USB_INT_DISK_WRITE = $1E
+000657r 2               
+000657r 2               USB_INT_SUCCESS = $14
+000657r 2               USB_INT_DISK_READ = $1D
+000657r 2               ERR_OPEN_DIR    = $41
+000657r 2               ERR_MISS_FILE   = $42
+000657r 2               CMD_RET_SUCCESS = $51
+000657r 2               
+000657r 2               ; wait while the chip is busy (status bit 4), at most ~100 ms.  Keeps X, Y.
+000657r 2               ch_wait_busy:
+000657r 2  AD 21 7F             lda     CH_CMD
+00065Ar 2  29 10                and     #$10
+00065Cr 2  F0 19                beq     @r
+00065Er 2  8A                   txa
+00065Fr 2  48                   pha
+000660r 2  98                   tya
+000661r 2  48                   pha
+000662r 2  A0 07                ldy     #CH_BUSY_OUTER
+000664r 2  A2 00                ldx     #0
+000666r 2  AD 21 7F     @l:     lda     CH_CMD
+000669r 2  29 10                and     #$10
+00066Br 2  F0 06                beq     @ok
+00066Dr 2  CA                   dex
+00066Er 2  D0 F6                bne     @l
+000670r 2  88                   dey
+000671r 2  D0 F3                bne     @l
+000673r 2  68           @ok:    pla
+000674r 2  A8                   tay
+000675r 2  68                   pla
+000676r 2  AA                   tax
+000677r 2  60           @r:     rts
+000678r 2               CH_BUSY_OUTER = (CLOCK_MHZ * 100000) / 3333 / 10 + 1     ; 256 x 13 cycles a turn
+000678r 2               
+000678r 2               ; a command (A).  Keeps X, Y.
+000678r 2  48           ch_cmd: pha
+000679r 2  20 rr rr             jsr     ch_wait_busy
+00067Cr 2  68                   pla
+00067Dr 2  8D 21 7F             sta     CH_CMD
+000680r 2  EA                   nop                     ; (the chip wants ~1.5 us before the next access)
+000681r 2  EA                   nop
+000682r 2  EA                   nop
+000683r 2  EA                   nop
+000684r 2  60                   rts
+000685r 2               
+000685r 2               ; a data byte (A) to the chip.  Keeps X, Y.
+000685r 2  48           ch_wr:  pha
+000686r 2  20 rr rr             jsr     ch_wait_busy
+000689r 2  68                   pla
+00068Ar 2  8D 20 7F             sta     CH_DATA
+00068Dr 2  60                   rts
+00068Er 2               
+00068Er 2               ; a data byte from the chip, in A.  Keeps X, Y.
+00068Er 2  20 rr rr     ch_rd:  jsr     ch_wait_busy
+000691r 2  AD 20 7F             lda     CH_DATA
+000694r 2  60                   rts
+000695r 2               
+000695r 2               ; wait for the chip's interrupt (status bit 7 low), at most ~3 s: carry set
+000695r 2               ; if it never came.  Keeps X, Y.
+000695r 2               ch_wait_int:
+000695r 2  8A                   txa
+000696r 2  48                   pha
+000697r 2  98                   tya
+000698r 2  48                   pha
+000699r 2  A9 08                lda     #CH_INT_OUTER
+00069Br 2  8D rr rr             sta     ch_tmo
+00069Er 2  A0 00                ldy     #0
+0006A0r 2  A2 00                ldx     #0
+0006A2r 2  AD 21 7F     @l:     lda     CH_CMD
+0006A5r 2  10 11                bpl     @got
+0006A7r 2  E8                   inx
+0006A8r 2  D0 F8                bne     @l
+0006AAr 2  C8                   iny
+0006ABr 2  D0 F5                bne     @l
+0006ADr 2  CE rr rr             dec     ch_tmo
+0006B0r 2  D0 F0                bne     @l
+0006B2r 2  68                   pla
+0006B3r 2  A8                   tay
+0006B4r 2  68                   pla
+0006B5r 2  AA                   tax
+0006B6r 2  38                   sec
+0006B7r 2  60                   rts
+0006B8r 2  68           @got:   pla
+0006B9r 2  A8                   tay
+0006BAr 2  68                   pla
+0006BBr 2  AA                   tax
+0006BCr 2  18                   clc
+0006BDr 2  60                   rts
+0006BEr 2               CH_INT_OUTER = (CLOCK_MHZ * 3) * 1000000 / 786000 + 1    ; 65536 x 12 cycles a turn
+0006BEr 2               
+0006BEr 2               ; the interrupt's status in A (and the interrupt cleared); $FF and carry set
+0006BEr 2               ; on a time-out.  Keeps X, Y.
+0006BEr 2               ch_status:
+0006BEr 2  20 rr rr             jsr     ch_wait_int
+0006C1r 2  B0 08                bcs     @t
+0006C3r 2  A9 22                lda     #CMD_GET_STATUS
+0006C5r 2  20 rr rr             jsr     ch_cmd
+0006C8r 2  4C rr rr             jmp     ch_rd
+0006CBr 2  A9 FF        @t:     lda     #$FF
+0006CDr 2  60                   rts
+0006CEr 2               
+0006CEr 2               ; ---- is the chip there?  (carry set if not) -------------------------------------------
+0006CEr 2               ch_check:
+0006CEr 2  A9 06                lda     #CMD_CHECK_EXIST
+0006D0r 2  20 rr rr             jsr     ch_cmd
+0006D3r 2  A9 55                lda     #$55
+0006D5r 2  20 rr rr             jsr     ch_wr
+0006D8r 2  20 rr rr             jsr     ch_rd
+0006DBr 2  C9 AA                cmp     #$AA
+0006DDr 2  F0 02                beq     @ok
+0006DFr 2  38                   sec
+0006E0r 2  60                   rts
+0006E1r 2  18           @ok:    clc
+0006E2r 2  60                   rts
+0006E3r 2               
+0006E3r 2               ; ---- start: check the chip, USB host mode, mount --------------------------------------
+0006E3r 2               ch_start:
+0006E3r 2  A9 06                lda     #CMD_CHECK_EXIST
+0006E5r 2  20 rr rr             jsr     ch_cmd
+0006E8r 2  A9 55                lda     #$55
+0006EAr 2  20 rr rr             jsr     ch_wr
+0006EDr 2  20 rr rr             jsr     ch_rd
+0006F0r 2  C9 AA                cmp     #$AA
+0006F2r 2  F0 04                beq     @mode
+0006F4r 2  A9 01                lda     #1              ; no chip
+0006F6r 2  38                   sec
+0006F7r 2  60                   rts
+0006F8r 2  A9 15        @mode:  lda     #CMD_SET_USB_MODE
+0006FAr 2  20 rr rr             jsr     ch_cmd
+0006FDr 2  A9 06                lda     #6              ; USB host, generate SOF
+0006FFr 2  20 rr rr             jsr     ch_wr
+000702r 2  A9 01                lda     #1
+000704r 2  20 rr rr             jsr     delay_ms
+000707r 2  20 rr rr             jsr     ch_rd
+00070Ar 2  C9 51                cmp     #CMD_RET_SUCCESS
+00070Cr 2  F0 04                beq     @m0
+00070Er 2  A9 02                lda     #2
+000710r 2  38                   sec
+000711r 2  60                   rts
+000712r 2  A9 14        @m0:    lda     #20             ; (a "drive connected" interrupt may come:
+000714r 2  20 rr rr             jsr     delay_ms        ;  clear it)
+000717r 2  AD 21 7F             lda     CH_CMD
+00071Ar 2  30 08                bmi     @mnt
+00071Cr 2  A9 22                lda     #CMD_GET_STATUS
+00071Er 2  20 rr rr             jsr     ch_cmd
+000721r 2  20 rr rr             jsr     ch_rd
+000724r 2  A9 05        @mnt:   lda     #5              ; mount: up to 5 tries
+000726r 2  8D rr rr             sta     ch_try
+000729r 2  A9 30        @m1:    lda     #CMD_DISK_CONNECT
+00072Br 2  20 rr rr             jsr     ch_cmd
+00072Er 2  20 rr rr             jsr     ch_status
+000731r 2  A9 31                lda     #CMD_DISK_MOUNT
+000733r 2  20 rr rr             jsr     ch_cmd
+000736r 2  20 rr rr             jsr     ch_status
+000739r 2  C9 14                cmp     #USB_INT_SUCCESS
+00073Br 2  F0 0E                beq     @ok
+00073Dr 2  A9 C8                lda     #200
+00073Fr 2  20 rr rr             jsr     delay_ms
+000742r 2  CE rr rr             dec     ch_try
+000745r 2  D0 E2                bne     @m1
+000747r 2  A9 03                lda     #3              ; no drive
+000749r 2  38                   sec
+00074Ar 2  60                   rts
+00074Br 2  18           @ok:    clc
+00074Cr 2  60                   rts
+00074Dr 2               
+00074Dr 2               ; the file name: the 0-ended string at A/Y
+00074Dr 2               ch_name:
+00074Dr 2  8D rr rr             sta     @ld+1
+000750r 2  8C rr rr             sty     @ld+2
+000753r 2  A9 2F                lda     #CMD_SET_FILE_NAME
+000755r 2  20 rr rr             jsr     ch_cmd
+000758r 2  A2 00                ldx     #0
+00075Ar 2               @l:
+00075Ar 2  BD FF FF     @ld:    lda     $FFFF,x
+00075Dr 2  20 rr rr             jsr     ch_wr
+000760r 2  F0 0A                beq     @r
+000762r 2  E8                   inx
+000763r 2  E0 0E                cpx     #14
+000765r 2  D0 F3                bne     @l
+000767r 2  A9 00                lda     #0
+000769r 2  20 rr rr             jsr     ch_wr
+00076Cr 2  60           @r:     rts
+00076Dr 2               
+00076Dr 2               ch_open:
+00076Dr 2  20 rr rr             jsr     ch_name
+000770r 2  A9 32                lda     #CMD_FILE_OPEN
+000772r 2  20 rr rr             jsr     ch_cmd
+000775r 2  4C rr rr             jmp     ch_status
+000778r 2               
+000778r 2               ch_close:
+000778r 2  A9 36                lda     #CMD_FILE_CLOSE
+00077Ar 2  20 rr rr             jsr     ch_cmd
+00077Dr 2  A9 00                lda     #0              ; (no length update: read only)
+00077Fr 2  20 rr rr             jsr     ch_wr
+000782r 2  4C rr rr             jmp     ch_status
+000785r 2               
+000785r 2               .ifdef CH_WRITE
+000785r 2               ch_create:
+000785r 2  20 rr rr             jsr     ch_name
+000788r 2  A9 34                lda     #CMD_FILE_CREATE
+00078Ar 2  20 rr rr             jsr     ch_cmd
+00078Dr 2  4C rr rr             jmp     ch_status
+000790r 2               
+000790r 2               ch_close_w:
+000790r 2  A9 36                lda     #CMD_FILE_CLOSE
+000792r 2  20 rr rr             jsr     ch_cmd
+000795r 2  A9 01                lda     #1              ; (the length kept)
+000797r 2  20 rr rr             jsr     ch_wr
+00079Ar 2  4C rr rr             jmp     ch_status
+00079Dr 2               
+00079Dr 2               ; write ch_len bytes from (ch_ptr), in the chunks the chip asks for
+00079Dr 2               ch_write:
+00079Dr 2  AD rr rr             lda     ch_ptr
+0007A0r 2  8D rr rr             sta     @ld+1
+0007A3r 2  AD rr rr             lda     ch_ptr+1
+0007A6r 2  8D rr rr             sta     @ld+2
+0007A9r 2  A9 3C                lda     #CMD_BYTE_WRITE
+0007ABr 2  20 rr rr             jsr     ch_cmd
+0007AEr 2  AD rr rr             lda     ch_len
+0007B1r 2  20 rr rr             jsr     ch_wr
+0007B4r 2  AD rr rr             lda     ch_len+1
+0007B7r 2  20 rr rr             jsr     ch_wr
+0007BAr 2  20 rr rr     @next:  jsr     ch_status
+0007BDr 2  C9 1E                cmp     #USB_INT_DISK_WRITE
+0007BFr 2  D0 2B                bne     @done           ; $14: all of it
+0007C1r 2  A9 2D                lda     #CMD_WR_REQ_DATA
+0007C3r 2  20 rr rr             jsr     ch_cmd
+0007C6r 2  20 rr rr             jsr     ch_rd           ; how many it takes
+0007C9r 2  8D rr rr             sta     ch_cnt
+0007CCr 2  F0 16                beq     @go
+0007CEr 2  A0 00                ldy     #0
+0007D0r 2  AD FF FF     @ld:    lda     $FFFF
+0007D3r 2  20 rr rr             jsr     ch_wr
+0007D6r 2  EE rr rr             inc     @ld+1
+0007D9r 2  D0 03                bne     :+
+0007DBr 2  EE rr rr             inc     @ld+2
+0007DEr 2  C8           :       iny
+0007DFr 2  CC rr rr             cpy     ch_cnt
+0007E2r 2  D0 EC                bne     @ld
+0007E4r 2  A9 3D        @go:    lda     #CMD_BYTE_WR_GO
+0007E6r 2  20 rr rr             jsr     ch_cmd
+0007E9r 2  4C rr rr             jmp     @next
+0007ECr 2  60           @done:  rts
+0007EDr 2               .endif
+0007EDr 2               
+0007EDr 2               ch_seek:
+0007EDr 2  A9 39                lda     #CMD_BYTE_LOCATE
+0007EFr 2  20 rr rr             jsr     ch_cmd
+0007F2r 2  A2 00                ldx     #0
+0007F4r 2  BD rr rr     @l:     lda     ch_off,x
+0007F7r 2  20 rr rr             jsr     ch_wr
+0007FAr 2  E8                   inx
+0007FBr 2  E0 04                cpx     #4
+0007FDr 2  D0 F5                bne     @l
+0007FFr 2  4C rr rr             jmp     ch_status
+000802r 2               
+000802r 2               ; read ch_len (up to 65535) bytes to (ch_ptr): in chunks of up to 64 the chip
+000802r 2               ; hands over
+000802r 2               ch_read:
+000802r 2  A9 00                lda     #0
+000804r 2  8D rr rr             sta     ch_got
+000807r 2  8D rr rr             sta     ch_got+1
+00080Ar 2  AD rr rr             lda     ch_ptr
+00080Dr 2  8D rr rr             sta     @st+1
+000810r 2  AD rr rr             lda     ch_ptr+1
+000813r 2  8D rr rr             sta     @st+2
+000816r 2  A9 3A                lda     #CMD_BYTE_READ
+000818r 2  20 rr rr             jsr     ch_cmd
+00081Br 2  AD rr rr             lda     ch_len
+00081Er 2  20 rr rr             jsr     ch_wr
+000821r 2  AD rr rr             lda     ch_len+1
+000824r 2  20 rr rr             jsr     ch_wr
+000827r 2  20 rr rr     @next:  jsr     ch_status
+00082Ar 2  C9 1D                cmp     #USB_INT_DISK_READ
+00082Cr 2  D0 3A                bne     @done           ; $14: all of it (or the end of the file)
+00082Er 2  A9 27                lda     #CMD_RD_USB_DATA0
+000830r 2  20 rr rr             jsr     ch_cmd
+000833r 2  20 rr rr             jsr     ch_rd           ; how many
+000836r 2  8D rr rr             sta     ch_cnt
+000839r 2  F0 25                beq     @go
+00083Br 2  A0 00                ldy     #0
+00083Dr 2  20 rr rr     @c:     jsr     ch_rd
+000840r 2  8D FF FF     @st:    sta     $FFFF
+000843r 2  EE rr rr             inc     @st+1
+000846r 2  D0 03                bne     @c1
+000848r 2  EE rr rr             inc     @st+2
+00084Br 2  C8           @c1:    iny
+00084Cr 2  CC rr rr             cpy     ch_cnt
+00084Fr 2  D0 EC                bne     @c
+000851r 2  AD rr rr             lda     ch_got
+000854r 2  18                   clc
+000855r 2  6D rr rr             adc     ch_cnt
+000858r 2  8D rr rr             sta     ch_got
+00085Br 2  90 03                bcc     @go
+00085Dr 2  EE rr rr             inc     ch_got+1
+000860r 2  A9 3B        @go:    lda     #CMD_BYTE_RD_GO
+000862r 2  20 rr rr             jsr     ch_cmd
+000865r 2  4C rr rr             jmp     @next
+000868r 2  60           @done:  rts
+000869r 2               
+000869r 2               ; list the files matching the name at A/Y: (ch_entry_fn) for each entry
+000869r 2               ; (ch_ent); A = $42 at the end, or an error status
+000869r 2  20 rr rr     ch_dir: jsr     ch_name
+00086Cr 2  A9 32                lda     #CMD_FILE_OPEN
+00086Er 2  20 rr rr             jsr     ch_cmd
+000871r 2  20 rr rr     @next:  jsr     ch_status
+000874r 2  C9 1D                cmp     #USB_INT_DISK_READ
+000876r 2  D0 31                bne     @r
+000878r 2  A9 27                lda     #CMD_RD_USB_DATA0
+00087Ar 2  20 rr rr             jsr     ch_cmd
+00087Dr 2  20 rr rr             jsr     ch_rd
+000880r 2  8D rr rr             sta     ch_cnt
+000883r 2  A0 00                ldy     #0
+000885r 2  CC rr rr     @rd:    cpy     ch_cnt
+000888r 2  B0 0D                bcs     @got
+00088Ar 2  20 rr rr             jsr     ch_rd
+00088Dr 2  C0 20                cpy     #32
+00088Fr 2  B0 03                bcs     @sk
+000891r 2  99 rr rr             sta     ch_ent,y
+000894r 2  C8           @sk:    iny
+000895r 2  D0 EE                bne     @rd
+000897r 2  AD rr rr     @got:   lda     ch_cnt
+00089Ar 2  C9 20                cmp     #32
+00089Cr 2  90 03                bcc     @more
+00089Er 2  20 rr rr             jsr     @call
+0008A1r 2  A9 33        @more:  lda     #CMD_FILE_ENUM_GO
+0008A3r 2  20 rr rr             jsr     ch_cmd
+0008A6r 2  4C rr rr             jmp     @next
+0008A9r 2  60           @r:     rts
+0008AAr 2  6C rr rr     @call:  jmp     (ch_entry_fn)
+0008ADr 2               
+0008ADr 2               ; enter the folder whose path is at A/Y ("" / "/A" / "/A/B"), a level at a
+0008ADr 2               ; time; A = $41 when in it
+0008ADr 2               ch_enter:
+0008ADr 2  8D rr rr             sta     ce_get+1
+0008B0r 2  8C rr rr             sty     ce_get+2
+0008B3r 2  A0 00                ldy     #0
+0008B5r 2  A2 00        @part:  ldx     #0              ; the next part: "/A" the first time, then "B"
+0008B7r 2  20 rr rr             jsr     ce_get
+0008BAr 2  F0 36                beq     @in             ; (the end of the path)
+0008BCr 2  C0 00                cpy     #0
+0008BEr 2  D0 04                bne     @skip
+0008C0r 2  8D rr rr             sta     ch_part         ; (only the first keeps its "/")
+0008C3r 2  E8                   inx
+0008C4r 2  C8           @skip:  iny
+0008C5r 2  20 rr rr     @cp:    jsr     ce_get
+0008C8r 2  F0 0D                beq     @end
+0008CAr 2  C9 2F                cmp     #'/'
+0008CCr 2  F0 09                beq     @end
+0008CEr 2  9D rr rr             sta     ch_part,x
+0008D1r 2  E8                   inx
+0008D2r 2  C8                   iny
+0008D3r 2  E0 0E                cpx     #14
+0008D5r 2  90 EE                bcc     @cp
+0008D7r 2  A9 00        @end:   lda     #0
+0008D9r 2  9D rr rr             sta     ch_part,x
+0008DCr 2  8C rr rr             sty     ch_py           ; (where we are in the path)
+0008DFr 2  A9 rr                lda     #<ch_part
+0008E1r 2  A0 rr                ldy     #>ch_part
+0008E3r 2  20 rr rr             jsr     ch_open
+0008E6r 2  AC rr rr             ldy     ch_py
+0008E9r 2  C9 41                cmp     #ERR_OPEN_DIR
+0008EBr 2  D0 07                bne     @r              ; not a folder (or not there)
+0008EDr 2  20 rr rr             jsr     ce_get          ; more?
+0008F0r 2  D0 C3                bne     @part
+0008F2r 2  A9 41        @in:    lda     #ERR_OPEN_DIR
+0008F4r 2  60           @r:     rts
+0008F5r 2  B9 FF FF     ce_get: lda     $FFFF,y         ; (the path's next character)
+0008F8r 2  60                   rts
+0008F9r 2               
+0008F9r 2                       .segment "BSS"
+00003Dr 2  xx xx        ch_ptr:     .res 2
+00003Fr 2  xx xx        ch_len:     .res 2
+000041r 2  xx xx        ch_got:     .res 2
+000043r 2  xx           ch_cnt:     .res 1
+000044r 2  xx xx xx xx  ch_off:     .res 4
+000048r 2  xx           ch_tmo:     .res 1
+000049r 2  xx           ch_try:     .res 1
+00004Ar 2  xx xx        ch_entry_fn:.res 2
+00004Cr 2  xx xx xx xx  ch_ent:     .res 32
+000050r 2  xx xx xx xx  
+000054r 2  xx xx xx xx  
+00006Cr 2  xx xx xx xx  ch_part:    .res 16             ; (ch_enter: one part of a path,
+000070r 2  xx xx xx xx  
+000074r 2  xx xx xx xx  
+00007Cr 2  xx           ch_py:      .res 1              ;  and where it is in the path)
+00007Dr 2                       .segment "CODE"
+0008F9r 2               
+0008F9r 1               
+0008F9r 1               ; ---- start ---------------------------------------------------------------------------
+0008F9r 1  D8           start:  cld
+0008FAr 1  A2 FF                ldx     #$FF
+0008FCr 1  9A                   txs
+0008FDr 1  20 rr rr             jsr     ay_silence
+000900r 1  20 rr rr             jsr     syn_init
+000903r 1  A9 01                lda     #1
+000905r 1  8D rr rr             sta     gate_mode
+000908r 1  AD 0B 7F             lda     VIA_ACR         ; timer 2: one shot, its interrupt off
+00090Br 1  29 DF                and     #$DF
+00090Dr 1  8D 0B 7F             sta     VIA_ACR
+000910r 1  A9 20                lda     #$20
+000912r 1  8D 0E 7F             sta     VIA_IER
+000915r 1  A9 00                lda     #0              ; the monitor's current folder (SBC_CWD), as
+000917r 1  8D rr rr             sta     cwd_buf         ;  in YMPLAY: files go there
+00091Ar 1  AD 18 FE             lda     SBC_CWD
+00091Dr 1  C9 4C                cmp     #$4C
+00091Fr 1  D0 1D                bne     @nocwd
+000921r 1  20 18 FE             jsr     SBC_CWD
+000924r 1  8D rr rr             sta     @cw+1
+000927r 1  8C rr rr             sty     @cw+2
+00092Ar 1  A2 00                ldx     #0
+00092Cr 1  BD FF FF     @cw:    lda     $FFFF,x
+00092Fr 1  9D rr rr             sta     cwd_buf,x
+000932r 1  F0 0A                beq     @nocwd
+000934r 1  E8                   inx
+000935r 1  E0 1F                cpx     #CWD_MAX
+000937r 1  90 F3                bcc     @cw
+000939r 1  A9 00                lda     #0
+00093Br 1  8D rr rr             sta     cwd_buf
+00093Er 1  20 rr rr     @nocwd: jsr     song_new
+000941r 1  A9 00                lda     #0
+000943r 1  8D rr rr             sta     pat
+000946r 1  8D rr rr             sta     playing
+000949r 1  8D rr rr             sta     loop_one
+00094Cr 1  8D rr rr             sta     cur_tr
+00094Fr 1  8D rr rr             sta     cur_st
+000952r 1  8D rr rr             sta     tick
+000955r 1  A9 03                lda     #3
+000957r 1  8D rr rr             sta     octave
+00095Ar 1  20 rr rr             jsr     draw_screen
+00095Dr 1  20 rr rr             jsr     t_start
+000960r 1               
+000960r 1               ; ---- the main loop: keys all the time; steps from the tempo; sounds every other tick ----
+000960r 1  20 rr rr     main:   jsr     getkey
+000963r 1  90 03                bcc     @t
+000965r 1  20 rr rr             jsr     do_key
+000968r 1  AD 0D 7F     @t:     lda     VIA_IFR
+00096Br 1  29 20                and     #$20
+00096Dr 1  F0 F1                beq     main
+00096Fr 1  20 rr rr             jsr     t_start
+000972r 1  AD rr rr             lda     playing         ; the steps: acc += tempo a tick, a step at 1500
+000975r 1  F0 33                beq     @snd            ;  (1500 / tempo ticks = a 16th note)
+000977r 1  AD rr rr             lda     acc
+00097Ar 1  18                   clc
+00097Br 1  6D rr rr             adc     song_tempo
+00097Er 1  8D rr rr             sta     acc
+000981r 1  90 03                bcc     :+
+000983r 1  EE rr rr             inc     acc+1
+000986r 1  AD rr rr     :       lda     acc+1
+000989r 1  C9 05                cmp     #>1500
+00098Br 1  90 1D                bcc     @snd
+00098Dr 1  D0 07                bne     @st
+00098Fr 1  AD rr rr             lda     acc
+000992r 1  C9 DC                cmp     #<1500
+000994r 1  90 14                bcc     @snd
+000996r 1  AD rr rr     @st:    lda     acc
+000999r 1  38                   sec
+00099Ar 1  E9 DC                sbc     #<1500
+00099Cr 1  8D rr rr             sta     acc
+00099Fr 1  AD rr rr             lda     acc+1
+0009A2r 1  E9 05                sbc     #>1500
+0009A4r 1  8D rr rr             sta     acc+1
+0009A7r 1  20 rr rr             jsr     play_step
+0009AAr 1  AD rr rr     @snd:   lda     tick
+0009ADr 1  49 01                eor     #1
+0009AFr 1  8D rr rr             sta     tick
+0009B2r 1  F0 AC                beq     main
+0009B4r 1  20 rr rr             jsr     step_all
+0009B7r 1  4C rr rr             jmp     main
+0009BAr 1               
+0009BAr 1  A9 1E        t_start:lda     #<TICK
+0009BCr 1  8D 08 7F             sta     VIA_T2CL
+0009BFr 1  A9 4E                lda     #>TICK
+0009C1r 1  8D 09 7F             sta     VIA_T2CH
+0009C4r 1  60                   rts
+0009C5r 1               
+0009C5r 1               ; ---- playing ---------------------------------------------------------------------------
+0009C5r 1               ; Enter: play from the start of the pattern on screen / stop
+0009C5r 1               play_stop:
+0009C5r 1  AD rr rr             lda     playing
+0009C8r 1  F0 0E                beq     @go
+0009CAr 1  A9 00                lda     #0
+0009CCr 1  8D rr rr             sta     playing
+0009CFr 1  20 rr rr             jsr     all_off
+0009D2r 1  20 rr rr             jsr     head_off
+0009D5r 1  4C rr rr             jmp     show_play
+0009D8r 1  AD rr rr     @go:    lda     pat
+0009DBr 1  8D rr rr             sta     play_pat
+0009DEr 1  A9 FF                lda     #$FF            ; (the first step comes at once)
+0009E0r 1  8D rr rr             sta     play_pos
+0009E3r 1  A9 DC                lda     #<1500
+0009E5r 1  8D rr rr             sta     acc
+0009E8r 1  A9 05                lda     #>1500
+0009EAr 1  8D rr rr             sta     acc+1
+0009EDr 1  A9 01                lda     #1
+0009EFr 1  8D rr rr             sta     playing
+0009F2r 1  4C rr rr             jmp     show_play
+0009F5r 1               
+0009F5r 1               ; the next step: its drum and notes
+0009F5r 1               play_step:
+0009F5r 1  EE rr rr             inc     play_pos
+0009F8r 1  AD rr rr             lda     play_pos
+0009FBr 1  C9 10                cmp     #STEPS
+0009FDr 1  90 31                bcc     @in
+0009FFr 1  A9 00                lda     #0              ; the end of the pattern: the next one (or
+000A01r 1  8D rr rr             sta     play_pos        ;  this one again)
+000A04r 1  AD rr rr             lda     loop_one
+000A07r 1  D0 1E                bne     @one
+000A09r 1  EE rr rr             inc     play_pat
+000A0Cr 1  AD rr rr             lda     play_pat
+000A0Fr 1  C9 04                cmp     #N_PATS
+000A11r 1  B0 0D                bcs     @first
+000A13r 1  20 rr rr             jsr     pat_used        ; (patterns after the last in use: back to A)
+000A16r 1  D0 15                bne     @shown
+000A18r 1  AD rr rr             lda     play_pat
+000A1Br 1  20 rr rr             jsr     later_used
+000A1Er 1  D0 0D                bne     @shown
+000A20r 1  A9 00        @first: lda     #0
+000A22r 1  8D rr rr             sta     play_pat
+000A25r 1  F0 06                beq     @shown
+000A27r 1  AD rr rr     @one:   lda     pat
+000A2Ar 1  8D rr rr             sta     play_pat
+000A2Dr 1  20 rr rr     @shown: jsr     show_play
+000A30r 1  20 rr rr     @in:    jsr     head_show
+000A33r 1  AD rr rr             lda     play_pat        ; Y = the step's index: pattern x 16 + step
+000A36r 1  0A                   asl
+000A37r 1  0A                   asl
+000A38r 1  0A                   asl
+000A39r 1  0A                   asl
+000A3Ar 1  0D rr rr             ora     play_pos
+000A3Dr 1  8D rr rr             sta     sx
+000A40r 1                       ; the drum: the first in kick, snare, crash, open hat, hi-hat order
+000A40r 1  A8                   tay
+000A41r 1  B9 rr rr             lda     drums,y
+000A44r 1  F0 27                beq     @notes
+000A46r 1  A2 00                ldx     #0
+000A48r 1  BC rr rr     @pr:    ldy     drum_order,x
+000A4Br 1  39 rr rr             and     drum_bit,y
+000A4Er 1  D0 0D                bne     @hit
+000A50r 1  AC rr rr             ldy     sx
+000A53r 1  B9 rr rr             lda     drums,y
+000A56r 1  E8                   inx
+000A57r 1  E0 05                cpx     #N_DRUMS
+000A59r 1  D0 ED                bne     @pr
+000A5Br 1  F0 10                beq     @notes
+000A5Dr 1  B9 rr rr     @hit:   lda     drum_ins,y
+000A60r 1  8D rr rr             sta     k_ins
+000A63r 1  A9 00                lda     #0
+000A65r 1  8D rr rr             sta     k_note
+000A68r 1  A2 02                ldx     #2
+000A6Ar 1  20 rr rr             jsr     syn_start
+000A6Dr 1                       ; the notes: BASS on channel A, LEAD on B
+000A6Dr 1  AC rr rr     @notes: ldy     sx
+000A70r 1  B9 rr rr             lda     bass,y
+000A73r 1  A2 00                ldx     #0
+000A75r 1  20 rr rr             jsr     step_note
+000A78r 1  AC rr rr             ldy     sx
+000A7Br 1  B9 rr rr             lda     lead,y
+000A7Er 1  A2 01                ldx     #1
+000A80r 1                       ; (on into step_note)
+000A80r 1               
+000A80r 1               ; channel X, step value A: a note, a held one, or nothing
+000A80r 1               step_note:
+000A80r 1  C9 FF                cmp     #EMPTY
+000A82r 1  F0 21                beq     @r
+000A84r 1  C9 FE                cmp     #TIE
+000A86r 1  D0 1E                bne     @note
+000A88r 1  BD rr rr             lda     st,x            ; held on: longer, if it still sounds
+000A8Br 1  F0 18                beq     @r
+000A8Dr 1  BD rr rr             lda     hold,x
+000A90r 1  18                   clc
+000A91r 1  6D rr rr             adc     gate
+000A94r 1  90 02                bcc     :+
+000A96r 1  A9 FF                lda     #255
+000A98r 1  9D rr rr     :       sta     hold,x
+000A9Br 1  A9 03                lda     #ST_SUS         ; (back to the sustain if it had let go)
+000A9Dr 1  DD rr rr             cmp     st,x
+000AA0r 1  B0 03                bcs     @r
+000AA2r 1  9D rr rr             sta     st,x
+000AA5r 1  60           @r:     rts
+000AA6r 1  8D rr rr     @note:  sta     k_note
+000AA9r 1  BD rr rr             lda     snd,x
+000AACr 1  8D rr rr             sta     k_ins
+000AAFr 1  AD rr rr             lda     gate
+000AB2r 1  9D rr rr             sta     hold,x
+000AB5r 1  4C rr rr             jmp     syn_start
+000AB8r 1               
+000AB8r 1               ; Z clear if pattern play_pat has anything in it
+000AB8r 1               pat_used:
+000AB8r 1  AD rr rr             lda     play_pat
+000ABBr 1                       ; (on)
+000ABBr 1               ; Z clear if pattern A has anything in it (keeps X)
+000ABBr 1  0A           used_a: asl
+000ABCr 1  0A                   asl
+000ABDr 1  0A                   asl
+000ABEr 1  0A                   asl
+000ABFr 1  A8                   tay
+000AC0r 1  A9 10                lda     #STEPS
+000AC2r 1  8D rr rr             sta     cnt
+000AC5r 1  B9 rr rr     @l:     lda     drums,y
+000AC8r 1  D0 17                bne     @y
+000ACAr 1  B9 rr rr             lda     bass,y
+000ACDr 1  C9 FF                cmp     #EMPTY
+000ACFr 1  D0 10                bne     @y
+000AD1r 1  B9 rr rr             lda     lead,y
+000AD4r 1  C9 FF                cmp     #EMPTY
+000AD6r 1  D0 09                bne     @y
+000AD8r 1  C8                   iny
+000AD9r 1  CE rr rr             dec     cnt
+000ADCr 1  D0 E7                bne     @l
+000ADEr 1  A9 00                lda     #0
+000AE0r 1  60                   rts
+000AE1r 1  A9 01        @y:     lda     #1
+000AE3r 1  60                   rts
+000AE4r 1               
+000AE4r 1               ; Z clear if a pattern after A has anything in it
+000AE4r 1               later_used:
+000AE4r 1  8D rr rr             sta     tmp
+000AE7r 1  EE rr rr     @l:     inc     tmp
+000AEAr 1  AD rr rr             lda     tmp
+000AEDr 1  C9 04                cmp     #N_PATS
+000AEFr 1  B0 06                bcs     @n
+000AF1r 1  20 rr rr             jsr     used_a
+000AF4r 1  F0 F1                beq     @l
+000AF6r 1  60                   rts
+000AF7r 1  A9 00        @n:     lda     #0
+000AF9r 1  60                   rts
+000AFAr 1               
+000AFAr 1               ; the gate: frames in a step (750 / tempo at 50 frames a second), + 1
+000AFAr 1               set_gate:
+000AFAr 1  A9 EE                lda     #<750
+000AFCr 1  8D rr rr             sta     acc2
+000AFFr 1  A9 02                lda     #>750
+000B01r 1  8D rr rr             sta     acc2+1
+000B04r 1  A2 00                ldx     #0
+000B06r 1  AD rr rr     @d:     lda     acc2
+000B09r 1  38                   sec
+000B0Ar 1  ED rr rr             sbc     song_tempo
+000B0Dr 1  A8                   tay
+000B0Er 1  AD rr rr             lda     acc2+1
+000B11r 1  E9 00                sbc     #0
+000B13r 1  90 09                bcc     @e
+000B15r 1  8D rr rr             sta     acc2+1
+000B18r 1  8C rr rr             sty     acc2
+000B1Br 1  E8                   inx
+000B1Cr 1  D0 E8                bne     @d
+000B1Er 1  E8           @e:     inx
+000B1Fr 1  8E rr rr             stx     gate
+000B22r 1  60                   rts
+000B23r 1               
+000B23r 1               ; ---- keys ----------------------------------------------------------------------------
+000B23r 1  C9 1B        do_key: cmp     #27
+000B25r 1  D0 03                bne     :+
+000B27r 1  4C rr rr             jmp     esc_key
+000B2Ar 1  A2 1D        :       ldx     #N_KEYS - 1     ; a note key?
+000B2Cr 1  DD rr rr     @f:     cmp     key_chr,x
+000B2Fr 1  F0 0E                beq     @note
+000B31r 1  CA                   dex
+000B32r 1  10 F8                bpl     @f
+000B34r 1  A2 0E                ldx     #N_CMDS - 1     ; a command
+000B36r 1  DD rr rr     @c:     cmp     cmd_chr,x
+000B39r 1  F0 0A                beq     @cmd
+000B3Br 1  CA                   dex
+000B3Cr 1  10 F8                bpl     @c
+000B3Er 1  60                   rts
+000B3Fr 1  BD rr rr     @note:  lda     key_ofs,x
+000B42r 1  4C rr rr             jmp     note_key
+000B45r 1  8A           @cmd:   txa
+000B46r 1  0A                   asl
+000B47r 1  AA                   tax
+000B48r 1  BD rr rr             lda     cmd_adr+1,x
+000B4Br 1  48                   pha
+000B4Cr 1  BD rr rr             lda     cmd_adr,x
+000B4Fr 1  48                   pha
+000B50r 1  60                   rts                     ; (to the command: its address - 1 is pushed)
+000B51r 1               
+000B51r 1  20 2E 08 7F  cmd_chr:    .byte   " ", ".", 8, 127, 13, ";", "-", "=", "+", "[", "]", "K", "L", 9, "F"
+000B55r 1  0D 3B 2D 3D  
+000B59r 1  2B 5B 5D 4B  
+000B60r 1               N_CMDS      = * - cmd_chr
+000B60r 1  rr rr rr rr  cmd_adr:    .word   space_key-1, tie_key-1, back_key-1, back_key-1, play_stop-1, loop_key-1
+000B64r 1  rr rr rr rr  
+000B68r 1  rr rr rr rr  
+000B6Cr 1  rr rr rr rr              .word   tempo_dn-1, tempo_up-1, tempo_up-1, oct_dn-1, oct_up-1
+000B70r 1  rr rr rr rr  
+000B74r 1  rr rr        
+000B76r 1  rr rr rr rr              .word   pat_prev-1, pat_next-1, sound_key-1, file_key-1
+000B7Ar 1  rr rr rr rr  
+000B7Er 1               
+000B7Er 1               ; Esc: an arrow key (Esc [ A-D, or Esc O A-D), or quit
+000B7Er 1               esc_key:
+000B7Er 1  20 rr rr             jsr     key_wait        ; (the rest of the sequence comes at once)
+000B81r 1  90 1E                bcc     @quit
+000B83r 1  C9 5B                cmp     #'['
+000B85r 1  F0 04                beq     @arr
+000B87r 1  C9 4F                cmp     #'O'
+000B89r 1  D0 16                bne     @quit
+000B8Br 1  20 rr rr     @arr:   jsr     key_wait
+000B8Er 1  90 10                bcc     @r
+000B90r 1  C9 41                cmp     #'A'
+000B92r 1  F0 26                beq     up_key
+000B94r 1  C9 42                cmp     #'B'
+000B96r 1  F0 31                beq     down_key
+000B98r 1  C9 43                cmp     #'C'
+000B9Ar 1  F0 50                beq     right_key
+000B9Cr 1  C9 44                cmp     #'D'
+000B9Er 1  F0 3D                beq     left_key
+000BA0r 1  60           @r:     rts
+000BA1r 1  4C rr rr     @quit:  jmp     quit_ask
+000BA4r 1               
+000BA4r 1               ; a key within about 20 ms: carry set and A = it (as typed), or carry clear
+000BA4r 1               key_wait:
+000BA4r 1  A9 14                lda     #20
+000BA6r 1  8D rr rr             sta     cnt
+000BA9r 1  20 00 FE     @l:     jsr     SBC_CHRIN
+000BACr 1  B0 0B                bcs     @r
+000BAEr 1  A9 01                lda     #1
+000BB0r 1  20 rr rr             jsr     delay_ms
+000BB3r 1  CE rr rr             dec     cnt
+000BB6r 1  D0 F1                bne     @l
+000BB8r 1  18                   clc
+000BB9r 1  60           @r:     rts
+000BBAr 1               
+000BBAr 1  20 rr rr     up_key: jsr     cell_plain
+000BBDr 1  CE rr rr             dec     cur_tr
+000BC0r 1  10 3C                bpl     cur_show
+000BC2r 1  A9 06                lda     #N_TRACKS - 1
+000BC4r 1  8D rr rr             sta     cur_tr
+000BC7r 1  D0 35                bne     cur_show
+000BC9r 1               down_key:
+000BC9r 1  20 rr rr             jsr     cell_plain
+000BCCr 1  EE rr rr             inc     cur_tr
+000BCFr 1  AD rr rr             lda     cur_tr
+000BD2r 1  C9 07                cmp     #N_TRACKS
+000BD4r 1  90 28                bcc     cur_show
+000BD6r 1  A9 00                lda     #0
+000BD8r 1  8D rr rr             sta     cur_tr
+000BDBr 1  F0 21                beq     cur_show
+000BDDr 1               left_key:
+000BDDr 1  20 rr rr             jsr     cell_plain
+000BE0r 1               step_back:
+000BE0r 1  CE rr rr             dec     cur_st
+000BE3r 1  10 19                bpl     cur_show
+000BE5r 1  A9 0F                lda     #STEPS - 1
+000BE7r 1  8D rr rr             sta     cur_st
+000BEAr 1  D0 12                bne     cur_show
+000BECr 1               right_key:
+000BECr 1  20 rr rr             jsr     cell_plain
+000BEFr 1               step_on:
+000BEFr 1  EE rr rr             inc     cur_st
+000BF2r 1  AD rr rr             lda     cur_st
+000BF5r 1  C9 10                cmp     #STEPS
+000BF7r 1  90 05                bcc     cur_show
+000BF9r 1  A9 00                lda     #0
+000BFBr 1  8D rr rr             sta     cur_st
+000BFEr 1               cur_show:
+000BFEr 1  4C rr rr             jmp     cell_cursor
+000C01r 1               
+000C01r 1               ; Y = the index of the cursor's step (pattern x 16 + step)
+000C01r 1               cur_idx:
+000C01r 1  AD rr rr             lda     pat
+000C04r 1  0A                   asl
+000C05r 1  0A                   asl
+000C06r 1  0A                   asl
+000C07r 1  0A                   asl
+000C08r 1  0D rr rr             ora     cur_st
+000C0Br 1  A8                   tay
+000C0Cr 1  60                   rts
+000C0Dr 1               
+000C0Dr 1               ; space: a drum on/off; a note out
+000C0Dr 1               space_key:
+000C0Dr 1  20 rr rr             jsr     cur_idx
+000C10r 1  AD rr rr             lda     cur_tr
+000C13r 1  C9 05                cmp     #N_DRUMS
+000C15r 1  B0 15                bcs     @n
+000C17r 1  AA                   tax
+000C18r 1  B9 rr rr             lda     drums,y
+000C1Br 1  5D rr rr             eor     drum_bit,x
+000C1Er 1  99 rr rr             sta     drums,y
+000C21r 1  3D rr rr             and     drum_bit,x
+000C24r 1  F0 03                beq     @s
+000C26r 1  20 rr rr             jsr     drum_hear
+000C29r 1  4C rr rr     @s:     jmp     cell_cursor
+000C2Cr 1  A9 FF        @n:     lda     #EMPTY
+000C2Er 1  20 rr rr             jsr     put_note
+000C31r 1  4C rr rr             jmp     cell_cursor
+000C34r 1               
+000C34r 1               ; Backspace: out, and back a step
+000C34r 1               back_key:
+000C34r 1  20 rr rr             jsr     cur_idx
+000C37r 1  AD rr rr             lda     cur_tr
+000C3Ar 1  C9 05                cmp     #N_DRUMS
+000C3Cr 1  B0 0F                bcs     @n
+000C3Er 1  AA                   tax
+000C3Fr 1  BD rr rr             lda     drum_bit,x
+000C42r 1  49 FF                eor     #$FF
+000C44r 1  39 rr rr             and     drums,y
+000C47r 1  99 rr rr             sta     drums,y
+000C4Ar 1  4C rr rr             jmp     @b
+000C4Dr 1  A9 FF        @n:     lda     #EMPTY
+000C4Fr 1  20 rr rr             jsr     put_note
+000C52r 1  20 rr rr     @b:     jsr     cell_plain
+000C55r 1  4C rr rr             jmp     step_back
+000C58r 1               
+000C58r 1               ; ".": the note before held on
+000C58r 1               tie_key:
+000C58r 1  AD rr rr             lda     cur_tr
+000C5Br 1  C9 05                cmp     #N_DRUMS
+000C5Dr 1  90 0E                bcc     @r
+000C5Fr 1  20 rr rr             jsr     cur_idx
+000C62r 1  A9 FE                lda     #TIE
+000C64r 1  20 rr rr             jsr     put_note
+000C67r 1  20 rr rr             jsr     cell_plain
+000C6Ar 1  4C rr rr             jmp     step_on
+000C6Dr 1  60           @r:     rts
+000C6Er 1               
+000C6Er 1               ; the step's note on its track = A (Y = its index)
+000C6Er 1               put_note:
+000C6Er 1  AE rr rr             ldx     cur_tr
+000C71r 1  E0 05                cpx     #T_BASS
+000C73r 1  D0 04                bne     @l
+000C75r 1  99 rr rr             sta     bass,y
+000C78r 1  60                   rts
+000C79r 1  99 rr rr     @l:     sta     lead,y
+000C7Cr 1  60                   rts
+000C7Dr 1               
+000C7Dr 1               ; a note key (offset A from C of the octave): the note in, heard, on a step;
+000C7Dr 1               ; on a drum track: the drum on, heard
+000C7Dr 1               note_key:
+000C7Dr 1  8D rr rr             sta     tmp
+000C80r 1  AD rr rr             lda     cur_tr
+000C83r 1  C9 05                cmp     #N_DRUMS
+000C85r 1  B0 15                bcs     @note
+000C87r 1  20 rr rr             jsr     cur_idx
+000C8Ar 1  AE rr rr             ldx     cur_tr
+000C8Dr 1  B9 rr rr             lda     drums,y
+000C90r 1  1D rr rr             ora     drum_bit,x
+000C93r 1  99 rr rr             sta     drums,y
+000C96r 1  20 rr rr             jsr     drum_hear
+000C99r 1  4C rr rr             jmp     cell_cursor
+000C9Cr 1  AD rr rr     @note:  lda     octave          ; the note: (octave - 1) x 12 + the offset
+000C9Fr 1  38                   sec
+000CA0r 1  E9 01                sbc     #1
+000CA2r 1  8D rr rr             sta     tmp2
+000CA5r 1  0A                   asl
+000CA6r 1  6D rr rr             adc     tmp2
+000CA9r 1  0A                   asl
+000CAAr 1  0A                   asl
+000CABr 1  18                   clc
+000CACr 1  6D rr rr             adc     tmp
+000CAFr 1  C9 60                cmp     #AY_NOTES
+000CB1r 1  90 02                bcc     :+
+000CB3r 1  A9 5F                lda     #AY_NOTES - 1
+000CB5r 1  48           :       pha
+000CB6r 1  20 rr rr             jsr     cur_idx
+000CB9r 1  68                   pla
+000CBAr 1  48                   pha
+000CBBr 1  20 rr rr             jsr     put_note
+000CBEr 1  68                   pla
+000CBFr 1  8D rr rr             sta     k_note          ; heard: on its channel, for a step
+000CC2r 1  AE rr rr             ldx     cur_tr
+000CC5r 1  BD rr rr             lda     snd-T_BASS,x
+000CC8r 1  8D rr rr             sta     k_ins
+000CCBr 1  AD rr rr             lda     cur_tr
+000CCEr 1  38                   sec
+000CCFr 1  E9 05                sbc     #T_BASS
+000CD1r 1  AA                   tax
+000CD2r 1  AD rr rr             lda     gate
+000CD5r 1  9D rr rr             sta     hold,x
+000CD8r 1  20 rr rr             jsr     syn_start
+000CDBr 1  20 rr rr             jsr     cell_plain
+000CDEr 1  4C rr rr             jmp     step_on
+000CE1r 1               
+000CE1r 1               ; the cursor's drum, heard on channel C
+000CE1r 1               drum_hear:
+000CE1r 1  AE rr rr             ldx     cur_tr
+000CE4r 1  BD rr rr             lda     drum_ins,x
+000CE7r 1  8D rr rr             sta     k_ins
+000CEAr 1  A9 00                lda     #0
+000CECr 1  8D rr rr             sta     k_note
+000CEFr 1  A2 02                ldx     #2
+000CF1r 1  4C rr rr             jmp     syn_start
+000CF4r 1               
+000CF4r 1               loop_key:
+000CF4r 1  AD rr rr             lda     loop_one
+000CF7r 1  49 01                eor     #1
+000CF9r 1  8D rr rr             sta     loop_one
+000CFCr 1  4C rr rr             jmp     show_play
+000CFFr 1               
+000CFFr 1               tempo_dn:
+000CFFr 1  AD rr rr             lda     song_tempo
+000D02r 1  38                   sec
+000D03r 1  E9 05                sbc     #5
+000D05r 1  C9 28                cmp     #40
+000D07r 1  B0 10                bcs     tempo_set
+000D09r 1  A9 28                lda     #40
+000D0Br 1  D0 0C                bne     tempo_set
+000D0Dr 1               tempo_up:
+000D0Dr 1  AD rr rr             lda     song_tempo
+000D10r 1  18                   clc
+000D11r 1  69 05                adc     #5
+000D13r 1  C9 FB                cmp     #251
+000D15r 1  90 02                bcc     tempo_set
+000D17r 1  A9 FA                lda     #250
+000D19r 1               tempo_set:
+000D19r 1  8D rr rr             sta     song_tempo
+000D1Cr 1  20 rr rr             jsr     set_gate
+000D1Fr 1  4C rr rr             jmp     show_status
+000D22r 1               
+000D22r 1  AD rr rr     oct_dn: lda     octave
+000D25r 1  C9 02                cmp     #2
+000D27r 1  90 03                bcc     :+
+000D29r 1  CE rr rr             dec     octave
+000D2Cr 1  4C rr rr     :       jmp     show_status
+000D2Fr 1  AD rr rr     oct_up: lda     octave
+000D32r 1  C9 06                cmp     #6
+000D34r 1  B0 03                bcs     :+
+000D36r 1  EE rr rr             inc     octave
+000D39r 1  4C rr rr     :       jmp     show_status
+000D3Cr 1               
+000D3Cr 1               pat_prev:
+000D3Cr 1  CE rr rr             dec     pat
+000D3Fr 1  10 05                bpl     :+
+000D41r 1  A9 03                lda     #N_PATS - 1
+000D43r 1  8D rr rr             sta     pat
+000D46r 1  4C rr rr     :       jmp     pat_shown
+000D49r 1               pat_next:
+000D49r 1  EE rr rr             inc     pat
+000D4Cr 1  AD rr rr             lda     pat
+000D4Fr 1  C9 04                cmp     #N_PATS
+000D51r 1  90 05                bcc     pat_shown
+000D53r 1  A9 00                lda     #0
+000D55r 1  8D rr rr             sta     pat
+000D58r 1               pat_shown:
+000D58r 1  AD rr rr             lda     loop_one        ; (playing just this one: now the new one)
+000D5Br 1  F0 06                beq     :+
+000D5Dr 1  AD rr rr             lda     pat
+000D60r 1  8D rr rr             sta     play_pat
+000D63r 1  20 rr rr     :       jsr     show_status
+000D66r 1  20 rr rr             jsr     draw_grid
+000D69r 1  4C rr rr             jmp     show_play
+000D6Cr 1               
+000D6Cr 1               ; Tab: the next sound for BASS or LEAD (PIANO's first 7: not DRUMS)
+000D6Cr 1               sound_key:
+000D6Cr 1  AD rr rr             lda     cur_tr
+000D6Fr 1  38                   sec
+000D70r 1  E9 05                sbc     #T_BASS
+000D72r 1  90 13                bcc     @r
+000D74r 1  AA                   tax
+000D75r 1  FE rr rr             inc     snd,x
+000D78r 1  BD rr rr             lda     snd,x
+000D7Br 1  C9 07                cmp     #N_SOUNDS - 1
+000D7Dr 1  90 05                bcc     :+
+000D7Fr 1  A9 00                lda     #0
+000D81r 1  9D rr rr             sta     snd,x
+000D84r 1  4C rr rr     :       jmp     show_sounds
+000D87r 1  60           @r:     rts
+000D88r 1               
+000D88r 1               ; ---- the song --------------------------------------------------------------------------
+000D88r 1               ; all patterns empty, tempo 120, BASS on BUZZ, LEAD on CHIP
+000D88r 1               song_new:
+000D88r 1  A2 00                ldx     #0
+000D8Ar 1  A9 00        @c:     lda     #0
+000D8Cr 1  9D rr rr             sta     drums,x
+000D8Fr 1  A9 FF                lda     #EMPTY
+000D91r 1  9D rr rr             sta     bass,x
+000D94r 1  9D rr rr             sta     lead,x
+000D97r 1  E8                   inx
+000D98r 1  E0 40                cpx     #STEPS * N_PATS
+000D9Ar 1  D0 EE                bne     @c
+000D9Cr 1  A2 03                ldx     #3
+000D9Er 1  BD rr rr     @s:     lda     seq_sig,x
+000DA1r 1  9D rr rr             sta     song,x
+000DA4r 1  CA                   dex
+000DA5r 1  10 F7                bpl     @s
+000DA7r 1  A9 78                lda     #120
+000DA9r 1  8D rr rr             sta     song_tempo
+000DACr 1  A9 06                lda     #6              ; BUZZ
+000DAEr 1  8D rr rr             sta     snd
+000DB1r 1  A9 04                lda     #4              ; CHIP
+000DB3r 1  8D rr rr             sta     snd+1
+000DB6r 1  4C rr rr             jmp     set_gate
+000DB9r 1               
+000DB9r 1               ; ---- files: BEAT1.SEQ ... BEAT9.SEQ in the monitor's current folder ------------------
+000DB9r 1               file_key:
+000DB9r 1  AD rr rr             lda     playing         ; (stopped first)
+000DBCr 1  F0 03                beq     :+
+000DBEr 1  20 rr rr             jsr     play_stop
+000DC1r 1  20 rr rr     :       jsr     msg_at
+000DC4r 1  A9 rr A0 rr          PRINT   file_txt
+000DC8r 1  20 rr rr     
+000DCBr 1  20 rr rr             jsr     waitkey
+000DCEr 1  C9 53                cmp     #'S'
+000DD0r 1  F0 77                beq     @save
+000DD2r 1  C9 4C                cmp     #'L'
+000DD4r 1  D0 03                bne     :+
+000DD6r 1  4C rr rr             jmp     @load
+000DD9r 1  C9 4E        :       cmp     #'N'
+000DDBr 1  F0 07                beq     @new
+000DDDr 1  C9 43                cmp     #'C'
+000DDFr 1  F0 28                beq     @copy
+000DE1r 1  4C rr rr             jmp     msg_clear
+000DE4r 1  20 rr rr     @new:   jsr     msg_at
+000DE7r 1  A9 rr A0 rr          PRINT   sure_txt
+000DEBr 1  20 rr rr     
+000DEEr 1  20 rr rr             jsr     waitkey
+000DF1r 1  C9 59                cmp     #'Y'
+000DF3r 1  F0 03                beq     :+
+000DF5r 1  4C rr rr             jmp     msg_clear
+000DF8r 1  20 rr rr     :       jsr     song_new
+000DFBr 1  20 rr rr             jsr     draw_screen
+000DFEr 1  20 rr rr             jsr     msg_at
+000E01r 1  A9 rr A0 rr          PRINT   new_txt
+000E05r 1  20 rr rr     
+000E08r 1  60                   rts
+000E09r 1  AD rr rr     @copy:  lda     pat             ; the pattern before (A: from D) into this one
+000E0Cr 1  38                   sec
+000E0Dr 1  E9 01                sbc     #1
+000E0Fr 1  29 03                and     #3
+000E11r 1  0A                   asl
+000E12r 1  0A                   asl
+000E13r 1  0A                   asl
+000E14r 1  0A                   asl
+000E15r 1  AA                   tax
+000E16r 1  20 rr rr             jsr     cur_idx
+000E19r 1  98                   tya
+000E1Ar 1  29 F0                and     #$F0
+000E1Cr 1  A8                   tay
+000E1Dr 1  A9 10                lda     #STEPS
+000E1Fr 1  8D rr rr             sta     cnt
+000E22r 1  BD rr rr     @cp:    lda     drums,x
+000E25r 1  99 rr rr             sta     drums,y
+000E28r 1  BD rr rr             lda     bass,x
+000E2Br 1  99 rr rr             sta     bass,y
+000E2Er 1  BD rr rr             lda     lead,x
+000E31r 1  99 rr rr             sta     lead,y
+000E34r 1  E8                   inx
+000E35r 1  C8                   iny
+000E36r 1  CE rr rr             dec     cnt
+000E39r 1  D0 E7                bne     @cp
+000E3Br 1  20 rr rr             jsr     draw_grid
+000E3Er 1  20 rr rr             jsr     msg_at
+000E41r 1  A9 rr A0 rr          PRINT   copied_txt
+000E45r 1  20 rr rr     
+000E48r 1  60                   rts
+000E49r 1  20 rr rr     @save:  jsr     slot_ask
+000E4Cr 1  90 41                bcc     @r
+000E4Er 1  20 rr rr             jsr     drive_in
+000E51r 1  B0 3F                bcs     @err
+000E53r 1  AD rr rr             lda     fname_a
+000E56r 1  AC rr rr             ldy     fname_a+1
+000E59r 1  20 rr rr             jsr     ch_create
+000E5Cr 1  C9 14                cmp     #USB_INT_SUCCESS
+000E5Er 1  D0 32                bne     @err
+000E60r 1  A9 rr                lda     #<song
+000E62r 1  8D rr rr             sta     ch_ptr
+000E65r 1  A9 rr                lda     #>song
+000E67r 1  8D rr rr             sta     ch_ptr+1
+000E6Ar 1  A9 C8                lda     #<SONG_LEN
+000E6Cr 1  8D rr rr             sta     ch_len
+000E6Fr 1  A9 00                lda     #>SONG_LEN
+000E71r 1  8D rr rr             sta     ch_len+1
+000E74r 1  20 rr rr             jsr     ch_write
+000E77r 1  C9 14                cmp     #USB_INT_SUCCESS
+000E79r 1  D0 17                bne     @err
+000E7Br 1  20 rr rr             jsr     ch_close_w
+000E7Er 1  C9 14                cmp     #USB_INT_SUCCESS
+000E80r 1  D0 10                bne     @err
+000E82r 1  20 rr rr             jsr     msg_at
+000E85r 1  A9 rr A0 rr          PRINT   saved_txt
+000E89r 1  20 rr rr     
+000E8Cr 1  4C rr rr             jmp     msg_name
+000E8Fr 1  4C rr rr     @r:     jmp     msg_clear
+000E92r 1  48           @err:   pha
+000E93r 1  20 rr rr             jsr     msg_at
+000E96r 1  A9 rr A0 rr          PRINT   ferr_txt
+000E9Ar 1  20 rr rr     
+000E9Dr 1  68                   pla
+000E9Er 1  4C rr rr             jmp     prhex
+000EA1r 1  20 rr rr     @load:  jsr     slot_ask
+000EA4r 1  90 E9                bcc     @r
+000EA6r 1  20 rr rr             jsr     drive_in
+000EA9r 1  B0 E7                bcs     @err
+000EABr 1  AD rr rr             lda     fname_a
+000EAEr 1  AC rr rr             ldy     fname_a+1
+000EB1r 1  20 rr rr             jsr     ch_open
+000EB4r 1  C9 14                cmp     #USB_INT_SUCCESS
+000EB6r 1  D0 70                bne     @nf
+000EB8r 1  A9 rr                lda     #<fbuf
+000EBAr 1  8D rr rr             sta     ch_ptr
+000EBDr 1  A9 rr                lda     #>fbuf
+000EBFr 1  8D rr rr             sta     ch_ptr+1
+000EC2r 1  A9 C8                lda     #<SONG_LEN
+000EC4r 1  8D rr rr             sta     ch_len
+000EC7r 1  A9 00                lda     #>SONG_LEN
+000EC9r 1  8D rr rr             sta     ch_len+1
+000ECCr 1  20 rr rr             jsr     ch_read
+000ECFr 1  20 rr rr             jsr     ch_close
+000ED2r 1  AD rr rr             lda     ch_got
+000ED5r 1  C9 C8                cmp     #<SONG_LEN
+000ED7r 1  D0 5C                bne     @bad
+000ED9r 1  A2 03                ldx     #3
+000EDBr 1  BD rr rr     @sig:   lda     fbuf,x
+000EDEr 1  DD rr rr             cmp     seq_sig,x
+000EE1r 1  D0 52                bne     @bad
+000EE3r 1  CA                   dex
+000EE4r 1  10 F5                bpl     @sig
+000EE6r 1  A2 00                ldx     #0
+000EE8r 1  BD rr rr     @cp2:   lda     fbuf,x
+000EEBr 1  9D rr rr             sta     song,x
+000EEEr 1  E8                   inx
+000EEFr 1  E0 C8                cpx     #<SONG_LEN
+000EF1r 1  D0 F5                bne     @cp2
+000EF3r 1  AD rr rr             lda     song_tempo      ; (kept in range)
+000EF6r 1  C9 28                cmp     #40
+000EF8r 1  B0 05                bcs     :+
+000EFAr 1  A9 78                lda     #120
+000EFCr 1  8D rr rr             sta     song_tempo
+000EFFr 1  A2 01        :       ldx     #1
+000F01r 1  BD rr rr     @sn:    lda     snd,x
+000F04r 1  C9 07                cmp     #N_SOUNDS - 1
+000F06r 1  90 05                bcc     :+
+000F08r 1  A9 00                lda     #0
+000F0Ar 1  9D rr rr             sta     snd,x
+000F0Dr 1  CA           :       dex
+000F0Er 1  10 F1                bpl     @sn
+000F10r 1  20 rr rr             jsr     set_gate
+000F13r 1  A9 00                lda     #0
+000F15r 1  8D rr rr             sta     pat
+000F18r 1  20 rr rr             jsr     draw_screen
+000F1Br 1  20 rr rr             jsr     msg_at
+000F1Er 1  A9 rr A0 rr          PRINT   loaded_txt
+000F22r 1  20 rr rr     
+000F25r 1  4C rr rr             jmp     msg_name
+000F28r 1  20 rr rr     @nf:    jsr     msg_at
+000F2Br 1  A9 rr A0 rr          PRINT   nofile_txt
+000F2Fr 1  20 rr rr     
+000F32r 1  4C rr rr             jmp     msg_name
+000F35r 1  20 rr rr     @bad:   jsr     msg_at
+000F38r 1  A9 rr A0 rr          PRINT   badfile_txt
+000F3Cr 1  20 rr rr     
+000F3Fr 1  4C rr rr             jmp     msg_name
+000F42r 1               
+000F42r 1               ; which slot (1-9)?  carry set: fname = "BEATn.SEQ", fname_a its address (with
+000F42r 1               ; a "/" in front for the top folder)
+000F42r 1               slot_ask:
+000F42r 1  20 rr rr             jsr     msg_at
+000F45r 1  A9 rr A0 rr          PRINT   slot_txt
+000F49r 1  20 rr rr     
+000F4Cr 1  20 rr rr             jsr     waitkey
+000F4Fr 1  C9 31                cmp     #'1'
+000F51r 1  90 1C                bcc     @no
+000F53r 1  C9 3A                cmp     #'9' + 1
+000F55r 1  B0 18                bcs     @no
+000F57r 1  8D rr rr             sta     fname_n
+000F5Ar 1  A9 rr                lda     #<fname
+000F5Cr 1  A0 rr                ldy     #>fname
+000F5Er 1  AE rr rr             ldx     cwd_buf
+000F61r 1  D0 04                bne     :+
+000F63r 1  A9 rr                lda     #<fpath
+000F65r 1  A0 rr                ldy     #>fpath
+000F67r 1  8D rr rr     :       sta     fname_a
+000F6Ar 1  8C rr rr             sty     fname_a+1
+000F6Dr 1  38                   sec
+000F6Er 1  60                   rts
+000F6Fr 1  18           @no:    clc
+000F70r 1  60                   rts
+000F71r 1               
+000F71r 1               ; into the folder: the drive as the monitor left it, or started afresh;
+000F71r 1               ; carry set and A = the status if it can't be done
+000F71r 1               drive_in:
+000F71r 1  20 rr rr             jsr     ch_check
+000F74r 1  A9 01                lda     #1
+000F76r 1  B0 12                bcs     @r
+000F78r 1  20 rr rr             jsr     go_in
+000F7Br 1  F0 0C                beq     @ok
+000F7Dr 1  20 rr rr             jsr     ch_start
+000F80r 1  B0 08                bcs     @r
+000F82r 1  20 rr rr             jsr     go_in
+000F85r 1  F0 02                beq     @ok
+000F87r 1  38                   sec
+000F88r 1  60                   rts
+000F89r 1  18           @ok:    clc
+000F8Ar 1  60           @r:     rts
+000F8Br 1               
+000F8Br 1               ; into the folder (the top: open "/"): Z set if it went well, else A = the status
+000F8Br 1  AD rr rr     go_in:  lda     cwd_buf
+000F8Er 1  D0 0A                bne     @in
+000F90r 1  A9 rr                lda     #<fpath_root
+000F92r 1  A0 rr                ldy     #>fpath_root
+000F94r 1  20 rr rr             jsr     ch_open
+000F97r 1  C9 41                cmp     #ERR_OPEN_DIR
+000F99r 1  60                   rts
+000F9Ar 1  A9 rr        @in:    lda     #<cwd_buf
+000F9Cr 1  A0 rr                ldy     #>cwd_buf
+000F9Er 1  20 rr rr             jsr     ch_enter
+000FA1r 1  C9 41                cmp     #ERR_OPEN_DIR
+000FA3r 1  60                   rts
+000FA4r 1               
+000FA4r 1               ; the file's name and folder after a message
+000FA4r 1               msg_name:
+000FA4r 1  A9 rr A0 rr          PRINT   fname
+000FA8r 1  20 rr rr     
+000FABr 1  A9 rr A0 rr          PRINT   in_txt
+000FAFr 1  20 rr rr     
+000FB2r 1  AD rr rr             lda     cwd_buf
+000FB5r 1  D0 05                bne     :+
+000FB7r 1  A9 2F                lda     #'/'
+000FB9r 1  4C 03 FE             jmp     SBC_CHROUT
+000FBCr 1  A9 rr A0 rr  :       PRINT   cwd_buf
+000FC0r 1  20 rr rr     
+000FC3r 1  60                   rts
+000FC4r 1               
+000FC4r 1               ; Esc: quit?
+000FC4r 1               quit_ask:
+000FC4r 1  20 rr rr             jsr     msg_at
+000FC7r 1  A9 rr A0 rr          PRINT   quit_txt
+000FCBr 1  20 rr rr     
+000FCEr 1  20 rr rr             jsr     waitkey
+000FD1r 1  C9 59                cmp     #'Y'
+000FD3r 1  F0 03                beq     :+
+000FD5r 1  4C rr rr             jmp     msg_clear
+000FD8r 1  20 rr rr     :       jsr     ay_silence
+000FDBr 1  A9 rr A0 rr          PRINT   norm_txt
+000FDFr 1  20 rr rr     
+000FE2r 1  A9 0C                lda     #12
+000FE4r 1  20 03 FE             jsr     SBC_CHROUT
+000FE7r 1  A9 rr A0 rr          PRINT   bye_txt
+000FEBr 1  20 rr rr     
+000FEEr 1  4C 06 FE             jmp     SBC_MENU
+000FF1r 1               
+000FF1r 1               ; ---- the screen ------------------------------------------------------------------------
+000FF1r 1               ; the cursor to column X, row Y (keeps A, X, Y)
+000FF1r 1  48           goto:   pha
+000FF2r 1  A9 0E                lda     #$0E
+000FF4r 1  20 03 FE             jsr     SBC_CHROUT
+000FF7r 1  8A                   txa
+000FF8r 1  20 03 FE             jsr     SBC_CHROUT
+000FFBr 1  A9 0F                lda     #$0F
+000FFDr 1  20 03 FE             jsr     SBC_CHROUT
+001000r 1  98                   tya
+001001r 1  20 03 FE             jsr     SBC_CHROUT
+001004r 1  68                   pla
+001005r 1  60                   rts
+001006r 1               
+001006r 1  A2 00        msg_at: ldx     #0
+001008r 1  A0 14                ldy     #MSG_ROW
+00100Ar 1  20 rr rr             jsr     goto
+00100Dr 1  A9 rr A0 rr          PRINT   blank_txt       ; (the line cleared)
+001011r 1  20 rr rr     
+001014r 1  A2 00                ldx     #0
+001016r 1  A0 14                ldy     #MSG_ROW
+001018r 1  4C rr rr             jmp     goto
+00101Br 1               msg_clear:
+00101Br 1  20 rr rr             jsr     msg_at
+00101Er 1  60                   rts
+00101Fr 1               
+00101Fr 1               draw_screen:
+00101Fr 1  A9 rr A0 rr          PRINT   norm_txt
+001023r 1  20 rr rr     
+001026r 1  A9 0C                lda     #12
+001028r 1  20 03 FE             jsr     SBC_CHROUT
+00102Br 1  A9 rr A0 rr          PRINT   title_txt
+00102Fr 1  20 rr rr     
+001032r 1  A2 0B                ldx     #GRID_COL       ; the step numbers
+001034r 1  A0 03                ldy     #NUM_ROW
+001036r 1  20 rr rr             jsr     goto
+001039r 1  A2 00                ldx     #0
+00103Br 1  8E rr rr     @n:     stx     sx
+00103Er 1  8A                   txa
+00103Fr 1  20 rr rr             jsr     step_col
+001042r 1  AA                   tax
+001043r 1  A0 03                ldy     #NUM_ROW
+001045r 1  20 rr rr             jsr     goto
+001048r 1  AD rr rr             lda     sx
+00104Br 1  18                   clc
+00104Cr 1  69 01                adc     #1
+00104Er 1  20 rr rr             jsr     prdec2
+001051r 1  AE rr rr             ldx     sx
+001054r 1  E8                   inx
+001055r 1  E0 10                cpx     #STEPS
+001057r 1  D0 E2                bne     @n
+001059r 1  A2 00                ldx     #0              ; the track names
+00105Br 1  8E rr rr     @t:     stx     sx
+00105Er 1  8A                   txa
+00105Fr 1  18                   clc
+001060r 1  69 05                adc     #TRACK_ROW
+001062r 1  A8                   tay
+001063r 1  A2 00                ldx     #0
+001065r 1  20 rr rr             jsr     goto
+001068r 1  AD rr rr             lda     sx
+00106Br 1  0A                   asl
+00106Cr 1  0A                   asl
+00106Dr 1  0A                   asl
+00106Er 1  18                   clc
+00106Fr 1  69 rr                adc     #<track_names
+001071r 1  48                   pha
+001072r 1  A9 00                lda     #0
+001074r 1  69 rr                adc     #>track_names
+001076r 1  A8                   tay
+001077r 1  68                   pla
+001078r 1  20 rr rr             jsr     print8
+00107Br 1  AE rr rr             ldx     sx
+00107Er 1  E8                   inx
+00107Fr 1  E0 07                cpx     #N_TRACKS
+001081r 1  D0 D8                bne     @t
+001083r 1  A2 00                ldx     #0
+001085r 1  A0 0F                ldy     #HELP_ROW
+001087r 1  20 rr rr             jsr     goto
+00108Ar 1  A9 rr A0 rr          PRINT   help_txt
+00108Er 1  20 rr rr     
+001091r 1  A9 FF                lda     #$FF
+001093r 1  8D rr rr             sta     head_col
+001096r 1  20 rr rr             jsr     show_status
+001099r 1  20 rr rr             jsr     show_sounds
+00109Cr 1  20 rr rr             jsr     show_play
+00109Fr 1                       ; (on into draw_grid)
+00109Fr 1               
+00109Fr 1               ; every cell of the pattern on screen
+00109Fr 1               draw_grid:
+00109Fr 1  AD rr rr             lda     cur_tr
+0010A2r 1  48                   pha
+0010A3r 1  AD rr rr             lda     cur_st
+0010A6r 1  48                   pha
+0010A7r 1  A9 00                lda     #0
+0010A9r 1  8D rr rr             sta     cur_tr
+0010ACr 1  A9 00        @tr:    lda     #0
+0010AEr 1  8D rr rr             sta     cur_st
+0010B1r 1  20 rr rr     @st:    jsr     cell_plain
+0010B4r 1  EE rr rr             inc     cur_st
+0010B7r 1  AD rr rr             lda     cur_st
+0010BAr 1  C9 10                cmp     #STEPS
+0010BCr 1  D0 F3                bne     @st
+0010BEr 1  EE rr rr             inc     cur_tr
+0010C1r 1  AD rr rr             lda     cur_tr
+0010C4r 1  C9 07                cmp     #N_TRACKS
+0010C6r 1  D0 E4                bne     @tr
+0010C8r 1  68                   pla
+0010C9r 1  8D rr rr             sta     cur_st
+0010CCr 1  68                   pla
+0010CDr 1  8D rr rr             sta     cur_tr
+0010D0r 1  4C rr rr             jmp     cell_cursor
+0010D3r 1               
+0010D3r 1               ; A = the column of step A
+0010D3r 1               step_col:
+0010D3r 1  8D rr rr             sta     tmp
+0010D6r 1  0A                   asl
+0010D7r 1  0A                   asl
+0010D8r 1  18                   clc
+0010D9r 1  69 0B                adc     #GRID_COL
+0010DBr 1  8D rr rr             sta     tmp2
+0010DEr 1  AD rr rr             lda     tmp
+0010E1r 1  4A                   lsr
+0010E2r 1  4A                   lsr
+0010E3r 1  18                   clc
+0010E4r 1  6D rr rr             adc     tmp2
+0010E7r 1  60                   rts
+0010E8r 1               
+0010E8r 1               ; the cursor's cell, in reverse / as it is
+0010E8r 1               cell_cursor:
+0010E8r 1  A9 rr A0 rr          PRINT   rev_txt
+0010ECr 1  20 rr rr     
+0010EFr 1  20 rr rr             jsr     cell_draw
+0010F2r 1  A9 rr A0 rr          PRINT   norm_txt
+0010F6r 1  20 rr rr     
+0010F9r 1  60                   rts
+0010FAr 1               cell_plain:
+0010FAr 1                       ; (on)
+0010FAr 1               ; the cell at cur_tr, cur_st: " # " / " . " (drums), "C#4" " . " " - " (notes)
+0010FAr 1               cell_draw:
+0010FAr 1  AD rr rr             lda     cur_st
+0010FDr 1  20 rr rr             jsr     step_col
+001100r 1  AA                   tax
+001101r 1  AD rr rr             lda     cur_tr
+001104r 1  18                   clc
+001105r 1  69 05                adc     #TRACK_ROW
+001107r 1  A8                   tay
+001108r 1  20 rr rr             jsr     goto
+00110Br 1  20 rr rr             jsr     cur_idx
+00110Er 1  AD rr rr             lda     cur_tr
+001111r 1  C9 05                cmp     #N_DRUMS
+001113r 1  B0 19                bcs     @note
+001115r 1  AA                   tax
+001116r 1  B9 rr rr             lda     drums,y
+001119r 1  3D rr rr             and     drum_bit,x
+00111Cr 1  F0 08                beq     @dot
+00111Er 1  A9 rr A0 rr          PRINT   hit_txt
+001122r 1  20 rr rr     
+001125r 1  60                   rts
+001126r 1  A9 rr A0 rr  @dot:   PRINT   dot_txt
+00112Ar 1  20 rr rr     
+00112Dr 1  60                   rts
+00112Er 1  C9 05        @note:  cmp     #T_BASS
+001130r 1  D0 06                bne     @l
+001132r 1  B9 rr rr             lda     bass,y
+001135r 1  4C rr rr             jmp     @p
+001138r 1  B9 rr rr     @l:     lda     lead,y
+00113Br 1  C9 FF        @p:     cmp     #EMPTY
+00113Dr 1  F0 E7                beq     @dot
+00113Fr 1  C9 FE                cmp     #TIE
+001141r 1  D0 08                bne     @nn
+001143r 1  A9 rr A0 rr          PRINT   tie_txt
+001147r 1  20 rr rr     
+00114Ar 1  60                   rts
+00114Br 1  A2 01        @nn:    ldx     #1              ; "C#4": the octave = note / 12 + 1
+00114Dr 1  C9 0C        @o:     cmp     #12
+00114Fr 1  90 05                bcc     @s
+001151r 1  E9 0C                sbc     #12
+001153r 1  E8                   inx
+001154r 1  D0 F7                bne     @o
+001156r 1  0A           @s:     asl
+001157r 1  A8                   tay
+001158r 1  B9 rr rr             lda     note_names,y
+00115Br 1  20 03 FE             jsr     SBC_CHROUT
+00115Er 1  B9 rr rr             lda     note_names+1,y
+001161r 1  20 03 FE             jsr     SBC_CHROUT
+001164r 1  8A                   txa
+001165r 1  09 30                ora     #'0'
+001167r 1  4C 03 FE             jmp     SBC_CHROUT
+00116Ar 1               
+00116Ar 1               ; the play head: "*" over the step playing, when its pattern is on screen
+00116Ar 1               head_show:
+00116Ar 1  20 rr rr             jsr     head_off
+00116Dr 1  AD rr rr             lda     play_pat
+001170r 1  CD rr rr             cmp     pat
+001173r 1  D0 15                bne     @r
+001175r 1  AD rr rr             lda     play_pos
+001178r 1  20 rr rr             jsr     step_col
+00117Br 1  8D rr rr             sta     head_col
+00117Er 1  AA                   tax
+00117Fr 1  E8                   inx
+001180r 1  A0 04                ldy     #HEAD_ROW
+001182r 1  20 rr rr             jsr     goto
+001185r 1  A9 2A                lda     #'*'
+001187r 1  4C 03 FE             jmp     SBC_CHROUT
+00118Ar 1  60           @r:     rts
+00118Br 1               head_off:
+00118Br 1  AE rr rr             ldx     head_col
+00118Er 1  E0 FF                cpx     #$FF
+001190r 1  F0 10                beq     @r
+001192r 1  E8                   inx
+001193r 1  A0 04                ldy     #HEAD_ROW
+001195r 1  20 rr rr             jsr     goto
+001198r 1  A9 20                lda     #' '
+00119Ar 1  20 03 FE             jsr     SBC_CHROUT
+00119Dr 1  A9 FF                lda     #$FF
+00119Fr 1  8D rr rr             sta     head_col
+0011A2r 1  60           @r:     rts
+0011A3r 1               
+0011A3r 1               ; "PATTERN A   TEMPO 120   OCTAVE 3"
+0011A3r 1               show_status:
+0011A3r 1  A2 2C                ldx     #44
+0011A5r 1  A0 00                ldy     #0
+0011A7r 1  20 rr rr             jsr     goto
+0011AAr 1  A9 rr A0 rr          PRINT   pat_txt
+0011AEr 1  20 rr rr     
+0011B1r 1  AD rr rr             lda     pat
+0011B4r 1  18                   clc
+0011B5r 1  69 41                adc     #'A'
+0011B7r 1  20 03 FE             jsr     SBC_CHROUT
+0011BAr 1  A9 rr A0 rr          PRINT   tempo_txt
+0011BEr 1  20 rr rr     
+0011C1r 1  AD rr rr             lda     song_tempo
+0011C4r 1  20 rr rr             jsr     prdec3
+0011C7r 1  A9 rr A0 rr          PRINT   oct_txt
+0011CBr 1  20 rr rr     
+0011CEr 1  AD rr rr             lda     octave
+0011D1r 1  09 30                ora     #'0'
+0011D3r 1  4C 03 FE             jmp     SBC_CHROUT
+0011D6r 1               
+0011D6r 1               ; "STOPPED" / "PLAYING B (ALL)" / "(THIS ONE)"
+0011D6r 1               show_play:
+0011D6r 1  A2 2C                ldx     #44
+0011D8r 1  A0 01                ldy     #1
+0011DAr 1  20 rr rr             jsr     goto
+0011DDr 1  AD rr rr             lda     playing
+0011E0r 1  D0 0A                bne     @p
+0011E2r 1  A9 rr A0 rr          PRINT   stopped_txt
+0011E6r 1  20 rr rr     
+0011E9r 1  4C rr rr             jmp     @m
+0011ECr 1  A9 rr A0 rr  @p:     PRINT   playing_txt
+0011F0r 1  20 rr rr     
+0011F3r 1  AD rr rr             lda     play_pat
+0011F6r 1  18                   clc
+0011F7r 1  69 41                adc     #'A'
+0011F9r 1  20 03 FE             jsr     SBC_CHROUT
+0011FCr 1  AD rr rr     @m:     lda     loop_one
+0011FFr 1  D0 08                bne     @o
+001201r 1  A9 rr A0 rr          PRINT   all_txt
+001205r 1  20 rr rr     
+001208r 1  60                   rts
+001209r 1  A9 rr A0 rr  @o:     PRINT   one_txt
+00120Dr 1  20 rr rr     
+001210r 1  60                   rts
+001211r 1               
+001211r 1               ; "BASS: BUZZ      LEAD: CHIP"
+001211r 1               show_sounds:
+001211r 1  A2 00                ldx     #0
+001213r 1  A0 0D                ldy     #SND_ROW
+001215r 1  20 rr rr             jsr     goto
+001218r 1  A9 rr A0 rr          PRINT   bass_txt
+00121Cr 1  20 rr rr     
+00121Fr 1  AD rr rr             lda     snd
+001222r 1  20 rr rr             jsr     snd_name
+001225r 1  A9 rr A0 rr          PRINT   lead_txt
+001229r 1  20 rr rr     
+00122Cr 1  AD rr rr             lda     snd+1
+00122Fr 1  20 rr rr             jsr     snd_name
+001232r 1  A9 rr A0 rr          PRINT   tab_txt
+001236r 1  20 rr rr     
+001239r 1  60                   rts
+00123Ar 1               snd_name:
+00123Ar 1  0A                   asl
+00123Br 1  0A                   asl
+00123Cr 1  0A                   asl
+00123Dr 1  18                   clc
+00123Er 1  69 rr                adc     #<names
+001240r 1  48                   pha
+001241r 1  A9 00                lda     #0
+001243r 1  69 rr                adc     #>names
+001245r 1  A8                   tay
+001246r 1  68                   pla
+001247r 1                       ; (on into print8)
+001247r 1               
+001247r 1               ; print 8 characters at A/Y
+001247r 1  8D rr rr     print8: sta     @ld+1
+00124Ar 1  8C rr rr             sty     @ld+2
+00124Dr 1  A2 00                ldx     #0
+00124Fr 1  BD FF FF     @ld:    lda     $FFFF,x
+001252r 1  20 03 FE             jsr     SBC_CHROUT
+001255r 1  E8                   inx
+001256r 1  E0 08                cpx     #8
+001258r 1  D0 F5                bne     @ld
+00125Ar 1  60                   rts
+00125Br 1               
+00125Br 1               ; A as 3 digits (100-250: "120"; under 100: " 80")
+00125Br 1  A2 20        prdec3: ldx     #' '
+00125Dr 1  C9 64                cmp     #100
+00125Fr 1  90 0C                bcc     @t
+001261r 1  A2 31                ldx     #'1'
+001263r 1  E9 64                sbc     #100
+001265r 1  C9 64                cmp     #100
+001267r 1  90 04                bcc     @t
+001269r 1  A2 32                ldx     #'2'
+00126Br 1  E9 64                sbc     #100
+00126Dr 1  48           @t:     pha
+00126Er 1  8A                   txa
+00126Fr 1  20 03 FE             jsr     SBC_CHROUT
+001272r 1  68                   pla
+001273r 1  4C rr rr             jmp     prdec2
+001276r 1               
+001276r 1               ; ---- tables ---------------------------------------------------------------------------
+001276r 1  5A 53 58 44  key_chr:    .byte   "ZSXDCVGBHNJM,"
+00127Ar 1  43 56 47 42  
+00127Er 1  48 4E 4A 4D  
+001283r 1  51 32 57 33              .byte   "Q2W3ER5T6Y7UI9O0P"
+001287r 1  45 52 35 54  
+00128Br 1  36 59 37 55  
+001294r 1  00 01 02 03  key_ofs:    .byte   0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12
+001298r 1  04 05 06 07  
+00129Cr 1  08 09 0A 0B  
+0012A1r 1  0C 0D 0E 0F              .byte   12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28
+0012A5r 1  10 11 12 13  
+0012A9r 1  14 15 16 17  
+0012B2r 1               N_KEYS      = key_ofs - key_chr
+0012B2r 1               
+0012B2r 1  43 2D 43 23  note_names: .byte   "C-C#D-D#E-F-F#G-G#A-A#B-"
+0012B6r 1  44 2D 44 23  
+0012BAr 1  45 2D 46 2D  
+0012CAr 1  4B 49 43 4B  track_names:.byte   "KICK    SNARE   HI-HAT  OPEN HATCRASH   BASS    LEAD    "
+0012CEr 1  20 20 20 20  
+0012D2r 1  53 4E 41 52  
+001302r 1  01 02 04 08  drum_bit:   .byte   1, 2, 4, 8, 16
+001306r 1  10           
+001307r 1  08 09 0A 0B  drum_ins:   .byte   DRUM_KIT, DRUM_KIT + 1, DRUM_KIT + 2, DRUM_KIT + 3, DRUM_KIT + 5
+00130Br 1  0D           
+00130Cr 1  00 01 04 03  drum_order: .byte   0, 1, 4, 3, 2   ; kick, snare, crash, open hat, hi-hat
+001310r 1  02           
+001311r 1  53 45 51 31  seq_sig:    .byte   "SEQ1"
+001315r 1               
+001315r 1               ; ---- text -----------------------------------------------------------------------------
+001315r 1  53 45 51 20  title_txt:  .byte   "SEQ - STEP SEQUENCER", 0
+001319r 1  2D 20 53 54  
+00131Dr 1  45 50 20 53  
+00132Ar 1  41 52 52 4F  help_txt:   .byte   "ARROWS: MOVE   NOTE KEYS (AS IN PIANO): A NOTE / A DRUM ON   SPACE: ON/OFF", 13, 10
+00132Er 1  57 53 3A 20  
+001332r 1  4D 4F 56 45  
+001376r 1  2E 3A 20 48              .byte   ".: HOLD THE NOTE ON   BACKSPACE: OUT, BACK   ENTER: PLAY/STOP   ;: ALL/THIS ONE", 13, 10
+00137Ar 1  4F 4C 44 20  
+00137Er 1  54 48 45 20  
+0013C7r 1  2D 20 3D 3A              .byte   "- =: TEMPO   [ ]: OCTAVE   K L: PATTERN   TAB: SOUND   F: FILES   ESC: QUIT", 0
+0013CBr 1  20 54 45 4D  
+0013CFr 1  50 4F 20 20  
+001413r 1  50 41 54 54  pat_txt:    .byte   "PATTERN ", 0
+001417r 1  45 52 4E 20  
+00141Br 1  00           
+00141Cr 1  20 20 20 54  tempo_txt:  .byte   "   TEMPO ", 0
+001420r 1  45 4D 50 4F  
+001424r 1  20 00        
+001426r 1  20 20 20 4F  oct_txt:    .byte   "   OCTAVE ", 0
+00142Ar 1  43 54 41 56  
+00142Er 1  45 20 00     
+001431r 1  53 54 4F 50  stopped_txt:.byte   "STOPPED  ", 0
+001435r 1  50 45 44 20  
+001439r 1  20 00        
+00143Br 1  50 4C 41 59  playing_txt:.byte   "PLAYING ", 0
+00143Fr 1  49 4E 47 20  
+001443r 1  00           
+001444r 1  20 20 20 28  all_txt:    .byte   "   (ALL PATTERNS)", 0
+001448r 1  41 4C 4C 20  
+00144Cr 1  50 41 54 54  
+001456r 1  20 20 20 28  one_txt:    .byte   "   (THIS ONE)    ", 0
+00145Ar 1  54 48 49 53  
+00145Er 1  20 4F 4E 45  
+001468r 1  42 41 53 53  bass_txt:   .byte   "BASS: ", 0
+00146Cr 1  3A 20 00     
+00146Fr 1  20 20 20 4C  lead_txt:   .byte   "   LEAD: ", 0
+001473r 1  45 41 44 3A  
+001477r 1  20 00        
+001479r 1  20 20 20 28  tab_txt:    .byte   "   (TAB ON ITS ROW: ANOTHER)", 0
+00147Dr 1  54 41 42 20  
+001481r 1  4F 4E 20 49  
+001496r 1  20 23 20 00  hit_txt:    .byte   " # ", 0
+00149Ar 1  20 2E 20 00  dot_txt:    .byte   " . ", 0
+00149Er 1  20 2D 20 00  tie_txt:    .byte   " - ", 0
+0014A2r 1  46 49 4C 45  file_txt:   .byte   "FILES: S SAVE, L LOAD, N NEW, C COPY THE PATTERN BEFORE INTO THIS ONE (ESC: NO)", 0
+0014A6r 1  53 3A 20 53  
+0014AAr 1  20 53 41 56  
+0014F2r 1  57 48 49 43  slot_txt:   .byte   "WHICH ONE, 1-9 (BEAT1.SEQ ... BEAT9.SEQ)? ", 0
+0014F6r 1  48 20 4F 4E  
+0014FAr 1  45 2C 20 31  
+00151Dr 1  4E 45 57 3A  sure_txt:   .byte   "NEW: ALL 4 PATTERNS EMPTIED. SURE (Y)? ", 0
+001521r 1  20 41 4C 4C  
+001525r 1  20 34 20 50  
+001545r 1  41 4C 4C 20  new_txt:    .byte   "ALL NEW", 0
+001549r 1  4E 45 57 00  
+00154Dr 1  43 4F 50 49  copied_txt: .byte   "COPIED", 0
+001551r 1  45 44 00     
+001554r 1  53 41 56 45  saved_txt:  .byte   "SAVED ", 0
+001558r 1  44 20 00     
+00155Br 1  4C 4F 41 44  loaded_txt: .byte   "LOADED ", 0
+00155Fr 1  45 44 20 00  
+001563r 1  20 49 4E 20  in_txt:     .byte   " IN ", 0
+001567r 1  00           
+001568r 1  4E 4F 54 20  nofile_txt: .byte   "NOT FOUND: ", 0
+00156Cr 1  46 4F 55 4E  
+001570r 1  44 3A 20 00  
+001574r 1  4E 4F 54 20  badfile_txt:.byte   "NOT A SEQ FILE: ", 0
+001578r 1  41 20 53 45  
+00157Cr 1  51 20 46 49  
+001585r 1  55 53 42 20  ferr_txt:   .byte   "USB DRIVE ERROR $", 0
+001589r 1  44 52 49 56  
+00158Dr 1  45 20 45 52  
+001597r 1  51 55 49 54  quit_txt:   .byte   "QUIT (Y)? ", 0
+00159Br 1  20 28 59 29  
+00159Fr 1  3F 20 00     
+0015A2r 1  20 20 20 20  blank_txt:  .byte   "                                                                               ", 0
+0015A6r 1  20 20 20 20  
+0015AAr 1  20 20 20 20  
+0015F2r 1  1B 5B 37 6D  rev_txt:    .byte   27, "[7m", 0
+0015F6r 1  00           
+0015F7r 1  1B 5B 30 6D  norm_txt:   .byte   27, "[0m", 0
+0015FBr 1  00           
+0015FCr 1  42 59 45 0D  bye_txt:    .byte   "BYE", 13, 10, 0
+001600r 1  0A 00        
+001602r 1  2F 00        fpath_root: .byte   "/", 0
+001604r 1  2F           fpath:      .byte   "/"
+001605r 1  42 45 41 54  fname:      .byte   "BEAT"
+001609r 1  31 2E 53 45  fname_n:    .byte   "1.SEQ", 0
+00160Dr 1  51 00        
+00160Fr 1               
+00160Fr 1               ; ---- variables -------------------------------------------------------------------------
+00160Fr 1                       .segment "BSS"
+00007Dr 1               ; the song, saved as it is: "SEQ1", tempo, the sounds of BASS and LEAD, a
+00007Dr 1               ; spare byte, then the 4 patterns' drums (a bit each), BASS and LEAD notes
+00007Dr 1  xx xx xx xx  song:       .res 4
+000081r 1  xx           song_tempo: .res 1
+000082r 1  xx xx        snd:        .res 2
+000084r 1  xx                       .res 1
+000085r 1  xx xx xx xx  drums:      .res STEPS * N_PATS
+000089r 1  xx xx xx xx  
+00008Dr 1  xx xx xx xx  
+0000C5r 1  xx xx xx xx  bass:       .res STEPS * N_PATS
+0000C9r 1  xx xx xx xx  
+0000CDr 1  xx xx xx xx  
+000105r 1  xx xx xx xx  lead:       .res STEPS * N_PATS
+000109r 1  xx xx xx xx  
+00010Dr 1  xx xx xx xx  
+000145r 1               SONG_LEN    = * - song
+000145r 1  xx xx xx xx  fbuf:       .res SONG_LEN       ; a file being loaded
+000149r 1  xx xx xx xx  
+00014Dr 1  xx xx xx xx  
+00020Dr 1  xx           pat:        .res 1              ; the pattern on screen
+00020Er 1  xx           cur_tr:     .res 1              ; the cursor: track
+00020Fr 1  xx           cur_st:     .res 1              ;  and step
+000210r 1  xx           octave:     .res 1
+000211r 1  xx           playing:    .res 1
+000212r 1  xx           loop_one:   .res 1
+000213r 1  xx           play_pat:   .res 1
+000214r 1  xx           play_pos:   .res 1
+000215r 1  xx xx        acc:        .res 2              ; tempo x ticks, a step each 1500
+000217r 1  xx xx        acc2:       .res 2
+000219r 1  xx           gate:       .res 1              ; frames in a step
+00021Ar 1  xx           tick:       .res 1
+00021Br 1  xx           head_col:   .res 1
+00021Cr 1  xx           sx:         .res 1
+00021Dr 1  xx           cnt:        .res 1
+00021Er 1  xx           tmp:        .res 1
+00021Fr 1  xx           tmp2:       .res 1
+000220r 1  xx xx        fname_a:    .res 2
+000222r 1  xx xx xx xx  cwd_buf:    .res CWD_MAX + 1
+000226r 1  xx xx xx xx  
+00022Ar 1  xx xx xx xx  
+000222r 1               

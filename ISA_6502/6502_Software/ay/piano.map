@@ -1,0 +1,28 @@
+Modules list:
+-------------
+piano.o:
+    CODE              Offs=000000  Size=000F02  Align=00001  Fill=0000
+    BSS               Offs=000000  Size=00009E  Align=00001  Fill=0000
+
+
+Segment list:
+-------------
+Name                   Start     End    Size  Align
+----------------------------------------------------
+CODE                  000500  001401  000F02  00001
+BSS                   001402  00149F  00009E  00001
+
+
+Exports list by name:
+---------------------
+
+
+
+Exports list by value:
+----------------------
+
+
+
+Imports list:
+-------------
+
