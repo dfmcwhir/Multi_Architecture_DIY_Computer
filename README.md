@@ -8,7 +8,7 @@ Up front, I will state the following:
 
 <br>
 <h2> The Concept </h2>
-The initial idea as I wrote in my notes app was:
+The initial idea as I wrote it in my notes app was:<br>
 <quote>
   <b><i></i>Idea for a retro computer "system" that uses various cards in the ISA format with a passive ISA back plane. Ideally the most of the individual ISA cards will be less that 100mmx100mm for cheaper PCB prices which limits them to 8-bit isa cards.
 
