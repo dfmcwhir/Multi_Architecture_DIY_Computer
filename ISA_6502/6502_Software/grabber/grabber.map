@@ -1,0 +1,32 @@
+Modules list:
+-------------
+grabber.o:
+    CODE              Offs=000000  Size=001E3E  Align=00001  Fill=0000
+    RODATA            Offs=000000  Size=000C1B  Align=00001  Fill=0000
+    BSS               Offs=000000  Size=0002EA  Align=00001  Fill=0000
+    BUFS              Offs=000000  Size=001800  Align=00001  Fill=0000
+
+
+Segment list:
+-------------
+Name                   Start     End    Size  Align
+----------------------------------------------------
+CODE                  000500  00233D  001E3E  00001
+RODATA                00233E  002F58  000C1B  00001
+BSS                   002F59  003242  0002EA  00001
+BUFS                  003300  004AFF  001800  00001
+
+
+Exports list by name:
+---------------------
+
+
+
+Exports list by value:
+----------------------
+
+
+
+Imports list:
+-------------
+

@@ -1,0 +1,32 @@
+Modules list:
+-------------
+muncher.o:
+    CODE              Offs=000000  Size=001182  Align=00001  Fill=0000
+    RODATA            Offs=000000  Size=0006A6  Align=00001  Fill=0000
+    BSS               Offs=000000  Size=0000F5  Align=00001  Fill=0000
+    MAZE              Offs=000000  Size=000400  Align=00001  Fill=0000
+
+
+Segment list:
+-------------
+Name                   Start     End    Size  Align
+----------------------------------------------------
+CODE                  000500  001681  001182  00001
+RODATA                001682  001D27  0006A6  00001
+BSS                   001D28  001E1C  0000F5  00001
+MAZE                  001F00  0022FF  000400  00001
+
+
+Exports list by name:
+---------------------
+
+
+
+Exports list by value:
+----------------------
+
+
+
+Imports list:
+-------------
+

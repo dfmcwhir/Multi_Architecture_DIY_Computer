@@ -1,0 +1,30 @@
+Modules list:
+-------------
+invaders.o:
+    CODE              Offs=000000  Size=00102E  Align=00001  Fill=0000
+    RODATA            Offs=000000  Size=0002E4  Align=00001  Fill=0000
+    BSS               Offs=000000  Size=0000F0  Align=00001  Fill=0000
+
+
+Segment list:
+-------------
+Name                   Start     End    Size  Align
+----------------------------------------------------
+CODE                  000500  00152D  00102E  00001
+RODATA                00152E  001811  0002E4  00001
+BSS                   001812  001901  0000F0  00001
+
+
+Exports list by name:
+---------------------
+
+
+
+Exports list by value:
+----------------------
+
+
+
+Imports list:
+-------------
+
