@@ -13,7 +13,7 @@
 <li>I/O: up to 255 addresses</li>
 
 <h2>Current Memory Map</h2>
-<table><thead><tr><th>AddressPin</th><th>Function</th></tr></thead>
+<table><thead><tr><th>Address</th><th>Function</th></tr></thead>
 <tr><td>0000</td><td>Ram begin</td></tr>
 <tr><td>7EFF</td><td>Ram end</td></tr>
 <tr><td>7F00</td><td>IO card 65C22 begin</td></tr>
@@ -45,6 +45,18 @@
 <tr><td>7FFF</td><td>Interrupt Register</td></tr>
 <tr><td>8000</td><td>Rom begin</td></tr>
 <tr><td>FFFF</td><td>Rom end</td></tr>
+</table>
+
+<h2>Current IRQ Assignments</h2>
+<table><thead><tr><th>Interrupt</th><th>Device</th></tr></thead>
+<tr><td>IRQ0</td><td>Spare - Header pin</td></tr>
+<tr><td>IRQ1</td><td>Spare - Header pin</td></tr>
+<tr><td>IRQ2</td><td>IO Card - VIA</td></tr>
+<tr><td>IRQ3</td><td>Serial Card - ACIA</td></tr>
+<tr><td>IRQ4</td><td>IO Card - I2C interface</td></tr>
+<tr><td>IRQ5</td><td>KB/Display Card</td></tr>
+<tr><td>IRQ6</td><td>Spare</td></tr>
+<tr><td>IRQ7</td><td>Spare</td></tr>
 </table>
 
 <h2> Add-On Cards </h2>
