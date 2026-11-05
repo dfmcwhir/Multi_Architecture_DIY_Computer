@@ -1,0 +1,24 @@
+# Berkeley PLA format generated using
+#
+# CUPL(WM)        5.0a Serial# 60008009
+# Device          g16v8as  Library DLIB-h-40-2
+# Created         Tue May 05 21:07:04 2026
+# Name            ISA6502_Serial_Board_Addr_Decoding.dig 
+# Partno          00 
+# Revision        01 
+# Date            18.04.2026 
+# Designer        dylan 
+# Company         unknown 
+# Assembly        None 
+# Location        unknown 
+#
+# Inputs  A2 A3 A4 A5 
+#         A6 A7 CS2 IOen 
+#         RESET RESETRAW 
+# Outputs CS2 RESET 
+.i 10
+.o 2
+.p 2
+101000-0-- 1~
+---------1 ~1
+.end

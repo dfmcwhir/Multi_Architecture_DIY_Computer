@@ -1,0 +1,93 @@
+%SIGNAL
+PIN   9 =  A8 
+PIN   8 =  A9 
+PIN   7 =  A10 
+PIN   6 =  A11 
+PIN   5 =  A12 
+PIN   4 =  A13 
+PIN   3 =  A14 
+PIN   2 =  A15 
+PIN  10 =  BA16 
+PIN  11 =  BA17 
+PIN  13 =  BA18 
+PIN   1 =  BA19 
+PIN  16 =  RA15 
+PIN  17 =  RA16 
+PIN  18 =  RA17 
+PIN  19 =  RA18 
+PIN  14 = !RAMCE 
+PIN  15 = !ROMCE 
+%END
+
+%FIELD
+%END
+
+%EQUATION
+IOPAGE =>
+    A8 & A9 & A10 & A11 & A12 & A13 & A14 & !A15
+
+RA15 =>
+    A14 & BA16
+  # A13 & BA16
+  # A12 & BA16
+
+RA16 =>
+    A14 & BA17
+  # A13 & BA17
+  # A12 & BA17
+
+RA17 =>
+    A14 & BA18
+  # A13 & BA18
+  # A12 & BA18
+
+RA18 =>
+    A14 & BA19
+  # A13 & BA19
+  # A12 & BA19
+
+RAMCE =>
+    !A14 & !A15
+  # !A13 & !A15
+  # !A12 & !A15
+  # !A11 & !A15
+  # !A10 & !A15
+  # !A9 & !A15
+  # !A8 & !A15
+
+RAMSEL =>
+    !A14 & !A15
+  # !A13 & !A15
+  # !A12 & !A15
+  # !A11 & !A15
+  # !A10 & !A15
+  # !A9 & !A15
+  # !A8 & !A15
+
+ROMCE =>
+    A15
+
+WIN =>
+    A14
+  # A13
+  # A12
+
+RA15.oe  =>
+    1 
+
+RA16.oe  =>
+    1 
+
+RA17.oe  =>
+    1 
+
+RA18.oe  =>
+    1 
+
+RAMCE.oe  =>
+    1 
+
+ROMCE.oe  =>
+    1 
+
+%END

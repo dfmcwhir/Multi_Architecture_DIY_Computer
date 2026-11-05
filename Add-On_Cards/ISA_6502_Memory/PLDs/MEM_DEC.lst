@@ -1,0 +1,87 @@
+LISTING FOR LOGIC DESCRIPTION FILE: MEM_DEC.pld                      Page 1
+
+CUPL(WM): Universal Compiler for Programmable Logic
+Version 5.0a Serial# MW-10400000
+Copyright (c) 1983, 1998 Logical Devices, Inc.
+Created Mon Oct 26 16:53:23 2026
+
+  1:Name     ISA_MEMORY_CARD_DEC ;
+  2:PartNo   00 ;
+  3:Date     10/26/2026 ;
+  4:Revision 01 ;
+  5:Designer Engineer ;
+  6:Company  none ;
+  7:Assembly ISA memory card ;
+  8:Location U1 ;
+  9:Device   G22V10 ;
+ 10:
+ 11:/*
+ 12: * Memory card decode (address only - no clock; the 74ACT00 makes the
+ 13: * fast /WE strobe and bus /RD drives the /OE pins).
+ 14: *
+ 15: *   $0000-$0FFF  RAM, fixed: always physical bank 0
+ 16: *   $1000-$7EFF  RAM, banked: RA15-RA18 = BA16-BA19 (bank register $7FFE)
+ 17: *   $7F00-$7FFF  I/O page: card not selected
+ 18: *   $8000-$FFFF  ROM (flash or One ROM socket; image picked by JP4/JP5)
+ 19: *
+ 20: * Physical RAM address = bank x 32K + CPU address, so bank 0 is the
+ 21: * original 32K RAM. AS6C1008: banks 0-3 (RA15, RA16). AS6C4008: 0-15.
+ 22: */
+ 23:
+ 24:/* *************** INPUT PINS *********************/
+ 25:PIN 1  = BA19 ;
+ 26:PIN 2  = A15 ;
+ 27:PIN 3  = A14 ;
+ 28:PIN 4  = A13 ;
+ 29:PIN 5  = A12 ;
+ 30:PIN 6  = A11 ;
+ 31:PIN 7  = A10 ;
+ 32:PIN 8  = A9 ;
+ 33:PIN 9  = A8 ;
+ 34:PIN 10 = BA16 ;
+ 35:PIN 11 = BA17 ;
+ 36:PIN 13 = BA18 ;
+ 37:
+ 38:/* *************** OUTPUT PINS *********************/
+ 39:PIN 14 = !RAMCE ;     /* RAM /CE                        */
+ 40:PIN 15 = !ROMCE ;     /* flash /CE and One ROM /CE (CS1) */
+ 41:PIN 16 = RA15 ;       /* RAM pin 31                     */
+ 42:PIN 17 = RA16 ;       /* RAM pin 2                      */
+ 43:PIN 18 = RA17 ;       /* RAM pin 30 via JP1 (AS6C4008)  */
+ 44:PIN 19 = RA18 ;       /* RAM pin 1 (NC on AS6C1008)     */
+ 45:/* pins 20-23 unused */
+ 46:
+ 47:/** Intermediate terms **/
+ 48:IOPAGE = !A15 & A14 & A13 & A12 & A11 & A10 & A9 & A8;   /* $7Fxx       */
+ 49:RAMSEL = !A15 & !IOPAGE;                                /* $0000-$7EFF */
+ 50:
+ 51:/* Banked window for the RA lines. It doesn't need to exclude the I/O page
+ 52:   or ROM space: the RA lines only go to the RAM, and the RAM isn't
+ 53:   selected there, so their value doesn't matter. Keeping WIN this simple
+
+LISTING FOR LOGIC DESCRIPTION FILE: MEM_DEC.pld                      Page 2
+
+CUPL(WM): Universal Compiler for Programmable Logic
+Version 5.0a Serial# MW-10400000
+Copyright (c) 1983, 1998 Logical Devices, Inc.
+Created Mon Oct 26 16:53:23 2026
+
+ 54:   keeps each RA equation at 3 product terms (the full $1000-$7EFF decode
+ 55:   expanded to more terms than the 22V10 outputs have). */
+ 56:WIN    = A14 # A13 # A12;                               /* $x000 >= $1000 */
+ 57:
+ 58:/** Logic Equations **/
+ 59:RAMCE = RAMSEL;
+ 60:ROMCE = A15;
+ 61:
+ 62:RA15 = WIN & BA16;
+ 63:RA16 = WIN & BA17;
+ 64:RA17 = WIN & BA18;
+ 65:RA18 = WIN & BA19;
+ 66:
+ 67:
+
+
+
+Jedec Fuse Checksum       (8d02)
+Jedec Transmit Checksum   (a96e)

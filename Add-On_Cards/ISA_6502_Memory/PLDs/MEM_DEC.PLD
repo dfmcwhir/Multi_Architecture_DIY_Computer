@@ -1,0 +1,65 @@
+Name     ISA_MEMORY_CARD_DEC ;
+PartNo   00 ;
+Date     10/26/2026 ;
+Revision 01 ;
+Designer Engineer ;
+Company  none ;
+Assembly ISA memory card ;
+Location U1 ;
+Device   G22V10 ;
+
+/*
+ * Memory card decode (address only - no clock; the 74ACT00 makes the
+ * fast /WE strobe and bus /RD drives the /OE pins).
+ *
+ *   $0000-$0FFF  RAM, fixed: always physical bank 0
+ *   $1000-$7EFF  RAM, banked: RA15-RA18 = BA16-BA19 (bank register $7FFE)
+ *   $7F00-$7FFF  I/O page: card not selected
+ *   $8000-$FFFF  ROM (flash or One ROM socket; image picked by JP4/JP5)
+ *
+ * Physical RAM address = bank x 32K + CPU address, so bank 0 is the
+ * original 32K RAM. AS6C1008: banks 0-3 (RA15, RA16). AS6C4008: 0-15.
+ */
+
+/* *************** INPUT PINS *********************/
+PIN 1  = BA19 ;
+PIN 2  = A15 ;
+PIN 3  = A14 ;
+PIN 4  = A13 ;
+PIN 5  = A12 ;
+PIN 6  = A11 ;
+PIN 7  = A10 ;
+PIN 8  = A9 ;
+PIN 9  = A8 ;
+PIN 10 = BA16 ;
+PIN 11 = BA17 ;
+PIN 13 = BA18 ;
+
+/* *************** OUTPUT PINS *********************/
+PIN 14 = !RAMCE ;     /* RAM /CE                        */
+PIN 15 = !ROMCE ;     /* flash /CE and One ROM /CE (CS1) */
+PIN 16 = RA15 ;       /* RAM pin 31                     */
+PIN 17 = RA16 ;       /* RAM pin 2                      */
+PIN 18 = RA17 ;       /* RAM pin 30 via JP1 (AS6C4008)  */
+PIN 19 = RA18 ;       /* RAM pin 1 (NC on AS6C1008)     */
+/* pins 20-23 unused */
+
+/** Intermediate terms **/
+IOPAGE = !A15 & A14 & A13 & A12 & A11 & A10 & A9 & A8;   /* $7Fxx       */
+RAMSEL = !A15 & !IOPAGE;                                /* $0000-$7EFF */
+
+/* Banked window for the RA lines. It doesn't need to exclude the I/O page
+   or ROM space: the RA lines only go to the RAM, and the RAM isn't
+   selected there, so their value doesn't matter. Keeping WIN this simple
+   keeps each RA equation at 3 product terms (the full $1000-$7EFF decode
+   expanded to more terms than the 22V10 outputs have). */
+WIN    = A14 # A13 # A12;                               /* $x000 >= $1000 */
+
+/** Logic Equations **/
+RAMCE = RAMSEL;
+ROMCE = A15;
+
+RA15 = WIN & BA16;
+RA16 = WIN & BA17;
+RA17 = WIN & BA18;
+RA18 = WIN & BA19;
