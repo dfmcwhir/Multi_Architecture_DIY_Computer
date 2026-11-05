@@ -1,0 +1,32 @@
+Modules list:
+-------------
+critters.o:
+    CODE              Offs=000000  Size=00161A  Align=00001  Fill=0000
+    RODATA            Offs=000000  Size=000889  Align=00001  Fill=0000
+    BSS               Offs=000000  Size=000354  Align=00001  Fill=0000
+    TERRAIN           Offs=000000  Size=001700  Align=00001  Fill=0000
+
+
+Segment list:
+-------------
+Name                   Start     End    Size  Align
+----------------------------------------------------
+CODE                  000500  001B19  00161A  00001
+RODATA                001B1A  0023A2  000889  00001
+BSS                   0023A3  0026F6  000354  00001
+TERRAIN               002700  003DFF  001700  00001
+
+
+Exports list by name:
+---------------------
+
+
+
+Exports list by value:
+----------------------
+
+
+
+Imports list:
+-------------
+

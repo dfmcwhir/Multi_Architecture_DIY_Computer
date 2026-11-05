@@ -1,0 +1,32 @@
+Modules list:
+-------------
+doom.o:
+    CODE              Offs=000000  Size=0022DF  Align=00001  Fill=0000
+    RODATA            Offs=000000  Size=001D58  Align=00001  Fill=0000
+    BSS               Offs=000000  Size=000608  Align=00001  Fill=0000
+    DATA              Offs=000000  Size=000011  Align=00001  Fill=0000
+
+
+Segment list:
+-------------
+Name                   Start     End    Size  Align
+----------------------------------------------------
+CODE                  000500  0027DE  0022DF  00001
+RODATA                0027DF  004536  001D58  00001
+DATA                  004537  004547  000011  00001
+BSS                   004548  004B4F  000608  00001
+
+
+Exports list by name:
+---------------------
+
+
+
+Exports list by value:
+----------------------
+
+
+
+Imports list:
+-------------
+
