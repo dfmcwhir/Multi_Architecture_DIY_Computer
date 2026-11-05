@@ -12,6 +12,41 @@
 <li>ROM: 32K</li>
 <li>I/O: up to 255 addresses</li>
 
+<h2>Current Memory Map</h2>
+<table><thead><tr><th>AddressPin</th><th>Function</th></tr></thead>
+<tr><td>0000</td><td>Ram begin</td></tr>
+<tr><td>7EFF</td><td>Ram end</td></tr>
+<tr><td>7F00</td><td>IO card 65C22 begin</td></tr>
+<tr><td>7F0F</td><td>IO card 65C22 end</td></tr>
+<tr><td>7F10</td><td>IO card I2C begin</td></tr>
+<tr><td>7F11</td><td>IO card I2C end</td></tr>
+<tr><td>7F12</td><td>Undefined</td></tr>
+<tr><td>7F13</td><td>Undefined</td></tr>
+<tr><td>7F14</td><td>Serial card begin</td></tr>
+<tr><td>7F17</td><td>Serial card end</td></tr>
+<tr><td>7F18</td><td>Display/KB address begin</td></tr>
+<tr><td>7F1B</td><td>Display/KB address end</td></tr>
+<tr><td>7F20</td><td>CH376 Data port</td></tr>
+<tr><td>7F21</td><td>CH376 command port</td></tr>
+<tr><td>7F22</td><td>AY-3-8910 CMD</td></tr>
+<tr><td>7F23</td><td>AY-3-8910 DATA</td></tr>
+<tr><td>7F24</td><td>CH376 Data port MIRROR</td></tr>
+<tr><td>7F25</td><td>CH376 command port MIRROR</td></tr>
+<tr><td>7F26</td><td>SPO256A-AL2</td></tr>
+<tr><td>7F27</td><td>Undefined</td></tr>
+<tr><td>7F28</td><td>CH376 Data port MIRROR</td></tr>
+<tr><td>7F29</td><td>CH376 command port MIRROR</td></tr>
+<tr><td>7F2A</td><td>Undefined</td></tr>
+<tr><td>7F2B</td><td>Undefined</td></tr>
+<tr><td>7F2C</td><td>CH376 Data port MIRROR</td></tr>
+<tr><td>7F2D</td><td>CH376 command port MIRROR</td></tr>
+<tr><td>7F2E</td><td>Spare IO addresses begin</td></tr>
+<tr><td>7FFE</td><td>Spare IO addresses End</td></tr>
+<tr><td>7FFF</td><td>Interrupt Register</td></tr>
+<tr><td>8000</td><td>Rom begin</td></tr>
+<tr><td>FFFF</td><td>Rom end</td></tr>
+</table>
+
 <h2> Add-On Cards </h2>
 <p>All the cards that have been built so far have been tested and work on the rev1 CPU card at 1MHz and 2MHz.</p>
 
