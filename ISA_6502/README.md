@@ -26,4 +26,4 @@
 <li> As part of the /wait and /stretch changes, the CPU is now clocked through a flip-flop and the CPU will run at half of the oscillator frequency (i.e. to run the CPU at 4MHz I will need to install an 8MHz oscillator).</li>
 <li> The MEMw and MEMr bus signals are no longer truly only for memory reads and writes. They are now /WE and /RD signals, meaning they will be active during IO read and write operations, not just memory reads and wries like on rev1 of the card. So any future add on cards that need true MEMr and/or MEMw signals will need to decode them locally.</li></p>
 
-<p> I'm hoping that will all the changes I will be able to get the CPU speed up to 4,6, or possibly even 8MHz.</p>
+<p> I'm hoping that with all the changes I will be able to get the CPU speed up to 4,6, or possibly even 8MHz.</p>
