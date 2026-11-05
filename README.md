@@ -10,7 +10,7 @@ Up front, I will state the following:
 <h2> The Concept </h2>
 The initial idea as I wrote in my notes app was:
 <quote>
-  Idea for a retro computer "system" that uses various cards in the ISA format with a passive ISA back plane. Ideally the most of the individual ISA cards will be less that 100mmx100mm for cheaper PCB prices which limits them to 8-bit isa cards.
+  <b><i></i>Idea for a retro computer "system" that uses various cards in the ISA format with a passive ISA back plane. Ideally the most of the individual ISA cards will be less that 100mmx100mm for cheaper PCB prices which limits them to 8-bit isa cards.
 
 Ideally cpu and interface cards should be inter changeable, so that interface cards can be used with multiple different types of CPU boards. That may require jumpers/switches to change logic level of some control signals and/or to set address decoding.
 
@@ -27,7 +27,8 @@ Possible interface cards:
   - Retro video card - MC6847 based. Similar to Kiran Tomlinson's blog post
   - Atmel based keyboard/display/serial - Based on Grant Searle's design
   - Memory expansion
-  - Storage controller - ideally the overall system would be compatible with the PicoMem I/O card but a dedicated storage controller maybe required/desired. 
+  - Storage controller - ideally the overall system would be compatible with the PicoMem I/O card but a dedicated storage controller maybe required/desired.
+</b></i>
 </quote>
 <br>
 So far I have done the 6502 and 8085 CPU cards with the Z80 on the way. The plans for the add-cards changed over time, I didn't do all the ones listed (yet), but I have a number of others. Most of them are in ISA_6502 folder, because that is the CPU I started with, but should at least theoretically be compatible with other CPU cards if they are designed to interface with the bus as I have defined it and with the correct software.
