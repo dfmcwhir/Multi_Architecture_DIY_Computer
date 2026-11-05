@@ -1,0 +1,123 @@
+LISTING FOR LOGIC DESCRIPTION FILE: Z80_INT.pld                      Page 1
+
+CUPL(WM): Universal Compiler for Programmable Logic
+Version 5.0a Serial# MW-10400000
+Copyright (c) 1983, 1998 Logical Devices, Inc.
+Created Sat Oct 31 12:08:27 2026
+
+  1:Name     ISA_Z80_CPU_INTERRUPT ;
+  2:PartNo   00 ;
+  3:Date     10/31/2026 ;
+  4:Revision 01 ;
+  5:Designer Engineer ;
+  6:Company  none ;
+  7:Assembly ISA Z80 CPU card ;
+  8:Location U7 ;
+  9:Device   G22V10 ;
+ 10:
+ 11:/*
+ 12: * Z80 card I/O registers (ATF22V10C-7). Same pinout as the board.
+ 13: *
+ 14: *   Port $FF read : interrupt register ('574 /OE)  - use IM 1:
+ 15: *                   every interrupt goes to $0038; the handler does
+ 16: *                   IN A,($FF) and gets (IRQ number x 2).
+ 17: *   Port $FE write: bank register, D3-D0 -> BA16-BA19 (bus and RAM A16)
+ 18: *   Port $FE read : bank register on D3-D0 (D7-D4 float: AND $0F)
+ 19: *   Port $FD write: D0 = 1 disables the ROM (RAM everywhere),
+ 20: *                   D0 = 0 enables it again
+ 21: *
+ 22: * /IOW and /IOR come from the address GAL and are already limited to
+ 23: * the one-clock bus window, so each register loads exactly once: on the
+ 24: * falling edge at the end of T3 (pin 1 = /CLK rising).
+ 25: * /RESET clears all registers: bank 0, ROM enabled.
+ 26: * BA16-BA19 are always driven (no /BUSACK input - no pins left).
+ 27: */
+ 28:
+ 29:/* *************** INPUT PINS *********************/
+ 30:PIN 1  = nCLKI ;     /* /CLK - register clock         */
+ 31:PIN 2  = A0 ;
+ 32:PIN 3  = A1 ;
+ 33:PIN 4  = A2 ;
+ 34:PIN 5  = A3 ;
+ 35:PIN 6  = A4 ;
+ 36:PIN 7  = A5 ;
+ 37:PIN 8  = A6 ;
+ 38:PIN 9  = A7 ;
+ 39:PIN 10 = nIOW ;      /* bus /IOW from U3              */
+ 40:PIN 11 = nIOR ;      /* bus /IOR from U3              */
+ 41:PIN 13 = nRESET ;
+ 42:
+ 43:/* *************** I/O AND OUTPUT PINS ***************/
+ 44:PIN 14 = D0 ;
+ 45:PIN 15 = D1 ;
+ 46:PIN 16 = D2 ;
+ 47:PIN 17 = D3 ;
+ 48:PIN 18 = BA16 ;
+ 49:PIN 19 = BA17 ;
+ 50:PIN 20 = BA18 ;
+ 51:PIN 21 = BA19 ;
+ 52:PIN 22 = ROMDIS ;
+ 53:PIN 23 = !INTOE ;    /* interrupt register '574 /OE   */
+
+LISTING FOR LOGIC DESCRIPTION FILE: Z80_INT.pld                      Page 2
+
+CUPL(WM): Universal Compiler for Programmable Logic
+Version 5.0a Serial# MW-10400000
+Copyright (c) 1983, 1998 Logical Devices, Inc.
+Created Sat Oct 31 12:08:27 2026
+
+ 54:
+ 55:/** Decodes (written out, no field ranges, to keep product terms low) **/
+ 56:P_FF = A7 & A6 & A5 & A4 & A3 & A2 & A1 & A0;
+ 57:P_FE = A7 & A6 & A5 & A4 & A3 & A2 & A1 & !A0;
+ 58:P_FD = A7 & A6 & A5 & A4 & A3 & A2 & !A1 & A0;
+ 59:
+ 60:BANKWR = P_FE & !nIOW;
+ 61:BANKRD = P_FE & !nIOR;
+ 62:ROMWR  = P_FD & !nIOW;
+ 63:
+ 64:/** Interrupt register **/
+ 65:INTOE = P_FF & !nIOR;
+ 66:
+ 67:/** Bank register **/
+ 68:BA16.d = BANKWR & D0 # !BANKWR & BA16;
+ 69:BA17.d = BANKWR & D1 # !BANKWR & BA17;
+ 70:BA18.d = BANKWR & D2 # !BANKWR & BA18;
+ 71:BA19.d = BANKWR & D3 # !BANKWR & BA19;
+ 72:BA16.oe = 'b'1;
+ 73:BA17.oe = 'b'1;
+ 74:BA18.oe = 'b'1;
+ 75:BA19.oe = 'b'1;
+ 76:
+ 77:/** ROM disable **/
+ 78:ROMDIS.d  = ROMWR & D0 # !ROMWR & ROMDIS;
+ 79:ROMDIS.oe = 'b'1;
+ 80:
+ 81:/* /RESET clears every register (AR is shared by all of them) */
+ 82:BA16.ar = !nRESET;
+ 83:BA16.sp = 'b'0;
+ 84:
+ 85:/** Bank readback **/
+ 86:D0 = BA16;
+ 87:D1 = BA17;
+ 88:D2 = BA18;
+ 89:D3 = BA19;
+ 90:D0.oe = BANKRD;
+ 91:D1.oe = BANKRD;
+ 92:D2.oe = BANKRD;
+ 93:D3.oe = BANKRD;
+ 94:
+ 95:
+
+[0016cb] Please note: no expression assigned to:  BA17.ar
+[0016cb] Please note: no expression assigned to:  BA17.sp
+[0016cb] Please note: no expression assigned to:  BA18.ar
+[0016cb] Please note: no expression assigned to:  BA18.sp
+[0016cb] Please note: no expression assigned to:  BA19.ar
+[0016cb] Please note: no expression assigned to:  BA19.sp
+[0016cb] Please note: no expression assigned to:  ROMDIS.ar
+[0016cb] Please note: no expression assigned to:  ROMDIS.sp
+
+
+Jedec Fuse Checksum       (560a)
+Jedec Transmit Checksum   (6463)

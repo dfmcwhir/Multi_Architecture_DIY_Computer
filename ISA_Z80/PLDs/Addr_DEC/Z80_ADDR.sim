@@ -1,0 +1,109 @@
+%SIGNAL
+PIN   3 =  A15 
+PIN   2 =  BA16 
+PIN  19 = !BUSIOEN 
+PIN  11 =  CLK 
+PIN  20 =  CLK_D 
+PIN  16 =  F1 
+PIN  18 =  F2 
+PIN  14 = !IOR 
+PIN  15 = !IOW 
+PIN  23 =  RA16 
+PIN  17 =  RAMEN 
+PIN  13 =  RDYS 
+PIN   6 =  ROMDIS 
+PIN  22 = !ROMEN 
+PIN  21 =  STR_D 
+PIN   1 =  nCLKI 
+PIN   5 =  nIORQ 
+PIN  10 =  nM1 
+PIN   9 =  nMREQ 
+PIN   7 =  nRD 
+PIN   4 =  nSTRBUS 
+PIN   8 =  nWR 
+%END
+
+%FIELD
+%END
+
+%EQUATION
+BUSIOEN =>
+    !F2 & !nIORQ & nM1 & !nRD
+  # !F2 & !nIORQ & nM1 & !nWR
+
+CLK_D =>
+    CLK & RDYS
+
+F1.d  =>
+    !nIORQ & nM1 & !nWR
+  # !nIORQ & nM1 & !nRD
+
+F1.ar  =>
+    0 
+
+F1.sp  =>
+    0 
+
+F2.d  =>
+    !F1 & !nIORQ & nM1 & !nRD
+  # !F1 & !nIORQ & nM1 & !nWR
+
+IOCYC =>
+    !nIORQ & nM1 & !nWR
+  # !nIORQ & nM1 & !nRD
+
+IOR =>
+    CLK & !F2 & !nIORQ & nM1 & !nRD
+
+IOW =>
+    !F2 & !nIORQ & nM1 & !nWR
+
+RA16 =>
+    A15 & BA16
+
+RAMEN =>
+    A15 & !nMREQ
+  # ROMDIS & !nMREQ
+  # !nMREQ & !nWR
+
+ROMEN =>
+    !A15 & !ROMDIS & !nMREQ
+
+STR_D =>
+    F2 & nSTRBUS
+  # !RDYS & nSTRBUS
+  # nIORQ & nSTRBUS
+  # nRD & nSTRBUS & nWR
+  # !nM1 & nSTRBUS
+
+BUSIOEN.oe  =>
+    1 
+
+CLK_D.oe  =>
+    1 
+
+F1.oe  =>
+    1 
+
+F2.oe  =>
+    1 
+
+IOR.oe  =>
+    1 
+
+IOW.oe  =>
+    1 
+
+RA16.oe  =>
+    1 
+
+RAMEN.oe  =>
+    1 
+
+ROMEN.oe  =>
+    1 
+
+STR_D.oe  =>
+    1 
+
+%END

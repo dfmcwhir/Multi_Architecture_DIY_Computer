@@ -1,0 +1,97 @@
+Name     ISA_Z80_CPU_ADDR_DEC ;
+PartNo   00 ;
+Date     11/01/2026 ;
+Revision 02 ;
+Designer Engineer ;
+Company  none ;
+Assembly ISA Z80 CPU card ;
+Location U3 ;
+Device   G22V10 ;
+
+/*
+ * Z80 card address GAL (ATF22V10C-7).
+ *
+ * Rev 02: pins re-assigned for the PCB layout (logic unchanged).
+ *
+ * 1. Makes every Z80 I/O access look like ONE 6502 bus cycle, so the
+ *    existing I/O cards work unchanged.
+ *      Z80 I/O cycle:  T1  T2  TW*  T3      (IORQ low from T2 rise)
+ *      F1 = set on the falling edge of T2 (first falling edge in the cycle)
+ *      F2 = set on the falling edge of TW (second falling edge)
+ *      bus /IO_EN = F2 & I/O cycle  -> opens just after TW falls, closes
+ *               when the Z80 releases /IORQ after T3 falls. Exactly one
+ *               clock-high (T3) is inside it, like a 6502 cycle.
+ *      bus /IOw  = window & write  (not clock-gated: 6551/VIA R/W input)
+ *      bus /IOr  = window & read & CLK  (read strobe)
+ *    Interrupt acknowledge (M1 & IORQ) is excluded, so no card sees it.
+ *    Ports = the low address byte: 6502 $7F1C -> Z80 port $1C, etc.
+ *
+ * 2. Self-stretch: every I/O cycle gets T3-high extended by one OSC2X
+ *    period (T3 high = 250 ns at 4 MHz). The Z80 needs read data 30-50 ns
+ *    before T3 falls, which a 125 ns T3 can't give slower cards (PICO9918
+ *    worst case 86 ns after its /CSR). Cards can still ask for more with
+ *    the bus IOREADY or /STRETCH lines (tied together on this card).
+ *
+ * 3. Memory map (on-card RAM and ROM):
+ *      ROM_DIS = 0 (after reset): reads $0000-$7FFF come from ROM,
+ *                writes there go to the RAM underneath; $8000-$FFFF RAM.
+ *      ROM_DIS = 1: RAM everywhere ($0000-$FFFF).
+ *      $8000-$FFFF is banked: RAM A16 = BA16 there (2 banks of 32K with
+ *      the 128K RAM); $0000-$7FFF always uses RAM A16 = 0.
+ *    RAM and ROM /OE come straight from Z80 /RD, RAM /WE from Z80 /WR;
+ *    the selects below include /MREQ, so I/O and refresh cycles can't
+ *    read or write memory.
+ *
+ * NOT handled (no pins left): tri-stating the bus outputs during /BUSACK.
+ * Revisit when a DMA card exists.
+ */
+
+/* *************** INPUT PINS *********************/
+PIN 1  = nCLKI ;     /* /CLK (74ACT74 FF1 /Q) - register clock        */
+PIN 2  = nWR ;       /* Z80 /WR                                       */
+PIN 3  = nRD ;       /* Z80 /RD                                       */
+PIN 4  = nSTRBUS ;   /* bus IOREADY + /STRETCH (tied together), low = stretch */
+PIN 5  = BA16 ;      /* bank bit from the interrupt GAL (U7 pin 23)   */
+PIN 6  = A15 ;
+PIN 7  = ROMDIS ;    /* U7 pin 18, 0 after reset                      */
+PIN 8  = nM1 ;       /* Z80 /M1                                       */
+PIN 9  = nMREQ ;     /* Z80 /MREQ                                     */
+PIN 10 = RDYS ;      /* 74ACT74 FF2 Q, low = stretching               */
+PIN 11 = nIORQ ;     /* Z80 /IORQ                                     */
+PIN 13 = CLK ;       /* CPU clock (74ACT74 FF1 Q)                     */
+
+/* *************** OUTPUT PINS *********************/
+PIN 14 = CLK_D ;     /* 74ACT74 FF1 D (pin 2)                         */
+PIN 15 = STR_D ;     /* 74ACT74 FF2 D (pin 12), low = stretch         */
+PIN 16 = !IOR ;      /* bus pin 14 /IOR                               */
+PIN 17 = !IOW ;      /* bus pin 13 /IOW                               */
+PIN 18 = F1 ;        /* state bit - no connection                     */
+PIN 19 = F2 ;        /* state bit - no connection                     */
+PIN 20 = !ROMEN ;    /* ROM /CS                                       */
+PIN 21 = RAMEN ;     /* RAM CE2 (active high)                         */
+PIN 22 = RA16 ;      /* RAM A16                                       */
+PIN 23 = !BUSIOEN ;  /* bus pin 32 /IO_EN                             */
+
+/** Intermediate terms **/
+IOCYC = !nIORQ & nM1 & (!nRD # !nWR);   /* real I/O cycle, not INTA */
+
+/** I/O cycle shaping **/
+F1.d = IOCYC;
+F2.d = F1 & IOCYC;
+F1.ar = 'b'0;
+F1.sp = 'b'0;
+
+BUSIOEN = F2 & IOCYC;
+IOW     = F2 & IOCYC & !nWR;
+IOR     = F2 & IOCYC & !nRD & CLK;
+
+/** Clock stretcher **/
+/* FF1 next state: stays high while RDYS is low */
+CLK_D = !(CLK & RDYS);
+/* FF2 input: bus request, or one self-stretch period per I/O cycle */
+STR_D = nSTRBUS & !(F2 & IOCYC & RDYS);
+
+/** Memory **/
+ROMEN = !nMREQ & !A15 & !ROMDIS;
+RAMEN = !nMREQ & (A15 # ROMDIS # !nWR);
+RA16  = BA16 & A15;

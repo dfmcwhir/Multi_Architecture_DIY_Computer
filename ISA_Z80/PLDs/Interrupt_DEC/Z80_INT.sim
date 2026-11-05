@@ -1,0 +1,159 @@
+%SIGNAL
+PIN   2 =  A0 
+PIN   3 =  A1 
+PIN   4 =  A2 
+PIN   5 =  A3 
+PIN   6 =  A4 
+PIN   7 =  A5 
+PIN   8 =  A6 
+PIN   9 =  A7 
+PIN  18 =  BA16 
+PIN  19 =  BA17 
+PIN  20 =  BA18 
+PIN  21 =  BA19 
+PIN  14 =  D0 
+PIN  15 =  D1 
+PIN  16 =  D2 
+PIN  17 =  D3 
+PIN  23 = !INTOE 
+PIN  22 =  ROMDIS 
+PIN   1 =  nCLKI 
+PIN  11 =  nIOR 
+PIN  10 =  nIOW 
+PIN  13 =  nRESET 
+%END
+
+%FIELD
+%END
+
+%EQUATION
+BA16.d  =>
+    !A0 & A1 & A2 & A3 & A4 & A5 & A6 & A7 & D0 & !nIOW
+  # !BA16 & nIOW
+  # !A7 & !BA16
+  # !A6 & !BA16
+  # !A5 & !BA16
+  # !A4 & !BA16
+  # !A3 & !BA16
+  # !A2 & !BA16
+  # !A1 & !BA16
+  # A0 & !BA16
+
+BA16.ar  =>
+    !nRESET
+
+BA16.oe  =>
+    1 
+
+BA16.sp  =>
+    0 
+
+BA17.d  =>
+    !A0 & A1 & A2 & A3 & A4 & A5 & A6 & A7 & D1 & !nIOW
+  # !BA17 & nIOW
+  # !A7 & !BA17
+  # !A6 & !BA17
+  # !A5 & !BA17
+  # !A4 & !BA17
+  # !A3 & !BA17
+  # !A2 & !BA17
+  # !A1 & !BA17
+  # A0 & !BA17
+
+BA17.oe  =>
+    1 
+
+BA18.d  =>
+    !A0 & A1 & A2 & A3 & A4 & A5 & A6 & A7 & D2 & !nIOW
+  # !BA18 & nIOW
+  # !A7 & !BA18
+  # !A6 & !BA18
+  # !A5 & !BA18
+  # !A4 & !BA18
+  # !A3 & !BA18
+  # !A2 & !BA18
+  # !A1 & !BA18
+  # A0 & !BA18
+
+BA18.oe  =>
+    1 
+
+BA19.d  =>
+    !A0 & A1 & A2 & A3 & A4 & A5 & A6 & A7 & D3 & !nIOW
+  # !BA19 & nIOW
+  # !A7 & !BA19
+  # !A6 & !BA19
+  # !A5 & !BA19
+  # !A4 & !BA19
+  # !A3 & !BA19
+  # !A2 & !BA19
+  # !A1 & !BA19
+  # A0 & !BA19
+
+BA19.oe  =>
+    1 
+
+BANKRD =>
+    !A0 & A1 & A2 & A3 & A4 & A5 & A6 & A7 & !nIOR
+
+BANKWR =>
+    !A0 & A1 & A2 & A3 & A4 & A5 & A6 & A7 & !nIOW
+
+D0 =>
+    !BA16
+
+D0.oe  =>
+    !A0 & A1 & A2 & A3 & A4 & A5 & A6 & A7 & !nIOR
+
+D1 =>
+    !BA17
+
+D1.oe  =>
+    !A0 & A1 & A2 & A3 & A4 & A5 & A6 & A7 & !nIOR
+
+D2 =>
+    !BA18
+
+D2.oe  =>
+    !A0 & A1 & A2 & A3 & A4 & A5 & A6 & A7 & !nIOR
+
+D3 =>
+    !BA19
+
+D3.oe  =>
+    !A0 & A1 & A2 & A3 & A4 & A5 & A6 & A7 & !nIOR
+
+INTOE =>
+    A0 & A1 & A2 & A3 & A4 & A5 & A6 & A7 & !nIOR
+
+P_FD =>
+    A0 & !A1 & A2 & A3 & A4 & A5 & A6 & A7
+
+P_FE =>
+    !A0 & A1 & A2 & A3 & A4 & A5 & A6 & A7
+
+P_FF =>
+    A0 & A1 & A2 & A3 & A4 & A5 & A6 & A7
+
+ROMDIS.d  =>
+    A0 & !A1 & A2 & A3 & A4 & A5 & A6 & A7 & D0 & !nIOW
+  # !ROMDIS & nIOW
+  # !A7 & !ROMDIS
+  # !A6 & !ROMDIS
+  # !A5 & !ROMDIS
+  # !A4 & !ROMDIS
+  # !A3 & !ROMDIS
+  # !A2 & !ROMDIS
+  # A1 & !ROMDIS
+  # !A0 & !ROMDIS
+
+ROMDIS.oe  =>
+    1 
+
+ROMWR =>
+    A0 & !A1 & A2 & A3 & A4 & A5 & A6 & A7 & !nIOW
+
+INTOE.oe  =>
+    1 
+
+%END

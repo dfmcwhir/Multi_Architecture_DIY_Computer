@@ -1,0 +1,25 @@
+[Info] Saving new project file [D:\Retro_Electronics\ISA_Z80\PLDs\Addr_DEC\Z80_ADDR.wcp]
+[Info] Adding existing CUPL design file into project
+[Info] Running compilation ...
+
+===================================== Compiler Message Begins =====================================
+cuplx
+time: 0 secs
+cupla
+time: 0 secs
+cuplb
+[0016cb] Please note: no expression assigned to:  F2.ar
+[0016cb] Please note: no expression assigned to:  F2.sp
+time: 0 secs
+cuplm
+time: 0 secs
+cuplc
+time: 0 secs
+total time: 0 secs
+Normal exit
+Error Code = 0
+
+====================================== Compiler Message Ends ======================================
+[Info] Design compiled successfully
+[Info] Current project being saved
+[Info] Current project being saved

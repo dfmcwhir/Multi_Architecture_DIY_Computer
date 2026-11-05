@@ -1,0 +1,94 @@
+Name     ISA_Z80_CPU_INTERRUPT ;
+PartNo   00 ;
+Date     11/01/2026 ;
+Revision 02 ;
+Designer Engineer ;
+Company  none ;
+Assembly ISA Z80 CPU card ;
+Location U7 ;
+Device   G22V10 ;
+
+/*
+ * Z80 card I/O registers (ATF22V10C-7).
+ * Rev 02: pins re-assigned for the PCB layout (logic unchanged).
+ *
+ *   Port $FF read : interrupt register ('574 /OE)  - use IM 1:
+ *                   every interrupt goes to $0038; the handler does
+ *                   IN A,($FF) and gets (IRQ number x 2).
+ *   Port $FE write: bank register, D3-D0 -> BA16-BA19 (bus and RAM A16)
+ *   Port $FE read : bank register on D3-D0 (D7-D4 float: AND $0F)
+ *   Port $FD write: D0 = 1 disables the ROM (RAM everywhere),
+ *                   D0 = 0 enables it again
+ *
+ * /IOW and /IOR come from the address GAL and are already limited to
+ * the one-clock bus window, so each register loads exactly once: on the
+ * falling edge at the end of T3 (pin 1 = /CLK rising).
+ * /RESET clears all registers: bank 0, ROM enabled.
+ * BA16-BA19 are always driven (no /BUSACK input - no pins left).
+ */
+
+/* *************** INPUT PINS *********************/
+PIN 1  = nCLKI ;     /* /CLK - register clock         */
+PIN 2  = A0 ;
+PIN 3  = A1 ;
+PIN 4  = A2 ;
+PIN 5  = A3 ;
+PIN 6  = A4 ;
+PIN 7  = A5 ;
+PIN 8  = A6 ;
+PIN 9  = A7 ;
+PIN 10 = nIOR ;      /* bus /IOR from U3              */
+PIN 11 = nIOW ;      /* bus /IOW from U3              */
+PIN 13 = nRESET ;
+
+/* *************** I/O AND OUTPUT PINS ***************/
+PIN 14 = D0 ;
+PIN 15 = D1 ;
+PIN 16 = D2 ;
+PIN 17 = D3 ;
+PIN 18 = ROMDIS ;    /* to address GAL pin 7          */
+PIN 19 = !INTOE ;    /* interrupt register '574 /OE   */
+PIN 20 = BA19 ;
+PIN 21 = BA18 ;
+PIN 22 = BA17 ;
+PIN 23 = BA16 ;      /* also to address GAL pin 5     */
+
+/** Decodes (written out, no field ranges, to keep product terms low) **/
+P_FF = A7 & A6 & A5 & A4 & A3 & A2 & A1 & A0;
+P_FE = A7 & A6 & A5 & A4 & A3 & A2 & A1 & !A0;
+P_FD = A7 & A6 & A5 & A4 & A3 & A2 & !A1 & A0;
+
+BANKWR = P_FE & !nIOW;
+BANKRD = P_FE & !nIOR;
+ROMWR  = P_FD & !nIOW;
+
+/** Interrupt register **/
+INTOE = P_FF & !nIOR;
+
+/** Bank register **/
+BA16.d = BANKWR & D0 # !BANKWR & BA16;
+BA17.d = BANKWR & D1 # !BANKWR & BA17;
+BA18.d = BANKWR & D2 # !BANKWR & BA18;
+BA19.d = BANKWR & D3 # !BANKWR & BA19;
+BA16.oe = 'b'1;
+BA17.oe = 'b'1;
+BA18.oe = 'b'1;
+BA19.oe = 'b'1;
+
+/** ROM disable **/
+ROMDIS.d  = ROMWR & D0 # !ROMWR & ROMDIS;
+ROMDIS.oe = 'b'1;
+
+/* /RESET clears every register (AR is shared by all of them) */
+BA16.ar = !nRESET;
+BA16.sp = 'b'0;
+
+/** Bank readback **/
+D0 = BA16;
+D1 = BA17;
+D2 = BA18;
+D3 = BA19;
+D0.oe = BANKRD;
+D1.oe = BANKRD;
+D2.oe = BANKRD;
+D3.oe = BANKRD;

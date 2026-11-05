@@ -1,0 +1,119 @@
+LISTING FOR LOGIC DESCRIPTION FILE: Z80_ADDR.pld                     Page 1
+
+CUPL(WM): Universal Compiler for Programmable Logic
+Version 5.0a Serial# MW-10400000
+Copyright (c) 1983, 1998 Logical Devices, Inc.
+Created Sat Oct 31 12:05:31 2026
+
+  1:Name     ISA_Z80_CPU_ADDR_DEC ;
+  2:PartNo   00 ;
+  3:Date     10/31/2026 ;
+  4:Revision 01 ;
+  5:Designer Engineer ;
+  6:Company  none ;
+  7:Assembly ISA Z80 CPU card ;
+  8:Location U3 ;
+  9:Device   G22V10 ;
+ 10:
+ 11:/*
+ 12: * Z80 card address GAL (ATF22V10C-7).
+ 13: *
+ 14: * 1. Makes every Z80 I/O access look like ONE 6502 bus cycle, so the
+ 15: *    existing I/O cards work unchanged.
+ 16: *      Z80 I/O cycle:  T1  T2  TW*  T3      (IORQ low from T2 rise)
+ 17: *      F1 = set on the falling edge of T2 (first falling edge in the cycle)
+ 18: *      F2 = set on the falling edge of TW (second falling edge)
+ 19: *      bus /IO_EN = F2 & I/O cycle  -> opens just after TW falls, closes
+ 20: *               when the Z80 releases /IORQ after T3 falls. Exactly one
+ 21: *               clock-high (T3) is inside it, like a 6502 cycle.
+ 22: *      bus /IOw  = window & write  (not clock-gated: 6551/VIA R/W input)
+ 23: *      bus /IOr  = window & read & CLK  (read strobe)
+ 24: *    Interrupt acknowledge (M1 & IORQ) is excluded, so no card sees it.
+ 25: *    Ports = the low address byte: 6502 $7F1C -> Z80 port $1C, etc.
+ 26: *
+ 27: * 2. Self-stretch: every I/O cycle gets T3-high extended by one OSC2X
+ 28: *    period (T3 high = 250 ns at 4 MHz). The Z80 needs read data 30-50 ns
+ 29: *    before T3 falls, which a 125 ns T3 can't give slower cards (PICO9918
+ 30: *    worst case 86 ns after its /CSR). Cards can still ask for more with
+ 31: *    the bus IOREADY or /STRETCH lines (tied together on this card).
+ 32: *
+ 33: * 3. Memory map (on-card RAM and ROM):
+ 34: *      ROM_DIS = 0 (after reset): reads $0000-$7FFF come from ROM,
+ 35: *                writes there go to the RAM underneath; $8000-$FFFF RAM.
+ 36: *      ROM_DIS = 1: RAM everywhere ($0000-$FFFF).
+ 37: *      $8000-$FFFF is banked: RAM A16 = BA16 there (2 banks of 32K with
+ 38: *      the 128K RAM); $0000-$7FFF always uses RAM A16 = 0.
+ 39: *    RAM and ROM /OE come straight from Z80 /RD, RAM /WE from Z80 /WR;
+ 40: *    the selects below include /MREQ, so I/O and refresh cycles can't
+ 41: *    read or write memory.
+ 42: *
+ 43: * NOT handled (no pins left): tri-stating the bus outputs during /BUSACK.
+ 44: * Revisit when a DMA card exists.
+ 45: */
+ 46:
+ 47:/* *************** INPUT PINS *********************/
+ 48:PIN 1  = nCLKI ;     /* /CLK (74ACT74 FF1 /Q) - register clock        */
+ 49:PIN 2  = BA16 ;      /* bank bit from the interrupt GAL (U7 pin 18)   */
+ 50:PIN 3  = A15 ;
+ 51:PIN 4  = nSTRBUS ;   /* bus IOREADY + /STRETCH (tied together), low = stretch */
+ 52:PIN 5  = nIORQ ;     /* Z80 /IORQ                                     */
+ 53:PIN 6  = ROMDIS ;    /* U7 pin 22, 0 after reset                      */
+
+LISTING FOR LOGIC DESCRIPTION FILE: Z80_ADDR.pld                     Page 2
+
+CUPL(WM): Universal Compiler for Programmable Logic
+Version 5.0a Serial# MW-10400000
+Copyright (c) 1983, 1998 Logical Devices, Inc.
+Created Sat Oct 31 12:05:31 2026
+
+ 54:PIN 7  = nRD ;       /* Z80 /RD                                       */
+ 55:PIN 8  = nWR ;       /* Z80 /WR                                       */
+ 56:PIN 9  = nMREQ ;     /* Z80 /MREQ                                     */
+ 57:PIN 10 = nM1 ;       /* Z80 /M1                                       */
+ 58:PIN 11 = CLK ;       /* CPU clock (74ACT74 FF1 Q)                     */
+ 59:PIN 13 = RDYS ;      /* 74ACT74 FF2 Q, low = stretching               */
+ 60:
+ 61:/* *************** OUTPUT PINS *********************/
+ 62:PIN 14 = !IOR ;      /* bus pin 14 /IOR (via 33R optional)            */
+ 63:PIN 15 = !IOW ;      /* bus pin 13 /IOW                               */
+ 64:PIN 16 = F1 ;        /* state bit - test point, no connection         */
+ 65:PIN 17 = RAMEN ;     /* RAM CE2 (active high)                         */
+ 66:PIN 18 = F2 ;        /* state bit - test point, no connection         */
+ 67:PIN 19 = !BUSIOEN ;  /* bus pin 32 /IO_EN                             */
+ 68:PIN 20 = CLK_D ;     /* 74ACT74 FF1 D (pin 2)                         */
+ 69:PIN 21 = STR_D ;     /* 74ACT74 FF2 D (pin 12), low = stretch         */
+ 70:PIN 22 = !ROMEN ;    /* ROM /CS                                       */
+ 71:PIN 23 = RA16 ;      /* RAM A16                                       */
+ 72:
+ 73:/** Intermediate terms **/
+ 74:IOCYC = !nIORQ & nM1 & (!nRD # !nWR);   /* real I/O cycle, not INTA */
+ 75:
+ 76:/** I/O cycle shaping **/
+ 77:F1.d = IOCYC;
+ 78:F2.d = F1 & IOCYC;
+ 79:F1.ar = 'b'0;
+ 80:F1.sp = 'b'0;
+ 81:
+ 82:BUSIOEN = F2 & IOCYC;
+ 83:IOW     = F2 & IOCYC & !nWR;
+ 84:IOR     = F2 & IOCYC & !nRD & CLK;
+ 85:
+ 86:/** Clock stretcher **/
+ 87:/* FF1 next state: stays high while RDYS is low */
+ 88:CLK_D = !(CLK & RDYS);
+ 89:/* FF2 input: bus request, or one self-stretch period per I/O cycle */
+ 90:STR_D = nSTRBUS & !(F2 & IOCYC & RDYS);
+ 91:
+ 92:/** Memory **/
+ 93:ROMEN = !nMREQ & !A15 & !ROMDIS;
+ 94:RAMEN = !nMREQ & (A15 # ROMDIS # !nWR);
+ 95:RA16  = BA16 & A15;
+ 96:
+ 97:
+
+[0016cb] Please note: no expression assigned to:  F2.ar
+[0016cb] Please note: no expression assigned to:  F2.sp
+
+
+Jedec Fuse Checksum       (9aa2)
+Jedec Transmit Checksum   (ee15)
