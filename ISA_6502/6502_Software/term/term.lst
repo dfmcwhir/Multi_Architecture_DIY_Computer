@@ -1,0 +1,2266 @@
+ca65 V2.19 - Git a6530f4
+Main file   : term.s
+Current file: term.s
+
+000000r 1               ; ============================================================================
+000000r 1               ; term.s - TERM: a terminal for BBSs through a Zimodem on the serial port
+000000r 1               ;
+000000r 1               ;   build:  make.bat  (or make)        run:  L TERM 0500   then   R
+000000r 1               ;
+000000r 1               ; The serial port (the 6551 at $7F14, where the Zimodem is) and the PIC32
+000000r 1               ; display card (the 6551 at $7F18: screen out, keyboard in) are joined up:
+000000r 1               ; what the BBS sends goes to the screen, what you type goes to the BBS.
+000000r 1               ;
+000000r 1               ; The display does most of ANSI itself (cursor moves, erasing, scroll regions,
+000000r 1               ; bold, underline, reverse, the CP437 box and block characters), so most bytes
+000000r 1               ; go straight through.  On the way TERM:
+000000r 1               ;   - turns ANSI colours into what a one colour screen can show: bright
+000000r 1               ;     colours as bold, and reverse video where the background is lighter than
+000000r 1               ;     the text (black text on cyan, blue on white ...), so nothing disappears
+000000r 1               ;     (Ctrl-A C: the colour codes passed on as they are)
+000000r 1               ;   - shows the control codes a BBS means as characters (the CP437 symbols:
+000000r 1               ;     smileys, arrows ...) as characters, not as the display's own control
+000000r 1               ;     codes (control code mode is on for the games)
+000000r 1               ;   - rings the bell (07) on the AY card, if there is one
+000000r 1               ;
+000000r 1               ; Local commands: Ctrl-A, then
+000000r 1               ;   D  dial a BBS: asks for host:port, sends ATDT"host:port" (T: Zimodem does
+000000r 1               ;      the telnet protocol)          X  hang up (+++, then ATH)
+000000r 1               ;   S  set-up: the serial port (baud rate 110 - 19200, or 115200 from an
+000000r 1               ;      external clock; data bits, parity, stop bits, DTR, RTS or RTS flow
+000000r 1               ;      control) and the settings below; saved as TERM.CFG on the USB drive
+000000r 1               ;   E  local echo     L  a line feed after each CR received   (also in S)
+000000r 1               ;   C  ANSI colours as mono, or passed on       K  Backspace sends DEL / BS
+000000r 1               ;   Z  clear the screen     A  send Ctrl-A     H  help     Q  quit
+000000r 1               ;
+000000r 1               ; How: the serial port's characters come in through the ROM's interrupt and
+000000r 1               ; buffer (SBC_CHRIN), as before.  The display card's receive interrupt is
+000000r 1               ; turned off while TERM runs (it shares that buffer), and the keyboard is read
+000000r 1               ; from it directly, between every byte sent to the screen, into TERM's own
+000000r 1               ; buffer.  The bytes to the screen and to the serial port are timed (one byte
+000000r 1               ; time each) rather than waited for with the transmit bit, so a W65C51N (whose
+000000r 1               ; transmit bit is stuck) works too.  The gamepad's interrupt is off meanwhile
+000000r 1               ; (it would type into the serial buffer).  Quitting puts all of that back.
+000000r 1               ;
+000000r 1               ; RTS flow control (set-up item 6: FLOW): RTS is let go when the ROM's
+000000r 1               ; serial buffer is three quarters full and asserted again under a quarter, so
+000000r 1               ; a Zimodem set for it (AT&K3) waits.  This looks at the ROM's buffer pointers
+000000r 1               ; (READ_PTR / WRITE_PTR, $E2 / $E3 in the current ROM).
+000000r 1               ;
+000000r 1               ; TERM.CFG: the settings, read at the start from the monitor's current folder
+000000r 1               ; (SBC_CWD, as YMPLAY and SEQ do) and written by set-up's S.
+000000r 1               ; ============================================================================
+000000r 1               
+000000r 1                       .setcpu "6502"
+000000r 1                       .include "sbc_api.inc"
+000000r 2               ; sbc_api.inc - fixed ROM entry points of the SBC (see jumptable.s), and the
+000000r 2               ; CPU clock.  Use in your own ca65 programs:  .include "sbc_api.inc"
+000000r 2               ; (the games find it one folder up: their make.bat passes  -I ..  to ca65)
+000000r 2               SBC_CHRIN       = $FE00         ; carry set + A = char, carry clear = none waiting
+000000r 2               SBC_CHROUT      = $FE03         ; print A (A, X, Y preserved)
+000000r 2               SBC_MENU        = $FE06         ; boot menu
+000000r 2               SBC_COLD        = $FE09         ; BASIC cold start
+000000r 2               SBC_WARM        = $FE0C         ; BASIC warm start
+000000r 2               SBC_MONITOR     = $FE0F         ; monitor prompt (or JMP $FF00)
+000000r 2               SBC_PADSTATE    = $FE12         ; A = gamepad buttons held: bit0 A,1 B,2 Select,3 Start,4 Up,5 Down,6 Left,7 Right
+000000r 2               SBC_LOAD        = $FE15         ; load a file: A/Y = parameter block (.word addr, .word max, "NAME.EXT",0)
+000000r 2                                               ;   carry clear = loaded, X/Y = length; carry set = failed, A = error code
+000000r 2               SBC_CWD         = $FE18         ; A/Y = the monitor's current folder: 0-ended, "" (the top) or "/A/B"
+000000r 2                                               ;   (newer ROMs: check for a JMP ($4C) at $FE18 first)
+000000r 2               
+000000r 2               ; The CPU clock in MHz (whole numbers, 1 to 8).  Programs size their delay
+000000r 2               ; loops from it, so a millisecond stays a millisecond.  To build for another
+000000r 2               ; clock, change it here or give it on the command line:  make.bat 1
+000000r 2               .ifndef CLOCK_MHZ
+000000r 2               CLOCK_MHZ       = 2
+000000r 2               .endif
+000000r 2               
+000000r 1               
+000000r 1               MDM_DATA        = $7F14         ; the serial port (the Zimodem)
+000000r 1               MDM_STAT        = $7F15
+000000r 1               MDM_CMD         = $7F16
+000000r 1               MDM_CTRL        = $7F17
+000000r 1               DSP_DATA        = $7F18         ; the display card (screen and keyboard)
+000000r 1               DSP_STAT        = $7F19
+000000r 1               DSP_CMD         = $7F1A
+000000r 1               DSP_CTRL        = $7F1B
+000000r 1               VIA_T2CL        = $7F08
+000000r 1               VIA_T2CH        = $7F09
+000000r 1               VIA_ACR         = $7F0B
+000000r 1               VIA_IFR         = $7F0D
+000000r 1               VIA_IER         = $7F0E
+000000r 1               AY_ADDR         = $7F22
+000000r 1               AY_DATA         = $7F23
+000000r 1               
+000000r 1               CMD_IRQ         = $89           ; 6551 command: DTR on, RTS on, receive IRQ on (the ROM's)
+000000r 1               CMD_NOIRQ       = $8B           ;  the same, receive IRQ off
+000000r 1               CTRL_ROM        = $1A           ; the ROM's serial setting: 2400 8N1
+000000r 1               RDRF            = $08           ; status: a byte received
+000000r 1               
+000000r 1               TICK            = CLOCK_MHZ * 10000 - 2     ; timer 2: 1/100 s
+000000r 1               .assert TICK < 65536, error, "the clock is too fast for a 1/100 s tick"
+000000r 1               KB_SIZE         = 64            ; the keyboard buffer
+000000r 1               CSI_MAX         = 40            ; an ESC [ sequence kept for looking at
+000000r 1               LINE_MAX        = 60            ; the dial line
+000000r 1               
+000000r 1               ; the wait loops: 13 cycles a turn (with the keyboard looked at)
+000000r 1               DSP_N           = (90 * CLOCK_MHZ + 12) / 13                ; 90 us: a byte at 115200
+000000r 1               .define TXN(baud) (11000000 / baud * CLOCK_MHZ / 13 + 2)    ; 11 bits at baud (the longest frame)
+000000r 1               ROM_RP          = $E2           ; the ROM's serial buffer: read and write
+000000r 1               ROM_WP          = $E3           ;  pointers (zero page; see above)
+000000r 1               FLOW_OFF        = 192           ; RTS let go at this many bytes waiting,
+000000r 1               FLOW_ON         = 64            ;  asserted again under this many
+000000r 1               .ifndef SBC_CWD
+000000r 1               SBC_CWD         = $FE18
+000000r 1               .endif
+000000r 1               CWD_MAX         = 31
+000000r 1               CH_WRITE        = 1             ; (ch376r.s: writing too)
+000000r 1               
+000000r 1                       .segment "CODE"
+000000r 1  4C rr rr             jmp     start
+000003r 1               
+000003r 1                       .include "ay/common.s"  ; (delay_ms, for the USB drive code)
+000003r 2               ; ============================================================================
+000003r 2               ; common.s - small helpers shared by AYTEST and YMPLAY: printing, keys, delays
+000003r 2               ; ============================================================================
+000003r 2               
+000003r 2               ; PRINT label: print the 0-ended string at label; keeps X
+000003r 2               .macro  PRINT   str
+000003r 2                       lda     #<str
+000003r 2                       ldy     #>str
+000003r 2                       jsr     print
+000003r 2               .endmacro
+000003r 2               
+000003r 2               ; print the 0-ended string at A (low) / Y (high).  Keeps X.
+000003r 2  8D rr rr     print:  sta     @ld+1
+000006r 2  8C rr rr             sty     @ld+2
+000009r 2  AD FF FF     @ld:    lda     $FFFF
+00000Cr 2  F0 0D                beq     @r
+00000Er 2  20 03 FE             jsr     SBC_CHROUT
+000011r 2  EE rr rr             inc     @ld+1
+000014r 2  D0 F3                bne     @ld
+000016r 2  EE rr rr             inc     @ld+2
+000019r 2  D0 EE                bne     @ld
+00001Br 2  60           @r:     rts
+00001Cr 2               
+00001Cr 2  A9 0D        crlf:   lda     #13
+00001Er 2  20 03 FE             jsr     SBC_CHROUT
+000021r 2  A9 0A                lda     #10
+000023r 2  4C 03 FE             jmp     SBC_CHROUT
+000026r 2               
+000026r 2               ; print A as 2 decimal digits (0-99)
+000026r 2  A2 30        prdec2: ldx     #'0'
+000028r 2  C9 0A        @t:     cmp     #10
+00002Ar 2  90 05                bcc     @u
+00002Cr 2  E9 0A                sbc     #10
+00002Er 2  E8                   inx
+00002Fr 2  D0 F7                bne     @t
+000031r 2  48           @u:     pha
+000032r 2  8A                   txa
+000033r 2  20 03 FE             jsr     SBC_CHROUT
+000036r 2  68                   pla
+000037r 2  09 30                ora     #'0'
+000039r 2  4C 03 FE             jmp     SBC_CHROUT
+00003Cr 2               
+00003Cr 2               ; print A in hex
+00003Cr 2  48           prhex:  pha
+00003Dr 2  4A                   lsr
+00003Er 2  4A                   lsr
+00003Fr 2  4A                   lsr
+000040r 2  4A                   lsr
+000041r 2  20 rr rr             jsr     @d
+000044r 2  68                   pla
+000045r 2  29 0F                and     #$0F
+000047r 2  C9 0A        @d:     cmp     #10
+000049r 2  90 02                bcc     @n
+00004Br 2  69 06                adc     #'A' - '0' - 10 - 1
+00004Dr 2  69 30        @n:     adc     #'0'
+00004Fr 2  4C 03 FE             jmp     SBC_CHROUT
+000052r 2               
+000052r 2               ; a key: carry set and A = the key (letters in upper case), or carry clear
+000052r 2  20 00 FE     getkey: jsr     SBC_CHRIN
+000055r 2  90 0B                bcc     @r
+000057r 2  C9 61                cmp     #'a'
+000059r 2  90 06                bcc     @y
+00005Br 2  C9 7B                cmp     #'z' + 1
+00005Dr 2  B0 02                bcs     @y
+00005Fr 2  29 DF                and     #$DF
+000061r 2  38           @y:     sec
+000062r 2  60           @r:     rts
+000063r 2               
+000063r 2               ; wait for a key; A = the key (upper case)
+000063r 2  20 rr rr     waitkey:jsr     getkey
+000066r 2  90 FB                bcc     waitkey
+000068r 2  60                   rts
+000069r 2               
+000069r 2               ; wait about A ms.  The inner loop is sized for the clock (CLOCK_MHZ in
+000069r 2               ; sbc_api.inc): 5 + 4 * (CLOCK_MHZ - 1) cycles a turn, DELAY_N turns a ms.
+000069r 2               DELAY_N = (1000 * CLOCK_MHZ - 7) / (5 + 4 * (CLOCK_MHZ - 1))
+000069r 2               delay_ms:
+000069r 2  AA                   tax
+00006Ar 2  F0 0A                beq     @done
+00006Cr 2  A0 DD        @o:     ldy     #DELAY_N
+00006Er 2               @i:
+00006Er 2  EA EA        .repeat CLOCK_MHZ - 1
+000070r 2                       nop
+000070r 2                       nop
+000070r 2               .endrepeat
+000070r 2  88                   dey
+000071r 2  D0 FB                bne     @i
+000073r 2  CA                   dex
+000074r 2  D0 F6                bne     @o
+000076r 2  60           @done:  rts
+000077r 2               
+000077r 1                       .include "ay/ch376r.s"  ; the USB drive: TERM.CFG
+000077r 2               ; ============================================================================
+000077r 2               ; ch376r.s - reading files from the USB drive through the CH376 (parallel
+000077r 2               ; mode, at $7F20 data / $7F21 command and status), for programs loaded from
+000077r 2               ; the monitor: start the chip, list a directory, open, read, seek, close.
+000077r 2               ; The same protocol as the firmware's driver (ch376_abs.s), cut down to
+000077r 2               ; reading.  Every wait has a time-out, so a missing drive can't hang it.
+000077r 2               ;
+000077r 2               ;   ch_check    is the chip there?  carry set if not
+000077r 2               ;   ch_start    check the chip, USB host mode, mount the drive: carry set =
+000077r 2               ;               failed (A = what failed: 1 no chip, 2 mode, 3 no drive).  This
+000077r 2               ;               starts the drive afresh, in its top folder.
+000077r 2               ;   ch_open     open the file whose 0-ended name is at A/Y: "NAME.EXT" in the
+000077r 2               ;               current folder, "/NAME.EXT" in the top one: A = the CH376
+000077r 2               ;               status ($14 = open, $42 = not found)
+000077r 2               ;   ch_read     read ch_len bytes to (ch_ptr): A = $14 when done, ch_got =
+000077r 2               ;               bytes read (fewer at the end of the file)
+000077r 2               ;   ch_seek     to the 32 bit offset in ch_off
+000077r 2               ;   ch_close    close the open file
+000077r 2               ; With CH_WRITE defined, also writing:
+000077r 2               ;   ch_create   make the file whose 0-ended name is at A/Y (emptied if it is
+000077r 2               ;               there), open for writing: A = the status ($14 = made)
+000077r 2               ;   ch_write    write ch_len bytes from (ch_ptr): A = $14 when done
+000077r 2               ;   ch_close_w  close it, with its length kept
+000077r 2               ;   ch_dir      list the files that match the 0-ended name at A/Y ("/*": the
+000077r 2               ;               top folder, "*": the current one): calls (ch_entry_fn) for
+000077r 2               ;               each, with the 32 byte FAT entry in ch_ent (0-7 name, 8-10
+000077r 2               ;               extension, 11 attributes, 28-31 size).  A = $42 when it has
+000077r 2               ;               listed them all, or the status that stopped it (no drive ...)
+000077r 2               ;   ch_enter    make the folder whose 0-ended path is at A/Y ("" the top,
+000077r 2               ;               "/A" or "/A/B") the current one, a level at a time: "/A",
+000077r 2               ;               then "B".  A = $41 (ERR_OPEN_DIR) when it is in, else the
+000077r 2               ;               status that stopped it ($42: a folder isn't there)
+000077r 2               ;
+000077r 2               ; The current folder: the CH376 keeps the last folder opened as its current
+000077r 2               ; one, and names without a "/" are found there.  It isn't kept for long:
+000077r 2               ; opening a file leaves the chip with no current folder that works, so enter
+000077r 2               ; the folder again before each relative name (as the monitor does).
+000077r 2               ; ============================================================================
+000077r 2               
+000077r 2               CH_DATA         = $7F20
+000077r 2               CH_CMD          = $7F21
+000077r 2               
+000077r 2               CMD_CHECK_EXIST = $06
+000077r 2               CMD_SET_USB_MODE= $15
+000077r 2               CMD_GET_STATUS  = $22
+000077r 2               CMD_RD_USB_DATA0= $27
+000077r 2               CMD_SET_FILE_NAME = $2F
+000077r 2               CMD_DISK_CONNECT= $30
+000077r 2               CMD_DISK_MOUNT  = $31
+000077r 2               CMD_FILE_OPEN   = $32
+000077r 2               CMD_FILE_ENUM_GO= $33
+000077r 2               CMD_FILE_CLOSE  = $36
+000077r 2               CMD_BYTE_LOCATE = $39
+000077r 2               CMD_BYTE_READ   = $3A
+000077r 2               CMD_BYTE_RD_GO  = $3B
+000077r 2               CMD_WR_REQ_DATA = $2D
+000077r 2               CMD_FILE_CREATE = $34
+000077r 2               CMD_BYTE_WRITE  = $3C
+000077r 2               CMD_BYTE_WR_GO  = $3D
+000077r 2               USB_INT_DISK_WRITE = $1E
+000077r 2               
+000077r 2               USB_INT_SUCCESS = $14
+000077r 2               USB_INT_DISK_READ = $1D
+000077r 2               ERR_OPEN_DIR    = $41
+000077r 2               ERR_MISS_FILE   = $42
+000077r 2               CMD_RET_SUCCESS = $51
+000077r 2               
+000077r 2               ; wait while the chip is busy (status bit 4), at most ~100 ms.  Keeps X, Y.
+000077r 2               ch_wait_busy:
+000077r 2  AD 21 7F             lda     CH_CMD
+00007Ar 2  29 10                and     #$10
+00007Cr 2  F0 19                beq     @r
+00007Er 2  8A                   txa
+00007Fr 2  48                   pha
+000080r 2  98                   tya
+000081r 2  48                   pha
+000082r 2  A0 07                ldy     #CH_BUSY_OUTER
+000084r 2  A2 00                ldx     #0
+000086r 2  AD 21 7F     @l:     lda     CH_CMD
+000089r 2  29 10                and     #$10
+00008Br 2  F0 06                beq     @ok
+00008Dr 2  CA                   dex
+00008Er 2  D0 F6                bne     @l
+000090r 2  88                   dey
+000091r 2  D0 F3                bne     @l
+000093r 2  68           @ok:    pla
+000094r 2  A8                   tay
+000095r 2  68                   pla
+000096r 2  AA                   tax
+000097r 2  60           @r:     rts
+000098r 2               CH_BUSY_OUTER = (CLOCK_MHZ * 100000) / 3333 / 10 + 1     ; 256 x 13 cycles a turn
+000098r 2               
+000098r 2               ; a command (A).  Keeps X, Y.
+000098r 2  48           ch_cmd: pha
+000099r 2  20 rr rr             jsr     ch_wait_busy
+00009Cr 2  68                   pla
+00009Dr 2  8D 21 7F             sta     CH_CMD
+0000A0r 2  EA                   nop                     ; (the chip wants ~1.5 us before the next access)
+0000A1r 2  EA                   nop
+0000A2r 2  EA                   nop
+0000A3r 2  EA                   nop
+0000A4r 2  60                   rts
+0000A5r 2               
+0000A5r 2               ; a data byte (A) to the chip.  Keeps X, Y.
+0000A5r 2  48           ch_wr:  pha
+0000A6r 2  20 rr rr             jsr     ch_wait_busy
+0000A9r 2  68                   pla
+0000AAr 2  8D 20 7F             sta     CH_DATA
+0000ADr 2  60                   rts
+0000AEr 2               
+0000AEr 2               ; a data byte from the chip, in A.  Keeps X, Y.
+0000AEr 2  20 rr rr     ch_rd:  jsr     ch_wait_busy
+0000B1r 2  AD 20 7F             lda     CH_DATA
+0000B4r 2  60                   rts
+0000B5r 2               
+0000B5r 2               ; wait for the chip's interrupt (status bit 7 low), at most ~3 s: carry set
+0000B5r 2               ; if it never came.  Keeps X, Y.
+0000B5r 2               ch_wait_int:
+0000B5r 2  8A                   txa
+0000B6r 2  48                   pha
+0000B7r 2  98                   tya
+0000B8r 2  48                   pha
+0000B9r 2  A9 08                lda     #CH_INT_OUTER
+0000BBr 2  8D rr rr             sta     ch_tmo
+0000BEr 2  A0 00                ldy     #0
+0000C0r 2  A2 00                ldx     #0
+0000C2r 2  AD 21 7F     @l:     lda     CH_CMD
+0000C5r 2  10 11                bpl     @got
+0000C7r 2  E8                   inx
+0000C8r 2  D0 F8                bne     @l
+0000CAr 2  C8                   iny
+0000CBr 2  D0 F5                bne     @l
+0000CDr 2  CE rr rr             dec     ch_tmo
+0000D0r 2  D0 F0                bne     @l
+0000D2r 2  68                   pla
+0000D3r 2  A8                   tay
+0000D4r 2  68                   pla
+0000D5r 2  AA                   tax
+0000D6r 2  38                   sec
+0000D7r 2  60                   rts
+0000D8r 2  68           @got:   pla
+0000D9r 2  A8                   tay
+0000DAr 2  68                   pla
+0000DBr 2  AA                   tax
+0000DCr 2  18                   clc
+0000DDr 2  60                   rts
+0000DEr 2               CH_INT_OUTER = (CLOCK_MHZ * 3) * 1000000 / 786000 + 1    ; 65536 x 12 cycles a turn
+0000DEr 2               
+0000DEr 2               ; the interrupt's status in A (and the interrupt cleared); $FF and carry set
+0000DEr 2               ; on a time-out.  Keeps X, Y.
+0000DEr 2               ch_status:
+0000DEr 2  20 rr rr             jsr     ch_wait_int
+0000E1r 2  B0 08                bcs     @t
+0000E3r 2  A9 22                lda     #CMD_GET_STATUS
+0000E5r 2  20 rr rr             jsr     ch_cmd
+0000E8r 2  4C rr rr             jmp     ch_rd
+0000EBr 2  A9 FF        @t:     lda     #$FF
+0000EDr 2  60                   rts
+0000EEr 2               
+0000EEr 2               ; ---- is the chip there?  (carry set if not) -------------------------------------------
+0000EEr 2               ch_check:
+0000EEr 2  A9 06                lda     #CMD_CHECK_EXIST
+0000F0r 2  20 rr rr             jsr     ch_cmd
+0000F3r 2  A9 55                lda     #$55
+0000F5r 2  20 rr rr             jsr     ch_wr
+0000F8r 2  20 rr rr             jsr     ch_rd
+0000FBr 2  C9 AA                cmp     #$AA
+0000FDr 2  F0 02                beq     @ok
+0000FFr 2  38                   sec
+000100r 2  60                   rts
+000101r 2  18           @ok:    clc
+000102r 2  60                   rts
+000103r 2               
+000103r 2               ; ---- start: check the chip, USB host mode, mount --------------------------------------
+000103r 2               ch_start:
+000103r 2  A9 06                lda     #CMD_CHECK_EXIST
+000105r 2  20 rr rr             jsr     ch_cmd
+000108r 2  A9 55                lda     #$55
+00010Ar 2  20 rr rr             jsr     ch_wr
+00010Dr 2  20 rr rr             jsr     ch_rd
+000110r 2  C9 AA                cmp     #$AA
+000112r 2  F0 04                beq     @mode
+000114r 2  A9 01                lda     #1              ; no chip
+000116r 2  38                   sec
+000117r 2  60                   rts
+000118r 2  A9 15        @mode:  lda     #CMD_SET_USB_MODE
+00011Ar 2  20 rr rr             jsr     ch_cmd
+00011Dr 2  A9 06                lda     #6              ; USB host, generate SOF
+00011Fr 2  20 rr rr             jsr     ch_wr
+000122r 2  A9 01                lda     #1
+000124r 2  20 rr rr             jsr     delay_ms
+000127r 2  20 rr rr             jsr     ch_rd
+00012Ar 2  C9 51                cmp     #CMD_RET_SUCCESS
+00012Cr 2  F0 04                beq     @m0
+00012Er 2  A9 02                lda     #2
+000130r 2  38                   sec
+000131r 2  60                   rts
+000132r 2  A9 14        @m0:    lda     #20             ; (a "drive connected" interrupt may come:
+000134r 2  20 rr rr             jsr     delay_ms        ;  clear it)
+000137r 2  AD 21 7F             lda     CH_CMD
+00013Ar 2  30 08                bmi     @mnt
+00013Cr 2  A9 22                lda     #CMD_GET_STATUS
+00013Er 2  20 rr rr             jsr     ch_cmd
+000141r 2  20 rr rr             jsr     ch_rd
+000144r 2  A9 05        @mnt:   lda     #5              ; mount: up to 5 tries
+000146r 2  8D rr rr             sta     ch_try
+000149r 2  A9 30        @m1:    lda     #CMD_DISK_CONNECT
+00014Br 2  20 rr rr             jsr     ch_cmd
+00014Er 2  20 rr rr             jsr     ch_status
+000151r 2  A9 31                lda     #CMD_DISK_MOUNT
+000153r 2  20 rr rr             jsr     ch_cmd
+000156r 2  20 rr rr             jsr     ch_status
+000159r 2  C9 14                cmp     #USB_INT_SUCCESS
+00015Br 2  F0 0E                beq     @ok
+00015Dr 2  A9 C8                lda     #200
+00015Fr 2  20 rr rr             jsr     delay_ms
+000162r 2  CE rr rr             dec     ch_try
+000165r 2  D0 E2                bne     @m1
+000167r 2  A9 03                lda     #3              ; no drive
+000169r 2  38                   sec
+00016Ar 2  60                   rts
+00016Br 2  18           @ok:    clc
+00016Cr 2  60                   rts
+00016Dr 2               
+00016Dr 2               ; the file name: the 0-ended string at A/Y
+00016Dr 2               ch_name:
+00016Dr 2  8D rr rr             sta     @ld+1
+000170r 2  8C rr rr             sty     @ld+2
+000173r 2  A9 2F                lda     #CMD_SET_FILE_NAME
+000175r 2  20 rr rr             jsr     ch_cmd
+000178r 2  A2 00                ldx     #0
+00017Ar 2               @l:
+00017Ar 2  BD FF FF     @ld:    lda     $FFFF,x
+00017Dr 2  20 rr rr             jsr     ch_wr
+000180r 2  F0 0A                beq     @r
+000182r 2  E8                   inx
+000183r 2  E0 0E                cpx     #14
+000185r 2  D0 F3                bne     @l
+000187r 2  A9 00                lda     #0
+000189r 2  20 rr rr             jsr     ch_wr
+00018Cr 2  60           @r:     rts
+00018Dr 2               
+00018Dr 2               ch_open:
+00018Dr 2  20 rr rr             jsr     ch_name
+000190r 2  A9 32                lda     #CMD_FILE_OPEN
+000192r 2  20 rr rr             jsr     ch_cmd
+000195r 2  4C rr rr             jmp     ch_status
+000198r 2               
+000198r 2               ch_close:
+000198r 2  A9 36                lda     #CMD_FILE_CLOSE
+00019Ar 2  20 rr rr             jsr     ch_cmd
+00019Dr 2  A9 00                lda     #0              ; (no length update: read only)
+00019Fr 2  20 rr rr             jsr     ch_wr
+0001A2r 2  4C rr rr             jmp     ch_status
+0001A5r 2               
+0001A5r 2               .ifdef CH_WRITE
+0001A5r 2               ch_create:
+0001A5r 2  20 rr rr             jsr     ch_name
+0001A8r 2  A9 34                lda     #CMD_FILE_CREATE
+0001AAr 2  20 rr rr             jsr     ch_cmd
+0001ADr 2  4C rr rr             jmp     ch_status
+0001B0r 2               
+0001B0r 2               ch_close_w:
+0001B0r 2  A9 36                lda     #CMD_FILE_CLOSE
+0001B2r 2  20 rr rr             jsr     ch_cmd
+0001B5r 2  A9 01                lda     #1              ; (the length kept)
+0001B7r 2  20 rr rr             jsr     ch_wr
+0001BAr 2  4C rr rr             jmp     ch_status
+0001BDr 2               
+0001BDr 2               ; write ch_len bytes from (ch_ptr), in the chunks the chip asks for
+0001BDr 2               ch_write:
+0001BDr 2  AD rr rr             lda     ch_ptr
+0001C0r 2  8D rr rr             sta     @ld+1
+0001C3r 2  AD rr rr             lda     ch_ptr+1
+0001C6r 2  8D rr rr             sta     @ld+2
+0001C9r 2  A9 3C                lda     #CMD_BYTE_WRITE
+0001CBr 2  20 rr rr             jsr     ch_cmd
+0001CEr 2  AD rr rr             lda     ch_len
+0001D1r 2  20 rr rr             jsr     ch_wr
+0001D4r 2  AD rr rr             lda     ch_len+1
+0001D7r 2  20 rr rr             jsr     ch_wr
+0001DAr 2  20 rr rr     @next:  jsr     ch_status
+0001DDr 2  C9 1E                cmp     #USB_INT_DISK_WRITE
+0001DFr 2  D0 2B                bne     @done           ; $14: all of it
+0001E1r 2  A9 2D                lda     #CMD_WR_REQ_DATA
+0001E3r 2  20 rr rr             jsr     ch_cmd
+0001E6r 2  20 rr rr             jsr     ch_rd           ; how many it takes
+0001E9r 2  8D rr rr             sta     ch_cnt
+0001ECr 2  F0 16                beq     @go
+0001EEr 2  A0 00                ldy     #0
+0001F0r 2  AD FF FF     @ld:    lda     $FFFF
+0001F3r 2  20 rr rr             jsr     ch_wr
+0001F6r 2  EE rr rr             inc     @ld+1
+0001F9r 2  D0 03                bne     :+
+0001FBr 2  EE rr rr             inc     @ld+2
+0001FEr 2  C8           :       iny
+0001FFr 2  CC rr rr             cpy     ch_cnt
+000202r 2  D0 EC                bne     @ld
+000204r 2  A9 3D        @go:    lda     #CMD_BYTE_WR_GO
+000206r 2  20 rr rr             jsr     ch_cmd
+000209r 2  4C rr rr             jmp     @next
+00020Cr 2  60           @done:  rts
+00020Dr 2               .endif
+00020Dr 2               
+00020Dr 2               ch_seek:
+00020Dr 2  A9 39                lda     #CMD_BYTE_LOCATE
+00020Fr 2  20 rr rr             jsr     ch_cmd
+000212r 2  A2 00                ldx     #0
+000214r 2  BD rr rr     @l:     lda     ch_off,x
+000217r 2  20 rr rr             jsr     ch_wr
+00021Ar 2  E8                   inx
+00021Br 2  E0 04                cpx     #4
+00021Dr 2  D0 F5                bne     @l
+00021Fr 2  4C rr rr             jmp     ch_status
+000222r 2               
+000222r 2               ; read ch_len (up to 65535) bytes to (ch_ptr): in chunks of up to 64 the chip
+000222r 2               ; hands over
+000222r 2               ch_read:
+000222r 2  A9 00                lda     #0
+000224r 2  8D rr rr             sta     ch_got
+000227r 2  8D rr rr             sta     ch_got+1
+00022Ar 2  AD rr rr             lda     ch_ptr
+00022Dr 2  8D rr rr             sta     @st+1
+000230r 2  AD rr rr             lda     ch_ptr+1
+000233r 2  8D rr rr             sta     @st+2
+000236r 2  A9 3A                lda     #CMD_BYTE_READ
+000238r 2  20 rr rr             jsr     ch_cmd
+00023Br 2  AD rr rr             lda     ch_len
+00023Er 2  20 rr rr             jsr     ch_wr
+000241r 2  AD rr rr             lda     ch_len+1
+000244r 2  20 rr rr             jsr     ch_wr
+000247r 2  20 rr rr     @next:  jsr     ch_status
+00024Ar 2  C9 1D                cmp     #USB_INT_DISK_READ
+00024Cr 2  D0 3A                bne     @done           ; $14: all of it (or the end of the file)
+00024Er 2  A9 27                lda     #CMD_RD_USB_DATA0
+000250r 2  20 rr rr             jsr     ch_cmd
+000253r 2  20 rr rr             jsr     ch_rd           ; how many
+000256r 2  8D rr rr             sta     ch_cnt
+000259r 2  F0 25                beq     @go
+00025Br 2  A0 00                ldy     #0
+00025Dr 2  20 rr rr     @c:     jsr     ch_rd
+000260r 2  8D FF FF     @st:    sta     $FFFF
+000263r 2  EE rr rr             inc     @st+1
+000266r 2  D0 03                bne     @c1
+000268r 2  EE rr rr             inc     @st+2
+00026Br 2  C8           @c1:    iny
+00026Cr 2  CC rr rr             cpy     ch_cnt
+00026Fr 2  D0 EC                bne     @c
+000271r 2  AD rr rr             lda     ch_got
+000274r 2  18                   clc
+000275r 2  6D rr rr             adc     ch_cnt
+000278r 2  8D rr rr             sta     ch_got
+00027Br 2  90 03                bcc     @go
+00027Dr 2  EE rr rr             inc     ch_got+1
+000280r 2  A9 3B        @go:    lda     #CMD_BYTE_RD_GO
+000282r 2  20 rr rr             jsr     ch_cmd
+000285r 2  4C rr rr             jmp     @next
+000288r 2  60           @done:  rts
+000289r 2               
+000289r 2               ; list the files matching the name at A/Y: (ch_entry_fn) for each entry
+000289r 2               ; (ch_ent); A = $42 at the end, or an error status
+000289r 2  20 rr rr     ch_dir: jsr     ch_name
+00028Cr 2  A9 32                lda     #CMD_FILE_OPEN
+00028Er 2  20 rr rr             jsr     ch_cmd
+000291r 2  20 rr rr     @next:  jsr     ch_status
+000294r 2  C9 1D                cmp     #USB_INT_DISK_READ
+000296r 2  D0 31                bne     @r
+000298r 2  A9 27                lda     #CMD_RD_USB_DATA0
+00029Ar 2  20 rr rr             jsr     ch_cmd
+00029Dr 2  20 rr rr             jsr     ch_rd
+0002A0r 2  8D rr rr             sta     ch_cnt
+0002A3r 2  A0 00                ldy     #0
+0002A5r 2  CC rr rr     @rd:    cpy     ch_cnt
+0002A8r 2  B0 0D                bcs     @got
+0002AAr 2  20 rr rr             jsr     ch_rd
+0002ADr 2  C0 20                cpy     #32
+0002AFr 2  B0 03                bcs     @sk
+0002B1r 2  99 rr rr             sta     ch_ent,y
+0002B4r 2  C8           @sk:    iny
+0002B5r 2  D0 EE                bne     @rd
+0002B7r 2  AD rr rr     @got:   lda     ch_cnt
+0002BAr 2  C9 20                cmp     #32
+0002BCr 2  90 03                bcc     @more
+0002BEr 2  20 rr rr             jsr     @call
+0002C1r 2  A9 33        @more:  lda     #CMD_FILE_ENUM_GO
+0002C3r 2  20 rr rr             jsr     ch_cmd
+0002C6r 2  4C rr rr             jmp     @next
+0002C9r 2  60           @r:     rts
+0002CAr 2  6C rr rr     @call:  jmp     (ch_entry_fn)
+0002CDr 2               
+0002CDr 2               ; enter the folder whose path is at A/Y ("" / "/A" / "/A/B"), a level at a
+0002CDr 2               ; time; A = $41 when in it
+0002CDr 2               ch_enter:
+0002CDr 2  8D rr rr             sta     ce_get+1
+0002D0r 2  8C rr rr             sty     ce_get+2
+0002D3r 2  A0 00                ldy     #0
+0002D5r 2  A2 00        @part:  ldx     #0              ; the next part: "/A" the first time, then "B"
+0002D7r 2  20 rr rr             jsr     ce_get
+0002DAr 2  F0 36                beq     @in             ; (the end of the path)
+0002DCr 2  C0 00                cpy     #0
+0002DEr 2  D0 04                bne     @skip
+0002E0r 2  8D rr rr             sta     ch_part         ; (only the first keeps its "/")
+0002E3r 2  E8                   inx
+0002E4r 2  C8           @skip:  iny
+0002E5r 2  20 rr rr     @cp:    jsr     ce_get
+0002E8r 2  F0 0D                beq     @end
+0002EAr 2  C9 2F                cmp     #'/'
+0002ECr 2  F0 09                beq     @end
+0002EEr 2  9D rr rr             sta     ch_part,x
+0002F1r 2  E8                   inx
+0002F2r 2  C8                   iny
+0002F3r 2  E0 0E                cpx     #14
+0002F5r 2  90 EE                bcc     @cp
+0002F7r 2  A9 00        @end:   lda     #0
+0002F9r 2  9D rr rr             sta     ch_part,x
+0002FCr 2  8C rr rr             sty     ch_py           ; (where we are in the path)
+0002FFr 2  A9 rr                lda     #<ch_part
+000301r 2  A0 rr                ldy     #>ch_part
+000303r 2  20 rr rr             jsr     ch_open
+000306r 2  AC rr rr             ldy     ch_py
+000309r 2  C9 41                cmp     #ERR_OPEN_DIR
+00030Br 2  D0 07                bne     @r              ; not a folder (or not there)
+00030Dr 2  20 rr rr             jsr     ce_get          ; more?
+000310r 2  D0 C3                bne     @part
+000312r 2  A9 41        @in:    lda     #ERR_OPEN_DIR
+000314r 2  60           @r:     rts
+000315r 2  B9 FF FF     ce_get: lda     $FFFF,y         ; (the path's next character)
+000318r 2  60                   rts
+000319r 2               
+000319r 2                       .segment "BSS"
+000000r 2  xx xx        ch_ptr:     .res 2
+000002r 2  xx xx        ch_len:     .res 2
+000004r 2  xx xx        ch_got:     .res 2
+000006r 2  xx           ch_cnt:     .res 1
+000007r 2  xx xx xx xx  ch_off:     .res 4
+00000Br 2  xx           ch_tmo:     .res 1
+00000Cr 2  xx           ch_try:     .res 1
+00000Dr 2  xx xx        ch_entry_fn:.res 2
+00000Fr 2  xx xx xx xx  ch_ent:     .res 32
+000013r 2  xx xx xx xx  
+000017r 2  xx xx xx xx  
+00002Fr 2  xx xx xx xx  ch_part:    .res 16             ; (ch_enter: one part of a path,
+000033r 2  xx xx xx xx  
+000037r 2  xx xx xx xx  
+00003Fr 2  xx           ch_py:      .res 1              ;  and where it is in the path)
+000040r 2                       .segment "CODE"
+000319r 2               
+000319r 1               
+000319r 1               ; ---- start ---------------------------------------------------------------------------
+000319r 1  D8           start:  cld
+00031Ar 1  A2 FF                ldx     #$FF
+00031Cr 1  9A                   txs
+00031Dr 1  AD 0E 7F             lda     VIA_IER         ; the gamepad's timer interrupt off (kept to put back)
+000320r 1  29 40                and     #$40
+000322r 1  8D rr rr             sta     ier_t1
+000325r 1  A9 40                lda     #$40
+000327r 1  8D 0E 7F             sta     VIA_IER
+00032Ar 1  A9 20                lda     #$20            ; timer 2: one shot, its interrupt off
+00032Cr 1  8D 0E 7F             sta     VIA_IER
+00032Fr 1  AD 0B 7F             lda     VIA_ACR
+000332r 1  29 DF                and     #$DF
+000334r 1  8D 0B 7F             sta     VIA_ACR
+000337r 1  A9 8B                lda     #CMD_NOIRQ      ; the keyboard read here, not by the interrupt
+000339r 1  8D 1A 7F             sta     DSP_CMD
+00033Cr 1  A9 00                lda     #0
+00033Er 1  8D rr rr             sta     kb_r
+000341r 1  8D rr rr             sta     kb_w
+000344r 1  8D rr rr             sta     rx_state
+000347r 1  8D rr rr             sta     cmd_mode
+00034Ar 1  8D rr rr             sta     bell_t
+00034Dr 1  8D rr rr             sta     port_to
+000350r 1  8D rr rr             sta     cwd_buf         ; the monitor's current folder (SBC_CWD)
+000353r 1  AD 18 FE             lda     SBC_CWD
+000356r 1  C9 4C                cmp     #$4C
+000358r 1  D0 1D                bne     @nocwd
+00035Ar 1  20 18 FE             jsr     SBC_CWD
+00035Dr 1  8D rr rr             sta     @cw+1
+000360r 1  8C rr rr             sty     @cw+2
+000363r 1  A2 00                ldx     #0
+000365r 1  BD FF FF     @cw:    lda     $FFFF,x
+000368r 1  9D rr rr             sta     cwd_buf,x
+00036Br 1  F0 0A                beq     @nocwd
+00036Dr 1  E8                   inx
+00036Er 1  E0 1F                cpx     #CWD_MAX
+000370r 1  90 F3                bcc     @cw
+000372r 1  A9 00                lda     #0
+000374r 1  8D rr rr             sta     cwd_buf
+000377r 1  20 rr rr     @nocwd: jsr     cfg_default
+00037Ar 1  20 rr rr             jsr     cfg_load        ; TERM.CFG, if there is one
+00037Dr 1  A9 00                lda     #0
+00037Fr 1  2A                   rol
+000380r 1  8D rr rr             sta     tmp2            ; (1: not read)
+000383r 1  20 rr rr             jsr     apply_port
+000386r 1  20 rr rr             jsr     sgr_reset
+000389r 1  20 00 FE     @fl:    jsr     SBC_CHRIN       ; (anything waiting from before: dropped)
+00038Cr 1  B0 FB                bcs     @fl
+00038Er 1  A9 18                lda     #$18            ; the display: normal text, no scroll region, clear
+000390r 1  20 rr rr             jsr     dout
+000393r 1  A9 00                lda     #0
+000395r 1  20 rr rr             jsr     dout
+000398r 1  8D rr rr             sta     out_last
+00039Br 1  A9 rr                lda     #<init_txt
+00039Dr 1  A0 rr                ldy     #>init_txt
+00039Fr 1  20 rr rr             jsr     dprint
+0003A2r 1  20 rr rr             jsr     show_port
+0003A5r 1  AD rr rr             lda     tmp2
+0003A8r 1  D0 0A                bne     :+
+0003AAr 1  A9 rr                lda     #<loaded_txt
+0003ACr 1  A0 rr                ldy     #>loaded_txt
+0003AEr 1  20 rr rr             jsr     msg
+0003B1r 1  20 rr rr             jsr     msg_end
+0003B4r 1  A9 rr        :       lda     #<hello_txt
+0003B6r 1  A0 rr                ldy     #>hello_txt
+0003B8r 1  20 rr rr             jsr     dprint
+0003BBr 1  20 rr rr             jsr     t_start
+0003BEr 1               
+0003BEr 1               ; ---- the main loop -----------------------------------------------------------------------
+0003BEr 1  AD 19 7F     main:   lda     DSP_STAT        ; the keyboard
+0003C1r 1  29 08                and     #RDRF
+0003C3r 1  F0 03                beq     :+
+0003C5r 1  20 rr rr             jsr     kb_store
+0003C8r 1  20 rr rr     :       jsr     kb_get
+0003CBr 1  90 03                bcc     :+
+0003CDr 1  20 rr rr             jsr     do_key
+0003D0r 1  20 00 FE     :       jsr     SBC_CHRIN       ; the serial port
+0003D3r 1  90 03                bcc     :+
+0003D5r 1  20 rr rr             jsr     rx_byte
+0003D8r 1  AD rr rr     :       lda     rts_i           ; RTS flow control
+0003DBr 1  C9 02                cmp     #2
+0003DDr 1  D0 03                bne     :+
+0003DFr 1  20 rr rr             jsr     flow
+0003E2r 1  AD 0D 7F     :       lda     VIA_IFR         ; 1/100 s gone?
+0003E5r 1  29 20                and     #$20
+0003E7r 1  F0 D5                beq     main
+0003E9r 1  20 rr rr             jsr     t_start
+0003ECr 1  20 rr rr             jsr     tick_job
+0003EFr 1  4C rr rr             jmp     main
+0003F2r 1               
+0003F2r 1  A9 1E        t_start:lda     #<TICK
+0003F4r 1  8D 08 7F             sta     VIA_T2CL
+0003F7r 1  A9 4E                lda     #>TICK
+0003F9r 1  8D 09 7F             sta     VIA_T2CH
+0003FCr 1  60                   rts
+0003FDr 1               
+0003FDr 1               ; every 1/100 s: the bell's time
+0003FDr 1               tick_job:
+0003FDr 1  AD rr rr             lda     bell_t
+000400r 1  F0 08                beq     @r
+000402r 1  CE rr rr             dec     bell_t
+000405r 1  D0 03                bne     @r
+000407r 1  4C rr rr             jmp     bell_off
+00040Ar 1  60           @r:     rts
+00040Br 1               
+00040Br 1               ; wait A hundredths of a second (the keyboard still read)
+00040Br 1               wait_ticks:
+00040Br 1  8D rr rr             sta     wt
+00040Er 1  AD 19 7F     @l:     lda     DSP_STAT
+000411r 1  29 08                and     #RDRF
+000413r 1  F0 03                beq     :+
+000415r 1  20 rr rr             jsr     kb_store
+000418r 1  AD 0D 7F     :       lda     VIA_IFR
+00041Br 1  29 20                and     #$20
+00041Dr 1  F0 EF                beq     @l
+00041Fr 1  20 rr rr             jsr     t_start
+000422r 1  20 rr rr             jsr     tick_job
+000425r 1  CE rr rr             dec     wt
+000428r 1  D0 E4                bne     @l
+00042Ar 1  60                   rts
+00042Br 1               
+00042Br 1               ; ---- the keyboard ------------------------------------------------------------------------
+00042Br 1               ; the byte waiting in the display card into the buffer (keeps A, X, Y)
+00042Br 1               kb_store:
+00042Br 1  48                   pha
+00042Cr 1  8A                   txa
+00042Dr 1  48                   pha
+00042Er 1  AD 18 7F             lda     DSP_DATA
+000431r 1  AE rr rr             ldx     kb_w
+000434r 1  9D rr rr             sta     kbbuf,x
+000437r 1  E8                   inx
+000438r 1  8A                   txa
+000439r 1  29 3F                and     #KB_SIZE - 1
+00043Br 1  CD rr rr             cmp     kb_r            ; (full: the byte is dropped)
+00043Er 1  F0 03                beq     :+
+000440r 1  8D rr rr             sta     kb_w
+000443r 1  68           :       pla
+000444r 1  AA                   tax
+000445r 1  68                   pla
+000446r 1  60                   rts
+000447r 1               
+000447r 1               ; carry set and A = the next key, or carry clear
+000447r 1  AE rr rr     kb_get: ldx     kb_r
+00044Ar 1  EC rr rr             cpx     kb_w
+00044Dr 1  F0 0E                beq     @no
+00044Fr 1  BD rr rr             lda     kbbuf,x
+000452r 1  48                   pha
+000453r 1  E8                   inx
+000454r 1  8A                   txa
+000455r 1  29 3F                and     #KB_SIZE - 1
+000457r 1  8D rr rr             sta     kb_r
+00045Ar 1  68                   pla
+00045Br 1  38                   sec
+00045Cr 1  60                   rts
+00045Dr 1  18           @no:    clc
+00045Er 1  60                   rts
+00045Fr 1               
+00045Fr 1               ; wait for a key: A (the serial port keeps filling the ROM's buffer)
+00045Fr 1               kb_wait:
+00045Fr 1  AD 19 7F     @l:     lda     DSP_STAT
+000462r 1  29 08                and     #RDRF
+000464r 1  F0 03                beq     :+
+000466r 1  20 rr rr             jsr     kb_store
+000469r 1  AD 0D 7F     :       lda     VIA_IFR
+00046Cr 1  29 20                and     #$20
+00046Er 1  F0 06                beq     :+
+000470r 1  20 rr rr             jsr     t_start
+000473r 1  20 rr rr             jsr     tick_job
+000476r 1  20 rr rr     :       jsr     kb_get
+000479r 1  90 E4                bcc     @l
+00047Br 1  60                   rts
+00047Cr 1               
+00047Cr 1               ; a key typed
+00047Cr 1  AE rr rr     do_key: ldx     cmd_mode
+00047Fr 1  F0 08                beq     @n
+000481r 1  A2 00                ldx     #0
+000483r 1  8E rr rr             stx     cmd_mode
+000486r 1  4C rr rr             jmp     local_cmd
+000489r 1  C9 01        @n:     cmp     #1              ; Ctrl-A: a local command next
+00048Br 1  D0 04                bne     @k
+00048Dr 1  8D rr rr             sta     cmd_mode
+000490r 1  60                   rts
+000491r 1  AE rr rr     @k:     ldx     bs_swap         ; Backspace: DEL <-> BS
+000494r 1  F0 0E                beq     @s
+000496r 1  C9 08                cmp     #8
+000498r 1  D0 04                bne     :+
+00049Ar 1  A9 7F                lda     #127
+00049Cr 1  D0 06                bne     @s
+00049Er 1  C9 7F        :       cmp     #127
+0004A0r 1  D0 02                bne     @s
+0004A2r 1  A9 08                lda     #8
+0004A4r 1  20 rr rr     @s:     jsr     mdm_out
+0004A7r 1  AE rr rr             ldx     echo
+0004AAr 1  F0 03                beq     @r
+0004ACr 1  4C rr rr             jmp     rx_byte         ; (shown as if it had come back)
+0004AFr 1  60           @r:     rts
+0004B0r 1               
+0004B0r 1               ; ---- out ---------------------------------------------------------------------------------
+0004B0r 1               ; A to the screen, then a byte's time, reading the keyboard meanwhile.
+0004B0r 1               ; Keeps A, X, Y.
+0004B0r 1  8D 18 7F     dout:   sta     DSP_DATA
+0004B3r 1  48                   pha
+0004B4r 1  98                   tya
+0004B5r 1  48                   pha
+0004B6r 1  A0 0E                ldy     #DSP_N
+0004B8r 1  AD 19 7F     @l:     lda     DSP_STAT
+0004BBr 1  29 08                and     #RDRF
+0004BDr 1  F0 03                beq     :+
+0004BFr 1  20 rr rr             jsr     kb_store
+0004C2r 1  88           :       dey
+0004C3r 1  D0 F3                bne     @l
+0004C5r 1  68                   pla
+0004C6r 1  A8                   tay
+0004C7r 1  68                   pla
+0004C8r 1  60                   rts
+0004C9r 1               
+0004C9r 1               ; A to the serial port, then 11 bits' time at the baud rate.  Keeps A, X, Y.
+0004C9r 1               mdm_out:
+0004C9r 1  8D 14 7F             sta     MDM_DATA
+0004CCr 1  48                   pha
+0004CDr 1  8A                   txa
+0004CEr 1  48                   pha
+0004CFr 1  98                   tya
+0004D0r 1  48                   pha
+0004D1r 1  AE rr rr             ldx     txn_hi
+0004D4r 1  E8                   inx
+0004D5r 1  AC rr rr             ldy     txn_lo
+0004D8r 1  AD 19 7F     @l:     lda     DSP_STAT
+0004DBr 1  29 08                and     #RDRF
+0004DDr 1  F0 03                beq     :+
+0004DFr 1  20 rr rr             jsr     kb_store
+0004E2r 1  88           :       dey
+0004E3r 1  D0 F3                bne     @l
+0004E5r 1  CA                   dex
+0004E6r 1  D0 F0                bne     @l
+0004E8r 1  68                   pla
+0004E9r 1  A8                   tay
+0004EAr 1  68                   pla
+0004EBr 1  AA                   tax
+0004ECr 1  68                   pla
+0004EDr 1  60                   rts
+0004EEr 1               
+0004EEr 1               ; the 0-ended string at A/Y to the screen
+0004EEr 1  8D rr rr     dprint: sta     @ld+1
+0004F1r 1  8C rr rr             sty     @ld+2
+0004F4r 1  AD FF FF     @ld:    lda     $FFFF
+0004F7r 1  F0 0D                beq     @r
+0004F9r 1  20 rr rr             jsr     dout
+0004FCr 1  EE rr rr             inc     @ld+1
+0004FFr 1  D0 F3                bne     @ld
+000501r 1  EE rr rr             inc     @ld+2
+000504r 1  D0 EE                bne     @ld
+000506r 1  60           @r:     rts
+000507r 1               
+000507r 1               ; the 0-ended string at A/Y to the serial port
+000507r 1  8D rr rr     mprint: sta     @ld+1
+00050Ar 1  8C rr rr             sty     @ld+2
+00050Dr 1  AD FF FF     @ld:    lda     $FFFF
+000510r 1  F0 0D                beq     @r
+000512r 1  20 rr rr             jsr     mdm_out
+000515r 1  EE rr rr             inc     @ld+1
+000518r 1  D0 F3                bne     @ld
+00051Ar 1  EE rr rr             inc     @ld+2
+00051Dr 1  D0 EE                bne     @ld
+00051Fr 1  60           @r:     rts
+000520r 1               
+000520r 1               ; ---- from the BBS -------------------------------------------------------------------------
+000520r 1               ; a byte from the serial port: to the screen, through the ANSI filter
+000520r 1               rx_byte:
+000520r 1  AE rr rr             ldx     rx_state
+000523r 1  F0 16                beq     rx_norm
+000525r 1  CA                   dex
+000526r 1  F0 76                beq     rx_esc
+000528r 1  CA                   dex
+000529r 1  D0 03                bne     :+
+00052Br 1  4C rr rr             jmp     rx_csi
+00052Er 1               :       ; 3: a long ESC [ sequence: passed on to its end
+00052Er 1  20 rr rr             jsr     dout
+000531r 1  C9 40                cmp     #$40
+000533r 1  90 05                bcc     :+
+000535r 1  A9 00                lda     #0
+000537r 1  8D rr rr             sta     rx_state
+00053Ar 1  60           :       rts
+00053Br 1               
+00053Br 1               rx_norm:
+00053Br 1  C9 1B                cmp     #27
+00053Dr 1  D0 06                bne     @c
+00053Fr 1  A9 01                lda     #1              ; ESC: see what follows
+000541r 1  8D rr rr             sta     rx_state
+000544r 1  60                   rts
+000545r 1  C9 20        @c:     cmp     #$20
+000547r 1  B0 24                bcs     @hi
+000549r 1  AA                   tax                     ; the control codes
+00054Ar 1  F0 32                beq     @r              ; (NUL: padding)
+00054Cr 1  E0 07                cpx     #7
+00054Er 1  D0 03                bne     :+
+000550r 1  4C rr rr             jmp     bell
+000553r 1  E0 0D        :       cpx     #13
+000555r 1  D0 0D                bne     @ctl
+000557r 1  20 rr rr             jsr     dout            ; CR (and LF, if asked for)
+00055Ar 1  AD rr rr             lda     addlf
+00055Dr 1  F0 1F                beq     @r
+00055Fr 1  A9 0A                lda     #10
+000561r 1  4C rr rr             jmp     dout
+000564r 1  BD rr rr     @ctl:   lda     ctl_pass-1,x    ; BS, TAB, LF, FF: the display does them;
+000567r 1  F0 08                beq     @sym            ;  the others are characters to show
+000569r 1  8A                   txa
+00056Ar 1  4C rr rr             jmp     dout
+00056Dr 1  C9 7F        @hi:    cmp     #$7F
+00056Fr 1  D0 0A                bne     @out
+000571r 1  48           @sym:   pha                     ; (a character the display would take as a
+000572r 1  A9 1A                lda     #$1A            ;  control code: 1A n draws it)
+000574r 1  20 rr rr             jsr     dout
+000577r 1  68                   pla
+000578r 1  D0 01                bne     @out
+00057Ar 1  8A                   txa
+00057Br 1  4C rr rr     @out:   jmp     dout
+00057Er 1  60           @r:     rts
+00057Fr 1               
+00057Fr 1               ; 1 for the control codes the display is to act on (01 - 1F)
+00057Fr 1  00 00 00 00  ctl_pass:   .byte   0,0,0,0,0,0,0, 1,1,1,0,1,0, 0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0
+000583r 1  00 00 00 01  
+000587r 1  01 01 00 01  
+00059Er 1                           ;       01-07           08 09 0A 0B 0C 0D(CR, above)  0E-1F (1B is ESC)
+00059Er 1               
+00059Er 1  C9 5B        rx_esc: cmp     #'['
+0005A0r 1  D0 0B                bne     @two
+0005A2r 1  A9 02                lda     #2              ; ESC [: collect it
+0005A4r 1  8D rr rr             sta     rx_state
+0005A7r 1  A9 00                lda     #0
+0005A9r 1  8D rr rr             sta     csi_len
+0005ACr 1  60                   rts
+0005ADr 1  48           @two:   pha                     ; any other ESC x: as it is (the display
+0005AEr 1  A9 1B                lda     #27             ;  does ESC 7, ESC 8, ESC M, ESC ( 0 ...)
+0005B0r 1  20 rr rr             jsr     dout
+0005B3r 1  68                   pla
+0005B4r 1  C9 1B                cmp     #27             ; (ESC ESC: the second still waits)
+0005B6r 1  F0 08                beq     @r
+0005B8r 1  A2 00                ldx     #0
+0005BAr 1  8E rr rr             stx     rx_state
+0005BDr 1  4C rr rr             jmp     dout
+0005C0r 1  60           @r:     rts
+0005C1r 1               
+0005C1r 1  C9 20        rx_csi: cmp     #$20
+0005C3r 1  B0 0D                bcs     @in
+0005C5r 1  48                   pha                     ; a control code inside: what there is goes
+0005C6r 1  20 rr rr             jsr     csi_raw         ;  on, then the control code
+0005C9r 1  A9 00                lda     #0
+0005CBr 1  8D rr rr             sta     rx_state
+0005CEr 1  68                   pla
+0005CFr 1  4C rr rr             jmp     rx_norm
+0005D2r 1  C9 40        @in:    cmp     #$40
+0005D4r 1  B0 1C                bcs     @fin
+0005D6r 1  AE rr rr             ldx     csi_len         ; a parameter (or an intermediate)
+0005D9r 1  E0 28                cpx     #CSI_MAX
+0005DBr 1  B0 07                bcs     @long
+0005DDr 1  9D rr rr             sta     csi_buf,x
+0005E0r 1  EE rr rr             inc     csi_len
+0005E3r 1  60                   rts
+0005E4r 1  48           @long:  pha                     ; too long to keep: passed on as it comes
+0005E5r 1  20 rr rr             jsr     csi_raw
+0005E8r 1  68                   pla
+0005E9r 1  20 rr rr             jsr     dout
+0005ECr 1  A9 03                lda     #3
+0005EEr 1  8D rr rr             sta     rx_state
+0005F1r 1  60                   rts
+0005F2r 1  A2 00        @fin:   ldx     #0              ; the end of it
+0005F4r 1  8E rr rr             stx     rx_state
+0005F7r 1  C9 6D                cmp     #'m'
+0005F9r 1  D0 08                bne     @raw
+0005FBr 1  AE rr rr             ldx     cmap
+0005FEr 1  F0 03                beq     @raw
+000600r 1  4C rr rr             jmp     sgr
+000603r 1  48           @raw:   pha
+000604r 1  20 rr rr             jsr     csi_raw
+000607r 1  68                   pla
+000608r 1  4C rr rr             jmp     dout
+00060Br 1               
+00060Br 1               ; ESC [ and what has been collected, to the screen
+00060Br 1               csi_raw:
+00060Br 1  A9 1B                lda     #27
+00060Dr 1  20 rr rr             jsr     dout
+000610r 1  A9 5B                lda     #'['
+000612r 1  20 rr rr             jsr     dout
+000615r 1  A2 00                ldx     #0
+000617r 1  EC rr rr     @l:     cpx     csi_len
+00061Ar 1  F0 09                beq     @r
+00061Cr 1  BD rr rr             lda     csi_buf,x
+00061Fr 1  20 rr rr             jsr     dout
+000622r 1  E8                   inx
+000623r 1  D0 F2                bne     @l
+000625r 1  60           @r:     rts
+000626r 1               
+000626r 1               ; ---- colours to mono ---------------------------------------------------------------------
+000626r 1               ; ESC [ ... m: the colours and attributes followed; what the display can show
+000626r 1               ; of them sent as ESC [ 0 ; 1 ; 4 ; 7 m (when it changes)
+000626r 1  A2 00        sgr:    ldx     #0              ; only digits and ";": else passed on
+000628r 1  EC rr rr     @chk:   cpx     csi_len
+00062Br 1  F0 1A                beq     @ok
+00062Dr 1  BD rr rr             lda     csi_buf,x
+000630r 1  C9 3B                cmp     #';'
+000632r 1  F0 08                beq     :+
+000634r 1  C9 30                cmp     #'0'
+000636r 1  90 07                bcc     @raw
+000638r 1  C9 3A                cmp     #'9' + 1
+00063Ar 1  B0 03                bcs     @raw
+00063Cr 1  E8           :       inx
+00063Dr 1  D0 E9                bne     @chk
+00063Fr 1  20 rr rr     @raw:   jsr     csi_raw
+000642r 1  A9 6D                lda     #'m'
+000644r 1  4C rr rr             jmp     dout
+000647r 1  A9 00        @ok:    lda     #0
+000649r 1  8D rr rr             sta     num
+00064Cr 1  8D rr rr             sta     ext
+00064Fr 1  A2 00                ldx     #0
+000651r 1  EC rr rr     @p:     cpx     csi_len
+000654r 1  F0 34                beq     @last
+000656r 1  BD rr rr             lda     csi_buf,x
+000659r 1  C9 3B                cmp     #';'
+00065Br 1  D0 0B                bne     @dig
+00065Dr 1  20 rr rr             jsr     sgr_one
+000660r 1  A9 00                lda     #0
+000662r 1  8D rr rr             sta     num
+000665r 1  E8                   inx
+000666r 1  D0 E9                bne     @p
+000668r 1  29 0F        @dig:   and     #$0F            ; num = num x 10 + the digit (kept under 256)
+00066Ar 1  8D rr rr             sta     tmp
+00066Dr 1  AD rr rr             lda     num
+000670r 1  C9 1A                cmp     #26
+000672r 1  B0 0E                bcs     @big
+000674r 1  0A                   asl
+000675r 1  8D rr rr             sta     tmp2
+000678r 1  0A                   asl
+000679r 1  0A                   asl
+00067Ar 1  6D rr rr             adc     tmp2
+00067Dr 1  6D rr rr             adc     tmp
+000680r 1  90 02                bcc     :+
+000682r 1  A9 FF        @big:   lda     #255
+000684r 1  8D rr rr     :       sta     num
+000687r 1  E8                   inx
+000688r 1  D0 C7                bne     @p
+00068Ar 1  20 rr rr     @last:  jsr     sgr_one
+00068Dr 1                       ; (on into sgr_show)
+00068Dr 1               
+00068Dr 1               ; what the display shows for the colours now: bold, underline, reverse
+00068Dr 1               sgr_show:
+00068Dr 1  A9 00                lda     #0
+00068Fr 1  8D rr rr             sta     tmp
+000692r 1  AD rr rr             lda     s_bold          ; bold: bold, or a bright colour
+000695r 1  0D rr rr             ora     s_fgb
+000698r 1  F0 05                beq     :+
+00069Ar 1  A9 01                lda     #1
+00069Cr 1  8D rr rr             sta     tmp
+00069Fr 1  AD rr rr     :       lda     s_ul
+0006A2r 1  F0 08                beq     :+
+0006A4r 1  AD rr rr             lda     tmp
+0006A7r 1  09 02                ora     #2
+0006A9r 1  8D rr rr             sta     tmp
+0006ACr 1  AD rr rr     :       lda     s_bold          ; the text's lightness, and the background's
+0006AFr 1  0D rr rr             ora     s_fgb
+0006B2r 1  F0 02                beq     :+
+0006B4r 1  A9 08                lda     #8
+0006B6r 1  0D rr rr     :       ora     s_fg
+0006B9r 1  AA                   tax
+0006BAr 1  BD rr rr             lda     lum,x
+0006BDr 1  8D rr rr             sta     tmp2
+0006C0r 1  AD rr rr             lda     s_bgb           ; (blink: a bright background, as the iCE
+0006C3r 1  0D rr rr             ora     s_blink         ;  colour files mean it)
+0006C6r 1  F0 02                beq     :+
+0006C8r 1  A9 08                lda     #8
+0006CAr 1  0D rr rr     :       ora     s_bg
+0006CDr 1  AA                   tax
+0006CEr 1  BD rr rr             lda     lum,x
+0006D1r 1  CD rr rr             cmp     tmp2            ; a lighter background: reverse
+0006D4r 1  F0 06                beq     :+
+0006D6r 1  90 04                bcc     :+
+0006D8r 1  A9 04                lda     #4
+0006DAr 1  D0 02                bne     @rv
+0006DCr 1  A9 00        :       lda     #0
+0006DEr 1  4D rr rr     @rv:    eor     s_rev           ; (s_rev is 0 or 4)
+0006E1r 1  0D rr rr             ora     tmp
+0006E4r 1  CD rr rr             cmp     out_last
+0006E7r 1  F0 3E                beq     @r
+0006E9r 1  8D rr rr             sta     out_last
+0006ECr 1  8D rr rr             sta     tmp
+0006EFr 1  A9 1B                lda     #27
+0006F1r 1  20 rr rr             jsr     dout
+0006F4r 1  A9 5B                lda     #'['
+0006F6r 1  20 rr rr             jsr     dout
+0006F9r 1  A9 30                lda     #'0'
+0006FBr 1  20 rr rr             jsr     dout
+0006FEr 1  4E rr rr             lsr     tmp
+000701r 1  90 07                bcc     :+
+000703r 1  A9 rr                lda     #<b1_txt
+000705r 1  A0 rr                ldy     #>b1_txt
+000707r 1  20 rr rr             jsr     dprint
+00070Ar 1  4E rr rr     :       lsr     tmp
+00070Dr 1  90 07                bcc     :+
+00070Fr 1  A9 rr                lda     #<b4_txt
+000711r 1  A0 rr                ldy     #>b4_txt
+000713r 1  20 rr rr             jsr     dprint
+000716r 1  4E rr rr     :       lsr     tmp
+000719r 1  90 07                bcc     :+
+00071Br 1  A9 rr                lda     #<b7_txt
+00071Dr 1  A0 rr                ldy     #>b7_txt
+00071Fr 1  20 rr rr             jsr     dprint
+000722r 1  A9 6D        :       lda     #'m'
+000724r 1  4C rr rr             jmp     dout
+000727r 1  60           @r:     rts
+000728r 1               
+000728r 1               ; one parameter (num) of ESC [ ... m (keeps X)
+000728r 1               sgr_one:
+000728r 1  AD rr rr             lda     ext             ; after 38 / 48: 5;n or 2;r;g;b to skip
+00072Br 1  F0 30                beq     @n
+00072Dr 1  C9 01                cmp     #1
+00072Fr 1  D0 1C                bne     @skip
+000731r 1  A9 00                lda     #0
+000733r 1  8D rr rr             sta     ext
+000736r 1  AD rr rr             lda     num
+000739r 1  C9 05                cmp     #5
+00073Br 1  D0 06                bne     :+
+00073Dr 1  A9 02                lda     #2              ; (one more to skip)
+00073Fr 1  8D rr rr             sta     ext
+000742r 1  60                   rts
+000743r 1  C9 02        :       cmp     #2
+000745r 1  D0 05                bne     @x
+000747r 1  A9 04                lda     #4              ; (three more)
+000749r 1  8D rr rr             sta     ext
+00074Cr 1  60           @x:     rts
+00074Dr 1  CE rr rr     @skip:  dec     ext
+000750r 1  AD rr rr             lda     ext
+000753r 1  C9 01                cmp     #1
+000755r 1  D0 F5                bne     @x
+000757r 1  A9 00                lda     #0
+000759r 1  8D rr rr             sta     ext
+00075Cr 1  60                   rts
+00075Dr 1  AD rr rr     @n:     lda     num
+000760r 1  D0 03                bne     :+
+000762r 1  4C rr rr             jmp     sgr_reset
+000765r 1  C9 01        :       cmp     #1
+000767r 1  D0 04                bne     :+
+000769r 1  8D rr rr             sta     s_bold
+00076Cr 1  60                   rts
+00076Dr 1  C9 04        :       cmp     #4
+00076Fr 1  D0 04                bne     :+
+000771r 1  8D rr rr             sta     s_ul
+000774r 1  60                   rts
+000775r 1  C9 05        :       cmp     #5
+000777r 1  F0 04                beq     @bl
+000779r 1  C9 06                cmp     #6
+00077Br 1  D0 06                bne     :+
+00077Dr 1  A9 01        @bl:    lda     #1
+00077Fr 1  8D rr rr             sta     s_blink
+000782r 1  60                   rts
+000783r 1  C9 07        :       cmp     #7
+000785r 1  D0 06                bne     :+
+000787r 1  A9 04                lda     #4
+000789r 1  8D rr rr             sta     s_rev
+00078Cr 1  60                   rts
+00078Dr 1  A0 00        :       ldy     #0
+00078Fr 1  C9 16                cmp     #22
+000791r 1  D0 04                bne     :+
+000793r 1  8C rr rr             sty     s_bold
+000796r 1  60                   rts
+000797r 1  C9 18        :       cmp     #24
+000799r 1  D0 04                bne     :+
+00079Br 1  8C rr rr             sty     s_ul
+00079Er 1  60                   rts
+00079Fr 1  C9 19        :       cmp     #25
+0007A1r 1  D0 04                bne     :+
+0007A3r 1  8C rr rr             sty     s_blink
+0007A6r 1  60                   rts
+0007A7r 1  C9 1B        :       cmp     #27
+0007A9r 1  D0 04                bne     :+
+0007ABr 1  8C rr rr             sty     s_rev
+0007AEr 1  60                   rts
+0007AFr 1  C9 26        :       cmp     #38
+0007B1r 1  F0 04                beq     @ext
+0007B3r 1  C9 30                cmp     #48
+0007B5r 1  D0 06                bne     :+
+0007B7r 1  A9 01        @ext:   lda     #1
+0007B9r 1  8D rr rr             sta     ext
+0007BCr 1  60                   rts
+0007BDr 1  C9 27        :       cmp     #39
+0007BFr 1  D0 09                bne     :+
+0007C1r 1  A9 07                lda     #7
+0007C3r 1  8D rr rr             sta     s_fg
+0007C6r 1  8C rr rr             sty     s_fgb
+0007C9r 1  60                   rts
+0007CAr 1  C9 31        :       cmp     #49
+0007CCr 1  D0 07                bne     :+
+0007CEr 1  8C rr rr             sty     s_bg
+0007D1r 1  8C rr rr             sty     s_bgb
+0007D4r 1  60                   rts
+0007D5r 1  38           :       sec                     ; 30-37, 40-47, 90-97, 100-107
+0007D6r 1  E9 1E                sbc     #30
+0007D8r 1  C9 08                cmp     #8
+0007DAr 1  B0 07                bcs     :+
+0007DCr 1  8D rr rr             sta     s_fg
+0007DFr 1  8C rr rr             sty     s_fgb
+0007E2r 1  60                   rts
+0007E3r 1  E9 0A        :       sbc     #10
+0007E5r 1  C9 08                cmp     #8
+0007E7r 1  B0 07                bcs     :+
+0007E9r 1  8D rr rr             sta     s_bg
+0007ECr 1  8C rr rr             sty     s_bgb
+0007EFr 1  60                   rts
+0007F0r 1  E9 32        :       sbc     #50
+0007F2r 1  C9 08                cmp     #8
+0007F4r 1  B0 09                bcs     :+
+0007F6r 1  8D rr rr             sta     s_fg
+0007F9r 1  A9 01                lda     #1
+0007FBr 1  8D rr rr             sta     s_fgb
+0007FEr 1  60                   rts
+0007FFr 1  E9 0A        :       sbc     #10
+000801r 1  C9 08                cmp     #8
+000803r 1  B0 08                bcs     @r
+000805r 1  8D rr rr             sta     s_bg
+000808r 1  A9 01                lda     #1
+00080Ar 1  8D rr rr             sta     s_bgb
+00080Dr 1  60           @r:     rts
+00080Er 1               
+00080Er 1               sgr_reset:
+00080Er 1  A9 00                lda     #0
+000810r 1  8D rr rr             sta     s_bold
+000813r 1  8D rr rr             sta     s_ul
+000816r 1  8D rr rr             sta     s_blink
+000819r 1  8D rr rr             sta     s_rev
+00081Cr 1  8D rr rr             sta     s_fgb
+00081Fr 1  8D rr rr             sta     s_bg
+000822r 1  8D rr rr             sta     s_bgb
+000825r 1  A9 07                lda     #7
+000827r 1  8D rr rr             sta     s_fg
+00082Ar 1  60                   rts
+00082Br 1               
+00082Br 1               ; how light each colour looks (black red green yellow blue magenta cyan white,
+00082Br 1               ; then the bright ones)
+00082Br 1  00 03 05 07  lum:        .byte   0, 3, 5, 7, 1, 4, 6, 9
+00082Fr 1  01 04 06 09  
+000833r 1  04 07 0A 0D              .byte   4, 7, 10, 13, 6, 9, 12, 15
+000837r 1  06 09 0C 0F  
+00083Br 1               
+00083Br 1  3B 31 00     b1_txt:     .byte   ";1", 0
+00083Er 1  3B 34 00     b4_txt:     .byte   ";4", 0
+000841r 1  3B 37 00     b7_txt:     .byte   ";7", 0
+000844r 1               
+000844r 1               ; ---- the bell -----------------------------------------------------------------------------
+000844r 1               ; a short beep on the AY card's channel A (nothing happens without the card)
+000844r 1  A9 00        bell:   lda     #0
+000846r 1  A2 8E                ldx     #142            ; about 880 Hz: 2 MHz / (16 x 142)
+000848r 1  20 rr rr             jsr     ay_set
+00084Br 1  A9 01                lda     #1
+00084Dr 1  A2 00                ldx     #0
+00084Fr 1  20 rr rr             jsr     ay_set
+000852r 1  A9 07                lda     #7
+000854r 1  A2 3E                ldx     #$3E            ; mixer: tone A only
+000856r 1  20 rr rr             jsr     ay_set
+000859r 1  A9 08                lda     #8
+00085Br 1  A2 0C                ldx     #12
+00085Dr 1  20 rr rr             jsr     ay_set
+000860r 1  A9 0C                lda     #12             ; for 0.12 s
+000862r 1  8D rr rr             sta     bell_t
+000865r 1  60                   rts
+000866r 1               bell_off:
+000866r 1  A9 08                lda     #8
+000868r 1  A2 00                ldx     #0
+00086Ar 1  20 rr rr             jsr     ay_set
+00086Dr 1  A9 07                lda     #7
+00086Fr 1  A2 3F                ldx     #$3F
+000871r 1                       ; (on)
+000871r 1               ; AY register A = X
+000871r 1  8D 22 7F     ay_set: sta     AY_ADDR
+000874r 1  8E 23 7F             stx     AY_DATA
+000877r 1  60                   rts
+000878r 1               
+000878r 1               ; ---- local commands -----------------------------------------------------------------------
+000878r 1               local_cmd:
+000878r 1  C9 61                cmp     #'a'            ; (letters in either case)
+00087Ar 1  90 06                bcc     :+
+00087Cr 1  C9 7B                cmp     #'z' + 1
+00087Er 1  B0 02                bcs     :+
+000880r 1  29 DF                and     #$DF
+000882r 1  A2 0C        :       ldx     #N_LCMD - 1
+000884r 1  DD rr rr     @f:     cmp     lcmd_chr,x
+000887r 1  F0 04                beq     @go
+000889r 1  CA                   dex
+00088Ar 1  10 F8                bpl     @f
+00088Cr 1  60                   rts
+00088Dr 1  8A           @go:    txa
+00088Er 1  0A                   asl
+00088Fr 1  AA                   tax
+000890r 1  BD rr rr             lda     lcmd_adr+1,x
+000893r 1  48                   pha
+000894r 1  BD rr rr             lda     lcmd_adr,x
+000897r 1  48                   pha
+000898r 1  60                   rts                     ; (to it: its address - 1 was pushed)
+000899r 1               
+000899r 1  44 58 53 45  lcmd_chr:   .byte   "DXSELCKZAH?Q", 1
+00089Dr 1  4C 43 4B 5A  
+0008A1r 1  41 48 3F 51  
+0008A6r 1               N_LCMD      = * - lcmd_chr
+0008A6r 1  rr rr rr rr  lcmd_adr:   .word   dial-1, hangup-1, setup-1, t_echo-1, t_lf-1, t_cmap-1
+0008AAr 1  rr rr rr rr  
+0008AEr 1  rr rr rr rr  
+0008B2r 1  rr rr rr rr              .word   t_bs-1, clear-1, send_ca-1, help-1, help-1, quit-1, send_ca-1
+0008B6r 1  rr rr rr rr  
+0008BAr 1  rr rr rr rr  
+0008C0r 1               
+0008C0r 1               ; "[TERM: " ... "]" on a line of its own: the text at A/Y
+0008C0r 1  48           msg:    pha
+0008C1r 1  98                   tya
+0008C2r 1  48                   pha
+0008C3r 1  A9 rr                lda     #<msg_txt
+0008C5r 1  A0 rr                ldy     #>msg_txt
+0008C7r 1  20 rr rr             jsr     dprint
+0008CAr 1  68                   pla
+0008CBr 1  A8                   tay
+0008CCr 1  68                   pla
+0008CDr 1  4C rr rr             jmp     dprint
+0008D0r 1  A9 rr        msg_end:lda     #<end_txt
+0008D2r 1  A0 rr                ldy     #>end_txt
+0008D4r 1  4C rr rr             jmp     dprint
+0008D7r 1               
+0008D7r 1  A9 01        send_ca:lda     #1
+0008D9r 1  4C rr rr             jmp     mdm_out
+0008DCr 1               
+0008DCr 1  A9 0C        clear:  lda     #12
+0008DEr 1  4C rr rr             jmp     dout
+0008E1r 1               
+0008E1r 1  A9 rr        help:   lda     #<help_txt
+0008E3r 1  A0 rr                ldy     #>help_txt
+0008E5r 1  4C rr rr             jmp     dprint
+0008E8r 1               
+0008E8r 1               ; on/off settings: show the new state
+0008E8r 1  A2 00        t_echo: ldx     #echo - flags
+0008EAr 1  A9 rr                lda     #<echo_txt
+0008ECr 1  A0 rr                ldy     #>echo_txt
+0008EEr 1  D0 16                bne     toggle
+0008F0r 1  A2 01        t_lf:   ldx     #addlf - flags
+0008F2r 1  A9 rr                lda     #<lf_txt
+0008F4r 1  A0 rr                ldy     #>lf_txt
+0008F6r 1  D0 0E                bne     toggle
+0008F8r 1  A2 02        t_cmap: ldx     #cmap - flags
+0008FAr 1  A9 rr                lda     #<cmap_txt
+0008FCr 1  A0 rr                ldy     #>cmap_txt
+0008FEr 1  D0 06                bne     toggle
+000900r 1  A2 03        t_bs:   ldx     #bs_swap - flags
+000902r 1  A9 rr                lda     #<bs_txt
+000904r 1  A0 rr                ldy     #>bs_txt
+000906r 1  20 rr rr     toggle: jsr     msg
+000909r 1  BD rr rr             lda     flags,x
+00090Cr 1  49 01                eor     #1
+00090Er 1  9D rr rr             sta     flags,x
+000911r 1  D0 0A                bne     @on
+000913r 1  A9 rr                lda     #<off_txt
+000915r 1  A0 rr                ldy     #>off_txt
+000917r 1  20 rr rr             jsr     dprint
+00091Ar 1  4C rr rr             jmp     msg_end
+00091Dr 1  A9 rr        @on:    lda     #<on_txt
+00091Fr 1  A0 rr                ldy     #>on_txt
+000921r 1  20 rr rr             jsr     dprint
+000924r 1  4C rr rr             jmp     msg_end
+000927r 1               
+000927r 1               ; ---- the serial port ----------------------------------------------------------------------
+000927r 1               ; the 6551 as the settings say.  Control: the rate, its own clock (RCS), the
+000927r 1               ; data bits, the stop bits.  Command: the parity, RTS, receive IRQ on, DTR.
+000927r 1               apply_port:
+000927r 1  AE rr rr             ldx     baud_i
+00092Ar 1  BD rr rr             lda     baud_codes,x
+00092Dr 1  09 10                ora     #$10
+00092Fr 1  AC rr rr             ldy     data_i
+000932r 1  19 rr rr             ora     data_bits,y
+000935r 1  AC rr rr             ldy     stop_i
+000938r 1  F0 02                beq     :+
+00093Ar 1  09 80                ora     #$80
+00093Cr 1  8D 17 7F     :       sta     MDM_CTRL
+00093Fr 1  BD rr rr             lda     txn_l,x
+000942r 1  8D rr rr             sta     txn_lo
+000945r 1  BD rr rr             lda     txn_h,x
+000948r 1  8D rr rr             sta     txn_hi
+00094Br 1  A9 01                lda     #1
+00094Dr 1  8D rr rr             sta     rts_now
+000950r 1                       ; (on)
+000950r 1               ; the command register: parity, RTS (on, off, or as flow control says), DTR
+000950r 1               put_cmd:
+000950r 1  AC rr rr             ldy     par_i
+000953r 1  B9 rr rr             lda     par_bits,y
+000956r 1  0D rr rr             ora     dtr             ; (bit 0: DTR on)
+000959r 1  AE rr rr             ldx     rts_i
+00095Cr 1  F0 09                beq     @on
+00095Er 1  E0 01                cpx     #1
+000960r 1  F0 07                beq     @w
+000962r 1  AE rr rr             ldx     rts_now
+000965r 1  F0 02                beq     @w
+000967r 1  09 08        @on:    ora     #$08            ; (TIC = 10: RTS asserted, no transmit IRQ)
+000969r 1  8D 16 7F     @w:     sta     MDM_CMD
+00096Cr 1  60                   rts
+00096Dr 1               
+00096Dr 1               ; RTS flow control: let go at FLOW_OFF bytes waiting, assert under FLOW_ON
+00096Dr 1  A5 E3        flow:   lda     ROM_WP
+00096Fr 1  38                   sec
+000970r 1  E5 E2                sbc     ROM_RP
+000972r 1  AE rr rr             ldx     rts_now
+000975r 1  D0 0C                bne     @on
+000977r 1  C9 40                cmp     #FLOW_ON        ; let go: assert again?
+000979r 1  B0 14                bcs     @r
+00097Br 1  A9 01                lda     #1
+00097Dr 1  8D rr rr             sta     rts_now
+000980r 1  4C rr rr             jmp     put_cmd
+000983r 1  C9 C0        @on:    cmp     #FLOW_OFF       ; asserted: let go?
+000985r 1  90 08                bcc     @r
+000987r 1  A9 00                lda     #0
+000989r 1  8D rr rr             sta     rts_now
+00098Cr 1  4C rr rr             jmp     put_cmd
+00098Fr 1  60           @r:     rts
+000990r 1               
+000990r 1               ; "[TERM: 1200 8N1]" (with ", RTS FLOW" when it is)
+000990r 1               show_port:
+000990r 1  A9 20                lda     #' '
+000992r 1  8D rr rr             sta     psep
+000995r 1  A9 rr                lda     #<port_txt0
+000997r 1  A0 rr                ldy     #>port_txt0
+000999r 1  20 rr rr             jsr     msg
+00099Cr 1  20 rr rr             jsr     port_out
+00099Fr 1  AD rr rr             lda     rts_i
+0009A2r 1  C9 02                cmp     #2
+0009A4r 1  D0 07                bne     :+
+0009A6r 1  A9 rr                lda     #<flow_txt
+0009A8r 1  A0 rr                ldy     #>flow_txt
+0009AAr 1  20 rr rr             jsr     dprint
+0009ADr 1  4C rr rr     :       jmp     msg_end
+0009B0r 1               
+0009B0r 1               ; the rate and format, as "1200 8N1", to the screen (dout) or, after
+0009B0r 1               ; port_to = 1, the Zimodem as "1200,8N1"
+0009B0r 1               port_out:
+0009B0r 1  AE rr rr             ldx     baud_i
+0009B3r 1  20 rr rr             jsr     baud_str
+0009B6r 1  20 rr rr             jsr     to_dprint
+0009B9r 1  AD rr rr             lda     psep            ; (" " or "," in an ATB)
+0009BCr 1  20 rr rr             jsr     to_out
+0009BFr 1  A9 38                lda     #'8'
+0009C1r 1  38                   sec
+0009C2r 1  ED rr rr             sbc     data_i
+0009C5r 1  20 rr rr             jsr     to_out
+0009C8r 1  AE rr rr             ldx     par_i
+0009CBr 1  BD rr rr             lda     par_chr,x
+0009CEr 1  20 rr rr             jsr     to_out
+0009D1r 1  AD rr rr             lda     stop_i
+0009D4r 1  18                   clc
+0009D5r 1  69 31                adc     #'1'
+0009D7r 1                       ; (on)
+0009D7r 1  AE rr rr     to_out: ldx     port_to
+0009DAr 1  D0 03                bne     :+
+0009DCr 1  4C rr rr             jmp     dout
+0009DFr 1  4C rr rr     :       jmp     mdm_out
+0009E2r 1               to_dprint:
+0009E2r 1  AE rr rr             ldx     port_to
+0009E5r 1  D0 03                bne     :+
+0009E7r 1  4C rr rr             jmp     dprint
+0009EAr 1  4C rr rr     :       jmp     mprint
+0009EDr 1               
+0009EDr 1               ; A/Y = the rate X as text ("1200")
+0009EDr 1               baud_str:
+0009EDr 1  8A                   txa
+0009EEr 1  0A                   asl
+0009EFr 1  AA                   tax
+0009F0r 1  BD rr rr             lda     baud_names,x
+0009F3r 1  BC rr rr             ldy     baud_names+1,x
+0009F6r 1  60                   rts
+0009F7r 1               
+0009F7r 1               N_BAUD      = 13
+0009F7r 1  03 05 06 07  baud_codes: .byte   $03, $05, $06, $07, $08, $09, $0A, $0B, $0C, $0D, $0E, $0F, $00
+0009FBr 1  08 09 0A 0B  
+0009FFr 1  0C 0D 0E 0F  
+000A04r 1  1A 14 0A 06  txn_l:      .byte   <TXN(110), <TXN(150), <TXN(300), <TXN(600), <TXN(1200), <TXN(1800)
+000A08r 1  84 AE        
+000A0Ar 1  C3 D8 62 EC              .byte   <TXN(2400), <TXN(3600), <TXN(4800), <TXN(7200), <TXN(9600), <TXN(19200)
+000A0Er 1  B2 5A        
+000A10r 1  10                       .byte   <TXN(115200)
+000A11r 1  3C 2C 16 0B  txn_h:      .byte   >TXN(110), >TXN(150), >TXN(300), >TXN(600), >TXN(1200), >TXN(1800)
+000A15r 1  05 03        
+000A17r 1  02 01 01 00              .byte   >TXN(2400), >TXN(3600), >TXN(4800), >TXN(7200), >TXN(9600), >TXN(19200)
+000A1Br 1  00 00        
+000A1Dr 1  00                       .byte   >TXN(115200)
+000A1Er 1  rr rr rr rr  baud_names: .word   b110, b150, b300, b600, b1200, b1800, b2400, b3600, b4800, b7200
+000A22r 1  rr rr rr rr  
+000A26r 1  rr rr rr rr  
+000A32r 1  rr rr rr rr              .word   b9600, b19200, b115200
+000A36r 1  rr rr        
+000A38r 1  31 31 30 00  b110:       .byte   "110", 0
+000A3Cr 1  31 35 30 00  b150:       .byte   "150", 0
+000A40r 1  33 30 30 00  b300:       .byte   "300", 0
+000A44r 1  36 30 30 00  b600:       .byte   "600", 0
+000A48r 1  31 32 30 30  b1200:      .byte   "1200", 0
+000A4Cr 1  00           
+000A4Dr 1  31 38 30 30  b1800:      .byte   "1800", 0
+000A51r 1  00           
+000A52r 1  32 34 30 30  b2400:      .byte   "2400", 0
+000A56r 1  00           
+000A57r 1  33 36 30 30  b3600:      .byte   "3600", 0
+000A5Br 1  00           
+000A5Cr 1  34 38 30 30  b4800:      .byte   "4800", 0
+000A60r 1  00           
+000A61r 1  37 32 30 30  b7200:      .byte   "7200", 0
+000A65r 1  00           
+000A66r 1  39 36 30 30  b9600:      .byte   "9600", 0
+000A6Ar 1  00           
+000A6Br 1  31 39 32 30  b19200:     .byte   "19200", 0
+000A6Fr 1  30 00        
+000A71r 1  31 31 35 32  b115200:    .byte   "115200", 0
+000A75r 1  30 30 00     
+000A78r 1  00 20 40 60  data_bits:  .byte   $00, $20, $40, $60              ; 8 7 6 5 (control bits 5-6)
+000A7Cr 1  00 20 60 A0  par_bits:   .byte   $00, $20, $60, $A0, $E0         ; none odd even mark space (command bits 5-7)
+000A80r 1  E0           
+000A81r 1  4E 4F 45 4D  par_chr:    .byte   "NOEMS"
+000A85r 1  53           
+000A86r 1               
+000A86r 1               ; ---- set-up ---------------------------------------------------------------------------------
+000A86r 1               ; a screen of the settings: a digit changes one (to its next value), S saves
+000A86r 1               ; them in TERM.CFG, Enter or Esc goes back.  The port changes on the way out;
+000A86r 1               ; if its rate or format changed, TERM offers to tell the Zimodem first (ATB,
+000A86r 1               ; sent as the port still is).
+000A86r 1               N_ITEMS     = 10
+000A86r 1  A2 03        setup:  ldx     #3              ; (the port as it is)
+000A88r 1  BD rr rr     @o:     lda     cfg,x
+000A8Br 1  9D rr rr             sta     old_cfg,x
+000A8Er 1  CA                   dex
+000A8Fr 1  10 F7                bpl     @o
+000A91r 1  20 rr rr     @draw:  jsr     setup_draw
+000A94r 1  20 rr rr     @k:     jsr     kb_wait
+000A97r 1  C9 0D                cmp     #13
+000A99r 1  F0 32                beq     @out
+000A9Br 1  C9 1B                cmp     #27
+000A9Dr 1  F0 2E                beq     @out
+000A9Fr 1  C9 30                cmp     #'0'
+000AA1r 1  D0 02                bne     :+
+000AA3r 1  A9 3A                lda     #'9' + 1        ; (0 is the tenth)
+000AA5r 1  38           :       sec
+000AA6r 1  E9 31                sbc     #'1'
+000AA8r 1  C9 0A                cmp     #N_ITEMS
+000AAAr 1  B0 13                bcs     @let
+000AACr 1  AA                   tax                     ; the next value of item X
+000AADr 1  FE rr rr             inc     cfg,x
+000AB0r 1  BD rr rr             lda     cfg,x
+000AB3r 1  DD rr rr             cmp     item_count,x
+000AB6r 1  90 D9                bcc     @draw
+000AB8r 1  A9 00                lda     #0
+000ABAr 1  9D rr rr             sta     cfg,x
+000ABDr 1  F0 D2                beq     @draw
+000ABFr 1  69 30        @let:   adc     #'1' - 1        ; (back to the key: carry was set)
+000AC1r 1  29 DF                and     #$DF
+000AC3r 1  C9 53                cmp     #'S'
+000AC5r 1  D0 CD                bne     @k
+000AC7r 1  20 rr rr             jsr     cfg_save
+000ACAr 1  4C rr rr             jmp     @k
+000ACDr 1  A9 0C        @out:   lda     #12
+000ACFr 1  20 rr rr             jsr     dout
+000AD2r 1  A2 03                ldx     #3              ; the rate or format changed?
+000AD4r 1  BD rr rr     @c:     lda     cfg,x
+000AD7r 1  DD rr rr             cmp     old_cfg,x
+000ADAr 1  D0 09                bne     @tell
+000ADCr 1  CA                   dex
+000ADDr 1  10 F5                bpl     @c
+000ADFr 1  20 rr rr             jsr     put_cmd         ; (DTR, RTS)
+000AE2r 1  4C rr rr             jmp     show_port
+000AE5r 1  A9 2C        @tell:  lda     #','            ; tell the Zimodem?  ATB"rate,8N1"
+000AE7r 1  8D rr rr             sta     psep
+000AEAr 1  A9 rr                lda     #<tell_txt
+000AECr 1  A0 rr                ldy     #>tell_txt
+000AEEr 1  20 rr rr             jsr     msg
+000AF1r 1  A9 rr                lda     #<atb_txt       ; (shown: port_to is 0)
+000AF3r 1  A0 rr                ldy     #>atb_txt
+000AF5r 1  20 rr rr             jsr     to_dprint
+000AF8r 1  20 rr rr             jsr     port_out
+000AFBr 1  A9 22                lda     #'"'
+000AFDr 1  20 rr rr             jsr     to_out
+000B00r 1  A9 rr                lda     #<tell2_txt
+000B02r 1  A0 rr                ldy     #>tell2_txt
+000B04r 1  20 rr rr             jsr     dprint
+000B07r 1  20 rr rr             jsr     kb_wait
+000B0Ar 1  29 DF                and     #$DF
+000B0Cr 1  C9 59                cmp     #'Y'
+000B0Er 1  D0 23                bne     @set
+000B10r 1  A9 01                lda     #1              ; (sent with the port as it was)
+000B12r 1  8D rr rr             sta     port_to
+000B15r 1  A9 rr                lda     #<atb_txt
+000B17r 1  A0 rr                ldy     #>atb_txt
+000B19r 1  20 rr rr             jsr     to_dprint
+000B1Cr 1  20 rr rr             jsr     port_out
+000B1Fr 1  A9 22                lda     #'"'
+000B21r 1  20 rr rr             jsr     to_out
+000B24r 1  A9 0D                lda     #13
+000B26r 1  20 rr rr             jsr     to_out
+000B29r 1  A9 00                lda     #0
+000B2Br 1  8D rr rr             sta     port_to
+000B2Er 1  A9 32                lda     #50             ; (its OK comes the old way)
+000B30r 1  20 rr rr             jsr     wait_ticks
+000B33r 1  20 rr rr     @set:   jsr     msg_end
+000B36r 1  20 rr rr             jsr     apply_port
+000B39r 1  4C rr rr             jmp     show_port
+000B3Cr 1               
+000B3Cr 1               ; the set-up screen
+000B3Cr 1               setup_draw:
+000B3Cr 1  A9 0C                lda     #12
+000B3Er 1  20 rr rr             jsr     dout
+000B41r 1  A9 rr                lda     #<setup_txt
+000B43r 1  A0 rr                ldy     #>setup_txt
+000B45r 1  20 rr rr             jsr     dprint
+000B48r 1  A2 00                ldx     #0
+000B4Ar 1  8E rr rr     @l:     stx     item
+000B4Dr 1  A9 20                lda     #' '            ; "  1  BAUD RATE     1200      (hint)"
+000B4Fr 1  20 rr rr             jsr     dout
+000B52r 1  20 rr rr             jsr     dout
+000B55r 1  8A                   txa
+000B56r 1  18                   clc
+000B57r 1  69 31                adc     #'1'
+000B59r 1  C9 3A                cmp     #'9' + 1
+000B5Br 1  D0 02                bne     :+
+000B5Dr 1  A9 30                lda     #'0'
+000B5Fr 1  20 rr rr     :       jsr     dout
+000B62r 1  A9 20                lda     #' '
+000B64r 1  20 rr rr             jsr     dout
+000B67r 1  20 rr rr             jsr     dout
+000B6Ar 1  8A                   txa
+000B6Br 1  0A                   asl
+000B6Cr 1  AA                   tax
+000B6Dr 1  BD rr rr             lda     item_names,x
+000B70r 1  BC rr rr             ldy     item_names+1,x
+000B73r 1  20 rr rr             jsr     dprint
+000B76r 1  A9 0E                lda     #$0E            ; (the value at column 20)
+000B78r 1  20 rr rr             jsr     dout
+000B7Br 1  A9 14                lda     #20
+000B7Dr 1  20 rr rr             jsr     dout
+000B80r 1  AE rr rr             ldx     item            ; the value's name: in the item's list, at
+000B83r 1  8A                   txa                     ;  the value x 2
+000B84r 1  0A                   asl
+000B85r 1  AA                   tax
+000B86r 1  BD rr rr             lda     item_lists,x
+000B89r 1  8D rr rr             sta     @lo+1
+000B8Cr 1  8D rr rr             sta     @hi+1
+000B8Fr 1  BD rr rr             lda     item_lists+1,x
+000B92r 1  8D rr rr             sta     @lo+2
+000B95r 1  8D rr rr             sta     @hi+2
+000B98r 1  AE rr rr             ldx     item
+000B9Br 1  BD rr rr             lda     cfg,x
+000B9Er 1  0A                   asl
+000B9Fr 1  A8                   tay
+000BA0r 1  B9 FF FF     @lo:    lda     $FFFF,y
+000BA3r 1  48                   pha
+000BA4r 1  C8                   iny
+000BA5r 1  B9 FF FF     @hi:    lda     $FFFF,y
+000BA8r 1  A8                   tay
+000BA9r 1  68                   pla
+000BAAr 1  20 rr rr             jsr     dprint
+000BADr 1  A9 0E                lda     #$0E            ; (the hint at column 30)
+000BAFr 1  20 rr rr             jsr     dout
+000BB2r 1  A9 1E                lda     #30
+000BB4r 1  20 rr rr             jsr     dout
+000BB7r 1  AD rr rr             lda     item
+000BBAr 1  0A                   asl
+000BBBr 1  AA                   tax
+000BBCr 1  BD rr rr             lda     item_hints,x
+000BBFr 1  BC rr rr             ldy     item_hints+1,x
+000BC2r 1  20 rr rr             jsr     dprint
+000BC5r 1  A9 0D                lda     #13
+000BC7r 1  20 rr rr             jsr     dout
+000BCAr 1  A9 0A                lda     #10
+000BCCr 1  20 rr rr             jsr     dout
+000BCFr 1  AE rr rr             ldx     item
+000BD2r 1  E8                   inx
+000BD3r 1  E0 0A                cpx     #N_ITEMS
+000BD5r 1  F0 03                beq     :+
+000BD7r 1  4C rr rr             jmp     @l
+000BDAr 1  A9 rr        :       lda     #<setup2_txt
+000BDCr 1  A0 rr                ldy     #>setup2_txt
+000BDEr 1  4C rr rr             jmp     dprint
+000BE1r 1               
+000BE1r 1               ; each item: its name, how many values, their names, a hint
+000BE1r 1  rr rr rr rr  item_names: .word   in1, in2, in3, in4, in5, in6, in7, in8, in9, in10
+000BE5r 1  rr rr rr rr  
+000BE9r 1  rr rr rr rr  
+000BF5r 1  42 41 55 44  in1:        .byte   "BAUD RATE", 0
+000BF9r 1  20 52 41 54  
+000BFDr 1  45 00        
+000BFFr 1  44 41 54 41  in2:        .byte   "DATA BITS", 0
+000C03r 1  20 42 49 54  
+000C07r 1  53 00        
+000C09r 1  50 41 52 49  in3:        .byte   "PARITY", 0
+000C0Dr 1  54 59 00     
+000C10r 1  53 54 4F 50  in4:        .byte   "STOP BITS", 0
+000C14r 1  20 42 49 54  
+000C18r 1  53 00        
+000C1Ar 1  44 54 52 00  in5:        .byte   "DTR", 0
+000C1Er 1  52 54 53 00  in6:        .byte   "RTS", 0
+000C22r 1  4C 4F 43 41  in7:        .byte   "LOCAL ECHO", 0
+000C26r 1  4C 20 45 43  
+000C2Ar 1  48 4F 00     
+000C2Dr 1  4C 46 20 41  in8:        .byte   "LF AFTER CR", 0
+000C31r 1  46 54 45 52  
+000C35r 1  20 43 52 00  
+000C39r 1  43 4F 4C 4F  in9:        .byte   "COLOURS", 0
+000C3Dr 1  55 52 53 00  
+000C41r 1  42 41 43 4B  in10:       .byte   "BACKSPACE", 0
+000C45r 1  53 50 41 43  
+000C49r 1  45 00        
+000C4Br 1  0D 04 05 02  item_count: .byte   N_BAUD, 4, 5, 2, 2, 3, 2, 2, 2, 2
+000C4Fr 1  02 03 02 02  
+000C53r 1  02 02        
+000C55r 1  rr rr rr rr  item_lists: .word   baud_names, l_data, l_par, l_stop, l_offon, l_rts, l_offon, l_offon, l_cmap, l_bs
+000C59r 1  rr rr rr rr  
+000C5Dr 1  rr rr rr rr  
+000C69r 1  rr rr rr rr  l_data:     .word   v8, v7, v6, v5
+000C6Dr 1  rr rr rr rr  
+000C71r 1  rr rr rr rr  l_par:      .word   vnone, vodd, veven, vmark, vspace
+000C75r 1  rr rr rr rr  
+000C79r 1  rr rr        
+000C7Br 1  rr rr rr rr  l_stop:     .word   v1, v2
+000C7Fr 1  rr rr rr rr  l_offon:    .word   voff, von
+000C83r 1  rr rr rr rr  l_rts:      .word   von, voff, vflow
+000C87r 1  rr rr        
+000C89r 1  rr rr rr rr  l_cmap:     .word   vsent, vmono
+000C8Dr 1  rr rr rr rr  l_bs:       .word   vdel, vbs
+000C91r 1  38 00        v8:         .byte   "8", 0
+000C93r 1  37 00        v7:         .byte   "7", 0
+000C95r 1  36 00        v6:         .byte   "6", 0
+000C97r 1  35 00        v5:         .byte   "5", 0
+000C99r 1  4E 4F 4E 45  vnone:      .byte   "NONE", 0
+000C9Dr 1  00           
+000C9Er 1  4F 44 44 00  vodd:       .byte   "ODD", 0
+000CA2r 1  45 56 45 4E  veven:      .byte   "EVEN", 0
+000CA6r 1  00           
+000CA7r 1  4D 41 52 4B  vmark:      .byte   "MARK", 0
+000CABr 1  00           
+000CACr 1  53 50 41 43  vspace:     .byte   "SPACE", 0
+000CB0r 1  45 00        
+000CB2r 1  31 00        v1:         .byte   "1", 0
+000CB4r 1  32 00        v2:         .byte   "2", 0
+000CB6r 1  4F 46 46 00  voff:       .byte   "OFF", 0
+000CBAr 1  4F 4E 00     von:        .byte   "ON", 0
+000CBDr 1  46 4C 4F 57  vflow:      .byte   "FLOW", 0
+000CC1r 1  00           
+000CC2r 1  41 53 20 53  vsent:      .byte   "AS SENT", 0
+000CC6r 1  45 4E 54 00  
+000CCAr 1  4D 4F 4E 4F  vmono:      .byte   "MONO", 0
+000CCEr 1  00           
+000CCFr 1  44 45 4C 00  vdel:       .byte   "DEL", 0
+000CD3r 1  42 53 00     vbs:        .byte   "BS", 0
+000CD6r 1  rr rr rr rr  item_hints: .word   ih1, ih2, ih3, ih4, ih5, ih6, ih7, ih8, ih9, ih10
+000CDAr 1  rr rr rr rr  
+000CDEr 1  rr rr rr rr  
+000CEAr 1  31 31 30 20  ih1:        .byte   "110 - 19200; 115200 NEEDS THE EXTERNAL CLOCK", 0
+000CEEr 1  2D 20 31 39  
+000CF2r 1  32 30 30 3B  
+000D17r 1  38 20 46 4F  ih2:        .byte   "8 FOR BBSS", 0
+000D1Br 1  52 20 42 42  
+000D1Fr 1  53 53 00     
+000D22r 1  4E 4F 4E 45  ih3:        .byte   "NONE FOR BBSS", 0
+000D26r 1  20 46 4F 52  
+000D2Ar 1  20 42 42 53  
+000D30r 1  31 20 46 4F  ih4:        .byte   "1 FOR BBSS", 0
+000D34r 1  52 20 42 42  
+000D38r 1  53 53 00     
+000D3Br 1  4F 46 46 3A  ih5:        .byte   "OFF: THE 6551 STOPS RECEIVING", 0
+000D3Fr 1  20 54 48 45  
+000D43r 1  20 36 35 35  
+000D59r 1  46 4C 4F 57  ih6:        .byte   "FLOW: OFF WHILE THE BUFFER IS FULL", 0
+000D5Dr 1  3A 20 4F 46  
+000D61r 1  46 20 57 48  
+000D7Cr 1  53 48 4F 57  ih7:        .byte   "SHOW WHAT YOU TYPE", 0
+000D80r 1  20 57 48 41  
+000D84r 1  54 20 59 4F  
+000D8Fr 1  46 4F 52 20  ih8:        .byte   "FOR SYSTEMS THAT SEND CR ALONE", 0
+000D93r 1  53 59 53 54  
+000D97r 1  45 4D 53 20  
+000DAEr 1  41 4E 53 49  ih9:        .byte   "ANSI COLOURS: MONO OR AS SENT", 0
+000DB2r 1  20 43 4F 4C  
+000DB6r 1  4F 55 52 53  
+000DCCr 1  57 48 41 54  ih10:       .byte   "WHAT THE BACKSPACE KEY SENDS", 0
+000DD0r 1  20 54 48 45  
+000DD4r 1  20 42 41 43  
+000DE9r 1               
+000DE9r 1  1B 5B 30 6D  setup_txt:  .byte   27, "[0m", "TERM SET-UP: THE SERIAL PORT (THE 6551 AT $7F14) AND MORE", 13, 10, 13, 10, 0
+000DEDr 1  54 45 52 4D  
+000DF1r 1  20 53 45 54  
+000E2Br 1  0D 0A 20 20  setup2_txt: .byte   13, 10, "  A DIGIT: THE NEXT VALUE     S: SAVE AS TERM.CFG     ENTER OR ESC: BACK", 13, 10, 0
+000E2Fr 1  41 20 44 49  
+000E33r 1  47 49 54 3A  
+000E78r 1  50 4F 52 54  port_txt0:  .byte   "PORT ", 0
+000E7Cr 1  20 00        
+000E7Er 1  2C 20 52 54  flow_txt:   .byte   ", RTS FLOW", 0
+000E82r 1  53 20 46 4C  
+000E86r 1  4F 57 00     
+000E89r 1  54 48 45 20  tell_txt:   .byte   "THE PORT CHANGES. SEND THE ZIMODEM ", 0
+000E8Dr 1  50 4F 52 54  
+000E91r 1  20 43 48 41  
+000EADr 1  20 46 49 52  tell2_txt:  .byte   " FIRST (Y/N)? ", 0
+000EB1r 1  53 54 20 28  
+000EB5r 1  59 2F 4E 29  
+000EBCr 1               
+000EBCr 1               ; ---- TERM.CFG -------------------------------------------------------------------------------
+000EBCr 1               ; the defaults: 1200 8N1 (the Zimodem's own), DTR and RTS on, colours as mono
+000EBCr 1               cfg_default:
+000EBCr 1  A2 09                ldx     #CFG_LEN - 1
+000EBEr 1  BD rr rr     @c:     lda     cfg_def,x
+000EC1r 1  9D rr rr             sta     cfg,x
+000EC4r 1  CA                   dex
+000EC5r 1  10 F7                bpl     @c
+000EC7r 1  60                   rts
+000EC8r 1  04 00 00 00  cfg_def:    .byte   4, 0, 0, 0, 1, 0, 0, 0, 1, 0
+000ECCr 1  01 00 00 00  
+000ED0r 1  01 00        
+000ED2r 1               
+000ED2r 1               ; the settings from TERM.CFG: carry clear if they were read
+000ED2r 1               cfg_load:
+000ED2r 1  20 rr rr             jsr     drive_in
+000ED5r 1  B0 4D                bcs     @no
+000ED7r 1  20 rr rr             jsr     cfg_name
+000EDAr 1  20 rr rr             jsr     ch_open
+000EDDr 1  C9 14                cmp     #USB_INT_SUCCESS
+000EDFr 1  D0 43                bne     @no
+000EE1r 1  A9 rr                lda     #<fbuf
+000EE3r 1  8D rr rr             sta     ch_ptr
+000EE6r 1  A9 rr                lda     #>fbuf
+000EE8r 1  8D rr rr             sta     ch_ptr+1
+000EEBr 1  A9 0E                lda     #CFG_LEN + 4
+000EEDr 1  8D rr rr             sta     ch_len
+000EF0r 1  A9 00                lda     #0
+000EF2r 1  8D rr rr             sta     ch_len+1
+000EF5r 1  20 rr rr             jsr     ch_read
+000EF8r 1  20 rr rr             jsr     ch_close
+000EFBr 1  AD rr rr             lda     ch_got
+000EFEr 1  C9 0E                cmp     #CFG_LEN + 4
+000F00r 1  D0 22                bne     @no
+000F02r 1  A2 03                ldx     #3
+000F04r 1  BD rr rr     @s:     lda     fbuf,x
+000F07r 1  DD rr rr             cmp     cfg_sig,x
+000F0Ar 1  D0 18                bne     @no
+000F0Cr 1  CA                   dex
+000F0Dr 1  10 F5                bpl     @s
+000F0Fr 1  A2 09                ldx     #CFG_LEN - 1    ; (each in range, else the default)
+000F11r 1  BD rr rr     @c:     lda     fbuf+4,x
+000F14r 1  DD rr rr             cmp     item_count,x
+000F17r 1  90 03                bcc     :+
+000F19r 1  BD rr rr             lda     cfg_def,x
+000F1Cr 1  9D rr rr     :       sta     cfg,x
+000F1Fr 1  CA                   dex
+000F20r 1  10 EF                bpl     @c
+000F22r 1  18                   clc
+000F23r 1  60                   rts
+000F24r 1  38           @no:    sec
+000F25r 1  60                   rts
+000F26r 1               
+000F26r 1               ; the settings to TERM.CFG (set-up's S): says how it went
+000F26r 1               cfg_save:
+000F26r 1  A2 03                ldx     #3
+000F28r 1  BD rr rr     @s:     lda     cfg_sig,x
+000F2Br 1  9D rr rr             sta     fbuf,x
+000F2Er 1  CA                   dex
+000F2Fr 1  10 F7                bpl     @s
+000F31r 1  A2 09                ldx     #CFG_LEN - 1
+000F33r 1  BD rr rr     @c:     lda     cfg,x
+000F36r 1  9D rr rr             sta     fbuf+4,x
+000F39r 1  CA                   dex
+000F3Ar 1  10 F7                bpl     @c
+000F3Cr 1  20 rr rr             jsr     drive_in
+000F3Fr 1  B0 33                bcs     @err
+000F41r 1  20 rr rr             jsr     cfg_name
+000F44r 1  20 rr rr             jsr     ch_create
+000F47r 1  C9 14                cmp     #USB_INT_SUCCESS
+000F49r 1  D0 29                bne     @err
+000F4Br 1  A9 rr                lda     #<fbuf
+000F4Dr 1  8D rr rr             sta     ch_ptr
+000F50r 1  A9 rr                lda     #>fbuf
+000F52r 1  8D rr rr             sta     ch_ptr+1
+000F55r 1  A9 0E                lda     #CFG_LEN + 4
+000F57r 1  8D rr rr             sta     ch_len
+000F5Ar 1  A9 00                lda     #0
+000F5Cr 1  8D rr rr             sta     ch_len+1
+000F5Fr 1  20 rr rr             jsr     ch_write
+000F62r 1  C9 14                cmp     #USB_INT_SUCCESS
+000F64r 1  D0 0E                bne     @err
+000F66r 1  20 rr rr             jsr     ch_close_w
+000F69r 1  C9 14                cmp     #USB_INT_SUCCESS
+000F6Br 1  D0 07                bne     @err
+000F6Dr 1  A9 rr                lda     #<saved_txt
+000F6Fr 1  A0 rr                ldy     #>saved_txt
+000F71r 1  4C rr rr             jmp     dprint
+000F74r 1  48           @err:   pha
+000F75r 1  A9 rr                lda     #<save_err_txt
+000F77r 1  A0 rr                ldy     #>save_err_txt
+000F79r 1  20 rr rr             jsr     dprint
+000F7Cr 1  68                   pla
+000F7Dr 1  20 rr rr             jsr     dhex
+000F80r 1  A9 0D                lda     #13
+000F82r 1  20 rr rr             jsr     dout
+000F85r 1  A9 0A                lda     #10
+000F87r 1  4C rr rr             jmp     dout
+000F8Ar 1               
+000F8Ar 1               ; A/Y = "TERM.CFG" (in the current folder) or "/TERM.CFG" (the top one)
+000F8Ar 1               cfg_name:
+000F8Ar 1  A9 rr                lda     #<cfg_file
+000F8Cr 1  A0 rr                ldy     #>cfg_file
+000F8Er 1  AE rr rr             ldx     cwd_buf
+000F91r 1  D0 04                bne     :+
+000F93r 1  A9 rr                lda     #<cfg_path
+000F95r 1  A0 rr                ldy     #>cfg_path
+000F97r 1  60           :       rts
+000F98r 1               
+000F98r 1               ; into the monitor's folder: the drive as the monitor left it, or started
+000F98r 1               ; afresh; carry set if it can't be done
+000F98r 1               drive_in:
+000F98r 1  20 rr rr             jsr     ch_check
+000F9Br 1  B0 12                bcs     @r
+000F9Dr 1  20 rr rr             jsr     go_in
+000FA0r 1  F0 0C                beq     @ok
+000FA2r 1  20 rr rr             jsr     ch_start
+000FA5r 1  B0 08                bcs     @r
+000FA7r 1  20 rr rr             jsr     go_in
+000FAAr 1  F0 02                beq     @ok
+000FACr 1  38                   sec
+000FADr 1  60                   rts
+000FAEr 1  18           @ok:    clc
+000FAFr 1  60           @r:     rts
+000FB0r 1               
+000FB0r 1               ; into the folder (the top: open "/"): Z set if it went well
+000FB0r 1  AD rr rr     go_in:  lda     cwd_buf
+000FB3r 1  D0 0A                bne     @in
+000FB5r 1  A9 rr                lda     #<root_txt
+000FB7r 1  A0 rr                ldy     #>root_txt
+000FB9r 1  20 rr rr             jsr     ch_open
+000FBCr 1  C9 41                cmp     #ERR_OPEN_DIR
+000FBEr 1  60                   rts
+000FBFr 1  A9 rr        @in:    lda     #<cwd_buf
+000FC1r 1  A0 rr                ldy     #>cwd_buf
+000FC3r 1  20 rr rr             jsr     ch_enter
+000FC6r 1  C9 41                cmp     #ERR_OPEN_DIR
+000FC8r 1  60                   rts
+000FC9r 1               
+000FC9r 1  54 43 46 31  cfg_sig:    .byte   "TCF1"
+000FCDr 1  2F 00        root_txt:   .byte   "/", 0
+000FCFr 1  2F           cfg_path:   .byte   "/"
+000FD0r 1  54 45 52 4D  cfg_file:   .byte   "TERM.CFG", 0
+000FD4r 1  2E 43 46 47  
+000FD8r 1  00           
+000FD9r 1  20 20 53 41  saved_txt:  .byte   "  SAVED IN TERM.CFG", 13, 10, 0
+000FDDr 1  56 45 44 20  
+000FE1r 1  49 4E 20 54  
+000FEFr 1  20 20 4E 4F  save_err_txt:.byte  "  NOT SAVED: USB DRIVE ERROR $", 0
+000FF3r 1  54 20 53 41  
+000FF7r 1  56 45 44 3A  
+00100Er 1               
+00100Er 1               ; A in hex to the screen
+00100Er 1  48           dhex:   pha
+00100Fr 1  4A                   lsr
+001010r 1  4A                   lsr
+001011r 1  4A                   lsr
+001012r 1  4A                   lsr
+001013r 1  20 rr rr             jsr     @d
+001016r 1  68                   pla
+001017r 1  29 0F                and     #$0F
+001019r 1  C9 0A        @d:     cmp     #10
+00101Br 1  90 02                bcc     :+
+00101Dr 1  69 06                adc     #'A' - '0' - 10 - 1
+00101Fr 1  69 30        :       adc     #'0'
+001021r 1  4C rr rr             jmp     dout
+001024r 1               
+001024r 1               ; dial: ask for host:port, send ATDT"host:port" (":23" added if no port)
+001024r 1  A9 rr        dial:   lda     #<dial_txt
+001026r 1  A0 rr                ldy     #>dial_txt
+001028r 1  20 rr rr             jsr     msg
+00102Br 1  A2 00                ldx     #0
+00102Dr 1  8E rr rr             stx     line_len
+001030r 1  20 rr rr     @k:     jsr     kb_wait
+001033r 1  C9 0D                cmp     #13
+001035r 1  F0 40                beq     @go
+001037r 1  C9 1B                cmp     #27
+001039r 1  F0 39                beq     @no
+00103Br 1  C9 08                cmp     #8
+00103Dr 1  F0 1B                beq     @bs
+00103Fr 1  C9 7F                cmp     #127
+001041r 1  F0 17                beq     @bs
+001043r 1  C9 21                cmp     #' ' + 1
+001045r 1  90 E9                bcc     @k
+001047r 1  AE rr rr             ldx     line_len
+00104Ar 1  E0 3C                cpx     #LINE_MAX
+00104Cr 1  B0 E2                bcs     @k
+00104Er 1  9D rr rr             sta     line,x
+001051r 1  EE rr rr             inc     line_len
+001054r 1  20 rr rr             jsr     dout
+001057r 1  4C rr rr             jmp     @k
+00105Ar 1  AE rr rr     @bs:    ldx     line_len
+00105Dr 1  F0 D1                beq     @k
+00105Fr 1  CE rr rr             dec     line_len
+001062r 1  A9 08                lda     #8
+001064r 1  20 rr rr             jsr     dout
+001067r 1  A9 20                lda     #' '
+001069r 1  20 rr rr             jsr     dout
+00106Cr 1  A9 08                lda     #8
+00106Er 1  20 rr rr             jsr     dout
+001071r 1  4C rr rr             jmp     @k
+001074r 1  4C rr rr     @no:    jmp     msg_end
+001077r 1  20 rr rr     @go:    jsr     msg_end
+00107Ar 1  AE rr rr             ldx     line_len
+00107Dr 1  F0 37                beq     @r
+00107Fr 1  A9 rr                lda     #<atdt_txt
+001081r 1  A0 rr                ldy     #>atdt_txt
+001083r 1  20 rr rr             jsr     mprint
+001086r 1  A9 00                lda     #0              ; is there a port?
+001088r 1  8D rr rr             sta     tmp
+00108Br 1  A2 00                ldx     #0
+00108Dr 1  BD rr rr     @s:     lda     line,x
+001090r 1  C9 3A                cmp     #':'
+001092r 1  D0 03                bne     :+
+001094r 1  8D rr rr             sta     tmp
+001097r 1  20 rr rr     :       jsr     mdm_out
+00109Ar 1  E8                   inx
+00109Br 1  EC rr rr             cpx     line_len
+00109Er 1  D0 ED                bne     @s
+0010A0r 1  AD rr rr             lda     tmp
+0010A3r 1  D0 07                bne     :+
+0010A5r 1  A9 rr                lda     #<port_txt
+0010A7r 1  A0 rr                ldy     #>port_txt
+0010A9r 1  20 rr rr             jsr     mprint
+0010ACr 1  A9 22        :       lda     #'"'
+0010AEr 1  20 rr rr             jsr     mdm_out
+0010B1r 1  A9 0D                lda     #13
+0010B3r 1  4C rr rr             jmp     mdm_out
+0010B6r 1  60           @r:     rts
+0010B7r 1               
+0010B7r 1               ; hang up: a second of nothing, +++, a second, ATH
+0010B7r 1  A9 rr        hangup: lda     #<hang_txt
+0010B9r 1  A0 rr                ldy     #>hang_txt
+0010BBr 1  20 rr rr             jsr     msg
+0010BEr 1  20 rr rr             jsr     msg_end
+0010C1r 1  A9 6E                lda     #110
+0010C3r 1  20 rr rr             jsr     wait_ticks
+0010C6r 1  A9 rr                lda     #<plus_txt
+0010C8r 1  A0 rr                ldy     #>plus_txt
+0010CAr 1  20 rr rr             jsr     mprint
+0010CDr 1  A9 6E                lda     #110
+0010CFr 1  20 rr rr             jsr     wait_ticks
+0010D2r 1  A9 rr                lda     #<ath_txt
+0010D4r 1  A0 rr                ldy     #>ath_txt
+0010D6r 1  4C rr rr             jmp     mprint
+0010D9r 1               
+0010D9r 1  A9 rr        quit:   lda     #<quit_txt
+0010DBr 1  A0 rr                ldy     #>quit_txt
+0010DDr 1  20 rr rr             jsr     msg
+0010E0r 1  20 rr rr             jsr     kb_wait
+0010E3r 1  29 DF                and     #$DF
+0010E5r 1  C9 59                cmp     #'Y'
+0010E7r 1  F0 03                beq     @q
+0010E9r 1  4C rr rr             jmp     msg_end
+0010ECr 1  20 rr rr     @q:     jsr     msg_end
+0010EFr 1  20 rr rr             jsr     bell_off
+0010F2r 1  A9 08                lda     #8              ; (the AY quiet)
+0010F4r 1  A2 00                ldx     #0
+0010F6r 1  20 rr rr             jsr     ay_set
+0010F9r 1  A9 rr                lda     #<bye_txt
+0010FBr 1  A0 rr                ldy     #>bye_txt
+0010FDr 1  20 rr rr             jsr     dprint
+001100r 1  A9 1A                lda     #CTRL_ROM       ; the serial port as the ROM had it
+001102r 1  8D 17 7F             sta     MDM_CTRL
+001105r 1  A9 89                lda     #CMD_IRQ
+001107r 1  8D 16 7F             sta     MDM_CMD
+00110Ar 1  8D 1A 7F             sta     DSP_CMD         ; the keyboard by interrupt again
+00110Dr 1  AD rr rr             lda     ier_t1          ; the gamepad's interrupt back
+001110r 1  F0 05                beq     :+
+001112r 1  A9 C0                lda     #$C0
+001114r 1  8D 0E 7F             sta     VIA_IER
+001117r 1  4C 06 FE     :       jmp     SBC_MENU
+00111Ar 1               
+00111Ar 1               ; ---- text ---------------------------------------------------------------------------------
+00111Ar 1  1B 5B 30 6D  init_txt:   .byte   27, "[0m", 27, "[r", 12          ; (and 18 00 before it: normal text)
+00111Er 1  1B 5B 72 0C  
+001122r 1  54 45 52 4D              .byte   "TERM - A TERMINAL FOR BBSS THROUGH ZIMODEM", 13, 10, 0
+001126r 1  20 2D 20 41  
+00112Ar 1  20 54 45 52  
+00114Fr 1  54 59 50 45  hello_txt:  .byte   "TYPE AT COMMANDS TO THE ZIMODEM, OR CTRL-A D TO DIAL A BBS.", 13, 10
+001153r 1  20 41 54 20  
+001157r 1  43 4F 4D 4D  
+00118Cr 1  43 54 52 4C              .byte   "CTRL-A H: HELP", 13, 10, 0
+001190r 1  2D 41 20 48  
+001194r 1  3A 20 48 45  
+00119Dr 1  0D 0A 54 45  help_txt:   .byte   13, 10, "TERM: CTRL-A, THEN", 13, 10
+0011A1r 1  52 4D 3A 20  
+0011A5r 1  43 54 52 4C  
+0011B3r 1  20 20 44 20              .byte   "  D  DIAL A BBS (HOST:PORT)     X  HANG UP", 13, 10
+0011B7r 1  20 44 49 41  
+0011BBr 1  4C 20 41 20  
+0011DFr 1  20 20 53 20              .byte   "  S  SET-UP: THE SERIAL PORT    E  LOCAL ECHO ON/OFF", 13, 10
+0011E3r 1  20 53 45 54  
+0011E7r 1  2D 55 50 3A  
+001215r 1  20 20 4C 20              .byte   "  L  LF AFTER CR ON/OFF         C  ANSI COLOURS AS MONO ON/OFF", 13, 10
+001219r 1  20 4C 46 20  
+00121Dr 1  41 46 54 45  
+001255r 1  20 20 4B 20              .byte   "  K  BACKSPACE SENDS DEL/BS     Z  CLEAR THE SCREEN", 13, 10
+001259r 1  20 42 41 43  
+00125Dr 1  4B 53 50 41  
+00128Ar 1  20 20 41 20              .byte   "  A  SEND CTRL-A                H  THIS HELP      Q  QUIT", 13, 10, 0
+00128Er 1  20 53 45 4E  
+001292r 1  44 20 43 54  
+0012C6r 1  0D 0A 5B 54  msg_txt:    .byte   13, 10, "[TERM: ", 0
+0012CAr 1  45 52 4D 3A  
+0012CEr 1  20 00        
+0012D0r 1  5D 0D 0A 00  end_txt:    .byte   "]", 13, 10, 0
+0012D4r 1  53 45 54 54  loaded_txt: .byte   "SETTINGS FROM TERM.CFG", 0
+0012D8r 1  49 4E 47 53  
+0012DCr 1  20 46 52 4F  
+0012EBr 1  4C 4F 43 41  echo_txt:   .byte   "LOCAL ECHO ", 0
+0012EFr 1  4C 20 45 43  
+0012F3r 1  48 4F 20 00  
+0012F7r 1  4C 46 20 41  lf_txt:     .byte   "LF AFTER CR ", 0
+0012FBr 1  46 54 45 52  
+0012FFr 1  20 43 52 20  
+001304r 1  41 4E 53 49  cmap_txt:   .byte   "ANSI COLOURS AS MONO ", 0
+001308r 1  20 43 4F 4C  
+00130Cr 1  4F 55 52 53  
+00131Ar 1  42 41 43 4B  bs_txt:     .byte   "BACKSPACE SENDS BS (NOT DEL) ", 0
+00131Er 1  53 50 41 43  
+001322r 1  45 20 53 45  
+001338r 1  4F 4E 00     on_txt:     .byte   "ON", 0
+00133Br 1  4F 46 46 00  off_txt:    .byte   "OFF", 0
+00133Fr 1  44 49 41 4C  dial_txt:   .byte   "DIAL HOST:PORT (ESC: NO) ", 0
+001343r 1  20 48 4F 53  
+001347r 1  54 3A 50 4F  
+001359r 1  48 41 4E 47  hang_txt:   .byte   "HANGING UP", 0
+00135Dr 1  49 4E 47 20  
+001361r 1  55 50 00     
+001364r 1  51 55 49 54  quit_txt:   .byte   "QUIT (Y)? ", 0
+001368r 1  20 28 59 29  
+00136Cr 1  3F 20 00     
+00136Fr 1  1B 5B 30 6D  bye_txt:    .byte   27, "[0m", "BYE", 13, 10, 0
+001373r 1  42 59 45 0D  
+001377r 1  0A 00        
+001379r 1  41 54 42 22  atb_txt:    .byte   "ATB", '"', 0
+00137Dr 1  00           
+00137Er 1  41 54 44 54  atdt_txt:   .byte   "ATDT", '"', 0
+001382r 1  22 00        
+001384r 1  3A 32 33 00  port_txt:   .byte   ":23", 0
+001388r 1  2B 2B 2B 00  plus_txt:   .byte   "+++", 0
+00138Cr 1  41 54 48 0D  ath_txt:    .byte   "ATH", 13, 0
+001390r 1  00           
+001391r 1               
+001391r 1               ; ---- variables ----------------------------------------------------------------------------
+001391r 1                       .segment "BSS"
+000040r 1               cfg:                            ; the settings (TERM.CFG), in set-up's order
+000040r 1  xx           baud_i:     .res 1              ; 0-12: 110 ... 19200, 115200 (external clock)
+000041r 1  xx           data_i:     .res 1              ; 0-3: 8 7 6 5 data bits
+000042r 1  xx           par_i:      .res 1              ; 0-4: none odd even mark space
+000043r 1  xx           stop_i:     .res 1              ; 0-1: 1 or 2 stop bits
+000044r 1  xx           dtr:        .res 1              ; 1: on
+000045r 1  xx           rts_i:      .res 1              ; 0 on, 1 off, 2 flow control
+000046r 1               flags:                          ; (the on/off ones)
+000046r 1  xx           echo:       .res 1
+000047r 1  xx           addlf:      .res 1
+000048r 1  xx           cmap:       .res 1              ; 1: colours as mono
+000049r 1  xx           bs_swap:    .res 1
+00004Ar 1               CFG_LEN     = * - cfg
+00004Ar 1  xx xx xx xx  old_cfg:    .res 4              ; (the port as it was when set-up began)
+00004Er 1  xx           rts_now:    .res 1              ; flow control: RTS asserted now
+00004Fr 1  xx           item:       .res 1
+000050r 1  xx           port_to:    .res 1              ; port_out: 0 to the screen, 1 to the Zimodem
+000051r 1  xx           psep:       .res 1              ;  and between the rate and the format: " " or ","
+000052r 1  xx xx xx xx  cwd_buf:    .res CWD_MAX + 1
+000056r 1  xx xx xx xx  
+00005Ar 1  xx xx xx xx  
+000072r 1  xx xx xx xx  fbuf:       .res CFG_LEN + 4
+000076r 1  xx xx xx xx  
+00007Ar 1  xx xx xx xx  
+000080r 1  xx           txn_lo:     .res 1              ; the serial port's byte time (wait loop turns)
+000081r 1  xx           txn_hi:     .res 1
+000082r 1  xx           ier_t1:     .res 1
+000083r 1  xx           cmd_mode:   .res 1
+000084r 1  xx           rx_state:   .res 1              ; 0 text, 1 after ESC, 2 in ESC [, 3 a long one
+000085r 1  xx           csi_len:    .res 1
+000086r 1  xx xx xx xx  csi_buf:    .res CSI_MAX
+00008Ar 1  xx xx xx xx  
+00008Er 1  xx xx xx xx  
+0000AEr 1  xx           kb_r:       .res 1
+0000AFr 1  xx           kb_w:       .res 1
+0000B0r 1  xx xx xx xx  kbbuf:      .res KB_SIZE
+0000B4r 1  xx xx xx xx  
+0000B8r 1  xx xx xx xx  
+0000F0r 1  xx           bell_t:     .res 1
+0000F1r 1  xx           wt:         .res 1
+0000F2r 1  xx           s_fg:       .res 1              ; the colours and attributes asked for
+0000F3r 1  xx           s_bg:       .res 1
+0000F4r 1  xx           s_fgb:      .res 1
+0000F5r 1  xx           s_bgb:      .res 1
+0000F6r 1  xx           s_bold:     .res 1
+0000F7r 1  xx           s_ul:       .res 1
+0000F8r 1  xx           s_blink:    .res 1
+0000F9r 1  xx           s_rev:      .res 1              ; (0 or 4)
+0000FAr 1  xx           out_last:   .res 1              ; what the display was last told: bits 1 bold, 2 ul, 4 rev
+0000FBr 1  xx           ext:        .res 1
+0000FCr 1  xx xx        num:        .res 2
+0000FEr 1  xx           tmp:        .res 1
+0000FFr 1  xx           tmp2:       .res 1
+000100r 1  xx           line_len:   .res 1
+000101r 1  xx xx xx xx  line:       .res LINE_MAX
+000105r 1  xx xx xx xx  
+000109r 1  xx xx xx xx  
+000101r 1               

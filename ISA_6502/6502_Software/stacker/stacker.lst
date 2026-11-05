@@ -1,0 +1,2627 @@
+ca65 V2.19 - Git a6530f4
+Main file   : stacker.s
+Current file: stacker.s
+
+000000r 1               ; ============================================================================
+000000r 1               ; stacker.s - STACKER, a falling blocks game for the 6502 SBC
+000000r 1               ;
+000000r 1               ; Runs from the monitor at $0500 and draws on the PIC32 terminal in its
+000000r 1               ; control code mode (terminal setup item J must be ON).
+000000r 1               ;
+000000r 1               ;   build:  make                (needs sbc_api.inc, the ROM's entry points)
+000000r 1               ;   run:    L STACKER 0500   then   R
+000000r 1               ;
+000000r 1               ; Header (patchable from the monitor):
+000000r 1               ;   $0500  JMP start
+000000r 1               ;   $0503  length of a game tick in ms (default 15; bigger = slower)
+000000r 1               ;   $0504  controls at start: 0 keyboard, 1 gamepad
+000000r 1               ;   $0505  sound at start: 0 on, 1 off (M switches)
+000000r 1               ;
+000000r 1               ; Sound: the AY-3-8910 card at $7F22/$7F23, through ../ay/sfx.s (timed by
+000000r 1               ; the VIA's timer 2): music and effects, in stacker_sound.inc (made by
+000000r 1               ; ../ay/tools/game_sounds.py).  Without the card the game is just silent.
+000000r 1               ;
+000000r 1               ; Keys:   A / D or Left / Right   move          W, Up or X   rotate
+000000r 1               ;         Z                       rotate back   S or Down    drop one row
+000000r 1               ;         Space                   drop          P pause      Q quit
+000000r 1               ;         M                       sound on / off
+000000r 1               ; Gamepad: d-pad left / right move (held: repeats), down drops one row at a
+000000r 1               ;         time, up drops; A rotates, B rotates back, Start pauses
+000000r 1               ;
+000000r 1               ; The board is 10 x 20 squares (plus 2 hidden rows above it).  A square is
+000000r 1               ; 4 x 4 pixels, two block graphics characters, so square (x, y) of the
+000000r 1               ; visible board is at text column BX + 2x, row BY + y.
+000000r 1               ; The board is kept in RAM (0 empty, 1..7 the piece that left it there).
+000000r 1               ; Each tick the picture of the board (locked squares + the ghost + the
+000000r 1               ; falling piece) is put together in disp[] and compared with shown[], what
+000000r 1               ; the terminal shows; only the squares that differ are sent.
+000000r 1               ; No zero page is used.
+000000r 1               ; ============================================================================
+000000r 1               
+000000r 1                       .setcpu "6502"
+000000r 1                       .include "sbc_api.inc"
+000000r 2               ; sbc_api.inc - fixed ROM entry points of the SBC (see jumptable.s), and the
+000000r 2               ; CPU clock.  Use in your own ca65 programs:  .include "sbc_api.inc"
+000000r 2               ; (the games find it one folder up: their make.bat passes  -I ..  to ca65)
+000000r 2               SBC_CHRIN       = $FE00         ; carry set + A = char, carry clear = none waiting
+000000r 2               SBC_CHROUT      = $FE03         ; print A (A, X, Y preserved)
+000000r 2               SBC_MENU        = $FE06         ; boot menu
+000000r 2               SBC_COLD        = $FE09         ; BASIC cold start
+000000r 2               SBC_WARM        = $FE0C         ; BASIC warm start
+000000r 2               SBC_MONITOR     = $FE0F         ; monitor prompt (or JMP $FF00)
+000000r 2               SBC_PADSTATE    = $FE12         ; A = gamepad buttons held: bit0 A,1 B,2 Select,3 Start,4 Up,5 Down,6 Left,7 Right
+000000r 2               SBC_LOAD        = $FE15         ; load a file: A/Y = parameter block (.word addr, .word max, "NAME.EXT",0)
+000000r 2                                               ;   carry clear = loaded, X/Y = length; carry set = failed, A = error code
+000000r 2               
+000000r 2               ; The CPU clock in MHz (whole numbers, 1 to 8).  Programs size their delay
+000000r 2               ; loops from it, so a millisecond stays a millisecond.  To build for another
+000000r 2               ; clock, change it here or give it on the command line:  make.bat 1
+000000r 2               .ifndef CLOCK_MHZ
+000000r 2               CLOCK_MHZ       = 2
+000000r 2               .endif
+000000r 2               
+000000r 1               
+000000r 1               SPEED_DEFAULT   = 15
+000000r 1               
+000000r 1               ; ---- terminal control codes --------------------------------------------------------
+000000r 1               TC_CURSOR       = $02
+000000r 1               TC_CLS          = $0C
+000000r 1               TC_COL          = $0E
+000000r 1               TC_ROW          = $0F
+000000r 1               TC_ATTR         = $18
+000000r 1               TC_LIT          = $1A
+000000r 1               TC_TILE         = $0B           ; 0B n: draw tile n (terminal v1.4)
+000000r 1               TC_DEFTILE      = $19           ; 19 n c r data: define tile n
+000000r 1               T_LEFT          = 11            ; tile slots of the well's sides (1 x 20: slots
+000000r 1               T_RIGHT         = 12            ; 11 and 12 of that size are bytes 220-259 of the pool,
+000000r 1                                               ; clear of the squares' 0-21)
+000000r 1               ATTR_TEXT       = $00
+000000r 1               ATTR_RV         = $04
+000000r 1               ; reverse video is an ANSI sequence (in terminal v1.4, attribute bit 2 is the
+000000r 1               ; double size font, not reverse)
+000000r 1               .define RV_ON   $1B, '[', '7', 'm'
+000000r 1               .define RV_OFF  $1B, '[', '2', '7', 'm'
+000000r 1               ATTR_GFX        = $80
+000000r 1               TERM            = $FF
+000000r 1               
+000000r 1               ; ---- layout ------------------------------------------------------------------------
+000000r 1               BW              = 10            ; board width
+000000r 1               BH              = 22            ; board height, rows 0 and 1 hidden
+000000r 1               HIDDEN          = 2
+000000r 1               VIS             = 200           ; visible squares (10 x 20)
+000000r 1               BX              = 30            ; text column of the board's left edge
+000000r 1               BY              = 2             ; text row of its top (visible row 0)
+000000r 1               NX              = 56            ; the NEXT box: text column, row
+000000r 1               NY              = 4
+000000r 1               SX              = 56            ; numbers on the right
+000000r 1               G_EMPTY         = 0             ; glyphs (see gen.py)
+000000r 1               G_GHOST         = 8
+000000r 1               G_FLASH         = 9
+000000r 1               G_BLANK         = 10
+000000r 1               
+000000r 1               LOCK_TICKS      = 30            ; grounded this long: the piece locks
+000000r 1               LOCK_RESETS     = 15            ; moves that may restart the lock timer
+000000r 1               DAS_DELAY       = 12            ; gamepad: ticks before a held move repeats
+000000r 1               DAS_RATE        = 3             ; ... and between repeats
+000000r 1               
+000000r 1               ; ============================================================================
+000000r 1                       .segment "CODE"
+000000r 1               
+000000r 1  4C rr rr             jmp     start
+000003r 1  0F           speed:  .byte   SPEED_DEFAULT
+000004r 1  00           ctrl_def:.byte  0               ; controls at start: 0 keyboard, 1 gamepad
+000005r 1  00           mute_def:.byte  0               ; sound at start: 0 on, 1 off
+000006r 1  00 00                .byte   0, 0            ; spare
+000008r 1               
+000008r 1               SFX_SND         = 1             ; (sfx_snd, sfx_toggle)
+000008r 1                       .include "ay/sfx.s"     ; music and effects on the AY-3-8910 card
+000008r 2               ; ============================================================================
+000008r 2               ; sfx.s - sound effects and music for games, on the AY-3-8910 card
+000008r 2               ;         ($7F22 register number, $7F23 data; 2 MHz chip clock)
+000008r 2               ;
+000008r 2               ; Include it in a game (it finds its note table one folder up, like
+000008r 2               ; sbc_api.inc:  ca65 -I ..):
+000008r 2               ;           .include "ay/sfx.s"
+000008r 2               ; and then
+000008r 2               ;   sfx_init    once at the start (silence, the timer)
+000008r 2               ;   sfx_poll    often: at least every 20 ms (the game loop, and the delay
+000008r 2               ;               loops).  It runs the sound 50 times a second, timed by the
+000008r 2               ;               VIA's timer 2 (polled: its interrupt stays off; timer 1 and
+000008r 2               ;               the gamepad aren't touched).  Keeps A, X, Y and the flags.
+000008r 2               ;   sfx_play    play script A on voice X (see below); it doesn't if that
+000008r 2               ;               voice is busy with a script of higher priority
+000008r 2               ;   sfx_stop    stop voice X
+000008r 2               ;   sfx_off     stop everything (and silence)
+000008r 2               ;   sfx_mute    0 = sound on, 1 = muted (the scripts still run, unheard)
+000008r 2               ;   sfx_hush    call before waiting without sfx_poll (a pause): silences the
+000008r 2               ;               card until the next tick
+000008r 2               ; With SFX_SND defined before the include, also:
+000008r 2               ;   sfx_snd     play script A on its own voice (sfx_prio's high 4 bits)
+000008r 2               ;   sfx_toggle  sound on / off (for the M key)
+000008r 2               ;
+000008r 2               ; The voices: 0-2 are the background (music, a saucer's hum ...) on the
+000008r 2               ; chip's channels A-C; 3-5 are the foreground on the same channels.  While
+000008r 2               ; a foreground voice plays, it is heard instead of the background voice of
+000008r 2               ; its channel, which carries on unheard and comes back when it stops.
+000008r 2               ;
+000008r 2               ; A game lists its scripts in sfx_scripts (.word address) and their
+000008r 2               ; priorities in sfx_prio (.byte, higher wins), indexed by script number.
+000008r 2               ;
+000008r 2               ; A script is bytes, run 50 times a second until it waits:
+000008r 2               ;   $80-$FF         wait 1-128 ticks (1/50 s each): $80 + ticks - 1
+000008r 2               ;   $20-$7F         note 0-95 (C1 .. B8, A4 = 45): $20 + note; the
+000008r 2               ;                   volume goes back to the VOL level, the decay restarts;
+000008r 2               ;                   then it waits LEN ticks (if LEN isn't 0)
+000008r 2               ;   SX_END          (0) the end: the voice stops
+000008r 2               ;   SX_PER  lo, hi  tone period (12 bits): 2 MHz / (16 x period) Hz
+000008r 2               ;   SX_VOL  v       volume 0-15 (also the level each note starts at)
+000008r 2               ;   SX_NOISE n      noise period 0-31 (for the whole chip)
+000008r 2               ;   SX_MIX  m       bit 0 tone on, bit 1 noise on
+000008r 2               ;   SX_SWEEP lo, hi add this (signed) to the period every tick (0 = off)
+000008r 2               ;   SX_DECAY d      the volume drops by 1 every d ticks (0 = holds)
+000008r 2               ;   SX_LOOP c       the start of a part to play c times (0 = for ever)
+000008r 2               ;   SX_NEXT         the end of that part
+000008r 2               ;   SX_JUMP lo, hi  go on at another script (for music that repeats)
+000008r 2               ;   SX_REST         volume 0 until the next note (and wait LEN ticks)
+000008r 2               ;   SX_LEN t        notes and rests wait t ticks each from now on (music:
+000008r 2               ;                   a byte a note); 0 (the start) = they don't wait
+000008r 2               ; ============================================================================
+000008r 2               
+000008r 2               ; ---- variables (123 bytes): in the BSS, or at SFX_VARS if the game sets it
+000008r 2               ;      (SMB puts them at $0100, the bottom of the stack page) ----------------
+000008r 2               .ifdef SFX_VARS
+000008r 2               sfx_vars        = SFX_VARS
+000008r 2               sfx_lo          = sfx_vars
+000008r 2               sfx_hi          = sfx_lo + 6
+000008r 2               sfx_wait        = sfx_hi + 6
+000008r 2               sfx_perl        = sfx_wait + 6
+000008r 2               sfx_perh        = sfx_perl + 6
+000008r 2               sfx_swl         = sfx_perh + 6
+000008r 2               sfx_swh         = sfx_swl + 6
+000008r 2               sfx_vol         = sfx_swh + 6
+000008r 2               sfx_base        = sfx_vol + 6
+000008r 2               sfx_dec         = sfx_base + 6
+000008r 2               sfx_decc        = sfx_dec + 6
+000008r 2               sfx_mix         = sfx_decc + 6
+000008r 2               sfx_noise       = sfx_mix + 6
+000008r 2               sfx_lpl         = sfx_noise + 6
+000008r 2               sfx_lph         = sfx_lpl + 6
+000008r 2               sfx_lcnt        = sfx_lph + 6
+000008r 2               sfx_vprio       = sfx_lcnt + 6
+000008r 2               sfx_len         = sfx_vprio + 6
+000008r 2               sfx_runs        = sfx_len + 6
+000008r 2               sfx_mixer       = sfx_runs + 1
+000008r 2               sfx_chan        = sfx_mixer + 1
+000008r 2               sfx_guard       = sfx_chan + 1
+000008r 2               sfx_mute        = sfx_guard + 2
+000008r 2               sfx_sa          = sfx_mute + 1
+000008r 2               sfx_sx          = sfx_sa + 1
+000008r 2               sfx_sy          = sfx_sx + 1
+000008r 2               sfx_vars_end    = sfx_sy + 1
+000008r 2               .else
+000008r 2                       .segment "BSS"
+000000r 2               sfx_vars:
+000000r 2  xx xx xx xx  sfx_lo:     .res 6              ; script pointer (high byte 0: voice off)
+000004r 2  xx xx        
+000006r 2  xx xx xx xx  sfx_hi:     .res 6
+00000Ar 2  xx xx        
+00000Cr 2  xx xx xx xx  sfx_wait:   .res 6
+000010r 2  xx xx        
+000012r 2  xx xx xx xx  sfx_perl:   .res 6              ; tone period
+000016r 2  xx xx        
+000018r 2  xx xx xx xx  sfx_perh:   .res 6
+00001Cr 2  xx xx        
+00001Er 2  xx xx xx xx  sfx_swl:    .res 6              ; sweep
+000022r 2  xx xx        
+000024r 2  xx xx xx xx  sfx_swh:    .res 6
+000028r 2  xx xx        
+00002Ar 2  xx xx xx xx  sfx_vol:    .res 6
+00002Er 2  xx xx        
+000030r 2  xx xx xx xx  sfx_base:   .res 6              ; the volume notes start at
+000034r 2  xx xx        
+000036r 2  xx xx xx xx  sfx_dec:    .res 6              ; decay: ticks a step
+00003Ar 2  xx xx        
+00003Cr 2  xx xx xx xx  sfx_decc:   .res 6
+000040r 2  xx xx        
+000042r 2  xx xx xx xx  sfx_mix:    .res 6
+000046r 2  xx xx        
+000048r 2  xx xx xx xx  sfx_noise:  .res 6
+00004Cr 2  xx xx        
+00004Er 2  xx xx xx xx  sfx_lpl:    .res 6              ; loop start
+000052r 2  xx xx        
+000054r 2  xx xx xx xx  sfx_lph:    .res 6
+000058r 2  xx xx        
+00005Ar 2  xx xx xx xx  sfx_lcnt:   .res 6
+00005Er 2  xx xx        
+000060r 2  xx xx xx xx  sfx_vprio:  .res 6
+000064r 2  xx xx        
+000066r 2  xx xx xx xx  sfx_len:    .res 6              ; LEN
+00006Ar 2  xx xx        
+00006Cr 2  xx           sfx_runs:   .res 1
+00006Dr 2  xx           sfx_mixer:  .res 1
+00006Er 2  xx           sfx_chan:   .res 1
+00006Fr 2  xx xx        sfx_guard:  .res 2
+000071r 2  xx           sfx_mute:   .res 1
+000072r 2  xx           sfx_sa:     .res 1              ; (sfx_snd)
+000073r 2  xx           sfx_sx:     .res 1
+000074r 2  xx           sfx_sy:     .res 1
+000075r 2               sfx_vars_end:
+000075r 2                       .segment "CODE"
+000008r 2               .endif
+000008r 2               
+000008r 2               SX_END          = 0
+000008r 2               SX_PER          = 1
+000008r 2               SX_VOL          = 2
+000008r 2               SX_NOISE        = 3
+000008r 2               SX_MIX          = 4
+000008r 2               SX_SWEEP        = 5
+000008r 2               SX_DECAY        = 6
+000008r 2               SX_LOOP         = 7
+000008r 2               SX_NEXT         = 8
+000008r 2               SX_JUMP         = 9
+000008r 2               SX_REST         = 10
+000008r 2               SX_LEN          = 11
+000008r 2               .define SX_WAIT(t)  ($80 + (t) - 1)
+000008r 2               .define SX_NOTE(n)  ($20 + (n))
+000008r 2               
+000008r 2               SFX_AY_ADDR     = $7F22
+000008r 2               SFX_AY_DATA     = $7F23
+000008r 2               SFX_T2CL        = $7F08
+000008r 2               SFX_T2CH        = $7F09
+000008r 2               SFX_ACR         = $7F0B
+000008r 2               SFX_IFR         = $7F0D
+000008r 2               SFX_IER         = $7F0E
+000008r 2               
+000008r 2               ; the timer counts a 50th of a second in SFX_RUNS runs of SFX_COUNT cycles
+000008r 2               ; (it holds 16 bits)
+000008r 2               SFX_CYCLES      = CLOCK_MHZ * 20000
+000008r 2               SFX_RUNS        = (SFX_CYCLES + 65535) / 65536
+000008r 2               SFX_COUNT       = SFX_CYCLES / SFX_RUNS - 2
+000008r 2               
+000008r 2               ; ---- the routines ------------------------------------------------------------------------
+000008r 2               sfx_init:
+000008r 2  A9 00                lda     #0
+00000Ar 2  A2 74                ldx     #sfx_vars_end - sfx_vars - 1
+00000Cr 2  9D rr rr     @c:     sta     sfx_vars,x
+00000Fr 2  CA                   dex
+000010r 2  10 FA                bpl     @c
+000012r 2  AD 0B 7F             lda     SFX_ACR         ; timer 2: one shot, its interrupt off
+000015r 2  29 DF                and     #$DF
+000017r 2  8D 0B 7F             sta     SFX_ACR
+00001Ar 2  A9 20                lda     #$20
+00001Cr 2  8D 0E 7F             sta     SFX_IER
+00001Fr 2  A9 01                lda     #SFX_RUNS
+000021r 2  8D rr rr             sta     sfx_runs
+000024r 2  A9 3E                lda     #<SFX_COUNT
+000026r 2  8D 08 7F             sta     SFX_T2CL
+000029r 2  A9 9C                lda     #>SFX_COUNT
+00002Br 2  8D 09 7F             sta     SFX_T2CH
+00002Er 2                       ; (on into sfx_off)
+00002Er 2               
+00002Er 2               ; stop every voice, silence
+00002Er 2               sfx_off:
+00002Er 2  48                   pha
+00002Fr 2  8A                   txa
+000030r 2  48                   pha
+000031r 2  A2 05                ldx     #5
+000033r 2  A9 00                lda     #0
+000035r 2  9D rr rr     @v:     sta     sfx_hi,x
+000038r 2  CA                   dex
+000039r 2  10 FA                bpl     @v
+00003Br 2  68                   pla
+00003Cr 2  AA                   tax
+00003Dr 2  68                   pla
+00003Er 2                       ; (on into sfx_hush)
+00003Er 2               
+00003Er 2               ; silence the card (until the next tick).  Keeps A, X, Y.
+00003Er 2               sfx_hush:
+00003Er 2  48                   pha
+00003Fr 2  8A                   txa
+000040r 2  48                   pha
+000041r 2  A9 07                lda     #7              ; mixer: all off
+000043r 2  8D 22 7F             sta     SFX_AY_ADDR
+000046r 2  A9 3F                lda     #$3F
+000048r 2  8D 23 7F             sta     SFX_AY_DATA
+00004Br 2  A2 08                ldx     #8              ; volumes 0
+00004Dr 2  A9 00                lda     #0
+00004Fr 2  8E 22 7F     @v:     stx     SFX_AY_ADDR
+000052r 2  8D 23 7F             sta     SFX_AY_DATA
+000055r 2  E8                   inx
+000056r 2  E0 0B                cpx     #11
+000058r 2  D0 F5                bne     @v
+00005Ar 2  68                   pla
+00005Br 2  AA                   tax
+00005Cr 2  68                   pla
+00005Dr 2  60                   rts
+00005Er 2               
+00005Er 2               ; stop voice X
+00005Er 2               sfx_stop:
+00005Er 2  48                   pha
+00005Fr 2  A9 00                lda     #0
+000061r 2  9D rr rr             sta     sfx_hi,x
+000064r 2  68                   pla
+000065r 2  60                   rts
+000066r 2               
+000066r 2               ; play script A on voice X (0-5); not if the voice is playing a script of
+000066r 2               ; higher priority.  Keeps X.
+000066r 2               sfx_play:
+000066r 2  A8                   tay
+000067r 2  BD rr rr             lda     sfx_hi,x
+00006Ar 2  F0 09                beq     @go
+00006Cr 2  B9 rr rr             lda     sfx_prio,y
+00006Fr 2  DD rr rr             cmp     sfx_vprio,x
+000072r 2  B0 01                bcs     @go
+000074r 2  60                   rts
+000075r 2  B9 rr rr     @go:    lda     sfx_prio,y
+000078r 2  9D rr rr             sta     sfx_vprio,x
+00007Br 2  98                   tya
+00007Cr 2  0A                   asl
+00007Dr 2  A8                   tay
+00007Er 2  B9 rr rr             lda     sfx_scripts,y
+000081r 2  9D rr rr             sta     sfx_lo,x
+000084r 2  B9 rr rr             lda     sfx_scripts+1,y
+000087r 2  9D rr rr             sta     sfx_hi,x
+00008Ar 2  A9 00                lda     #0
+00008Cr 2  9D rr rr             sta     sfx_wait,x
+00008Fr 2  9D rr rr             sta     sfx_swl,x
+000092r 2  9D rr rr             sta     sfx_swh,x
+000095r 2  9D rr rr             sta     sfx_dec,x
+000098r 2  9D rr rr             sta     sfx_perl,x
+00009Br 2  9D rr rr             sta     sfx_perh,x
+00009Er 2  9D rr rr             sta     sfx_len,x
+0000A1r 2  A9 0F                lda     #15
+0000A3r 2  9D rr rr             sta     sfx_base,x
+0000A6r 2  9D rr rr             sta     sfx_vol,x
+0000A9r 2  A9 01                lda     #1              ; tone on, noise off
+0000ABr 2  9D rr rr             sta     sfx_mix,x
+0000AEr 2  60                   rts
+0000AFr 2               
+0000AFr 2               ; run the sound if a tick has come.  Keeps A, X, Y and the flags (so it can
+0000AFr 2               ; go anywhere: in putc, in a loop ...)
+0000AFr 2               sfx_poll:
+0000AFr 2  08                   php
+0000B0r 2  48                   pha
+0000B1r 2  AD 0D 7F             lda     SFX_IFR
+0000B4r 2  29 20                and     #$20
+0000B6r 2  D0 03                bne     @t
+0000B8r 2  68                   pla
+0000B9r 2  28                   plp
+0000BAr 2  60                   rts
+0000BBr 2  8A           @t:     txa
+0000BCr 2  48                   pha
+0000BDr 2  98                   tya
+0000BEr 2  48                   pha
+0000BFr 2                       ; the timer has gone on counting down past 0 ($FFFF, $FFFE ...): how
+0000BFr 2                       ; late this call is.  The next run is that much shorter, so the beat
+0000BFr 2                       ; keeps time however long the game takes between calls.
+0000BFr 2  AE 09 7F     @rd:    ldx     SFX_T2CH
+0000C2r 2  AD 08 7F             lda     SFX_T2CL
+0000C5r 2  EC 09 7F             cpx     SFX_T2CH        ; (the high byte changed in between: again)
+0000C8r 2  D0 F5                bne     @rd
+0000CAr 2  38                   sec
+0000CBr 2  69 22                adc     #<(SFX_COUNT - SFX_FIX)
+0000CDr 2  A8                   tay
+0000CEr 2  8A                   txa
+0000CFr 2  69 9C                adc     #>(SFX_COUNT - SFX_FIX)
+0000D1r 2  B0 04                bcs     @set
+0000D3r 2  A0 64                ldy     #100            ; (more than a whole run late: soon)
+0000D5r 2  A9 00                lda     #0
+0000D7r 2  8C 08 7F     @set:   sty     SFX_T2CL
+0000DAr 2  8D 09 7F             sta     SFX_T2CH
+0000DDr 2  CE rr rr             dec     sfx_runs
+0000E0r 2  D0 08                bne     @r
+0000E2r 2  A9 01                lda     #SFX_RUNS
+0000E4r 2  8D rr rr             sta     sfx_runs
+0000E7r 2  20 rr rr             jsr     sfx_tick
+0000EAr 2  68           @r:     pla
+0000EBr 2  A8                   tay
+0000ECr 2  68                   pla
+0000EDr 2  AA                   tax
+0000EEr 2  68                   pla
+0000EFr 2  28                   plp
+0000F0r 2  60                   rts
+0000F1r 2               SFX_FIX = 28                    ; cycles from reading the timer to starting it
+0000F1r 2               
+0000F1r 2               .ifdef SFX_SND
+0000F1r 2               ; ---- (with SFX_SND defined) ---------------------------------------------------
+0000F1r 2               ; play script A on its own voice: the high 4 bits of its sfx_prio byte (the
+0000F1r 2               ; low 4 are its priority).  Keeps A, X and Y.
+0000F1r 2               sfx_snd:
+0000F1r 2  8D rr rr             sta     sfx_sa
+0000F4r 2  8E rr rr             stx     sfx_sx
+0000F7r 2  8C rr rr             sty     sfx_sy
+0000FAr 2  A8                   tay
+0000FBr 2  B9 rr rr             lda     sfx_prio,y
+0000FEr 2  4A                   lsr
+0000FFr 2  4A                   lsr
+000100r 2  4A                   lsr
+000101r 2  4A                   lsr
+000102r 2  AA                   tax
+000103r 2  98                   tya
+000104r 2  20 rr rr             jsr     sfx_play
+000107r 2  AD rr rr             lda     sfx_sa
+00010Ar 2  AE rr rr             ldx     sfx_sx
+00010Dr 2  AC rr rr             ldy     sfx_sy
+000110r 2  60                   rts
+000111r 2               
+000111r 2               ; sound on / off (the M key).  Keeps X and Y.
+000111r 2               sfx_toggle:
+000111r 2  AD rr rr             lda     sfx_mute
+000114r 2  49 01                eor     #1
+000116r 2  8D rr rr             sta     sfx_mute
+000119r 2  4C rr rr             jmp     sfx_hush
+00011Cr 2               .endif
+00011Cr 2               
+00011Cr 2               ; ---- a tick: every voice a step, then the card ---------------------------------------------
+00011Cr 2               sfx_tick:
+00011Cr 2  A2 05                ldx     #5
+00011Er 2  BD rr rr     @v:     lda     sfx_hi,x
+000121r 2  F0 03                beq     @n
+000123r 2  20 rr rr             jsr     sfx_voice
+000126r 2  CA           @n:     dex
+000127r 2  10 F5                bpl     @v
+000129r 2                       ; the card: each channel hears its foreground voice if that plays,
+000129r 2                       ; else its background voice
+000129r 2  A9 3F                lda     #$3F
+00012Br 2  8D rr rr             sta     sfx_mixer
+00012Er 2  A2 02                ldx     #2
+000130r 2  8E rr rr     @ch:    stx     sfx_chan
+000133r 2  8A                   txa
+000134r 2  18                   clc
+000135r 2  69 03                adc     #3
+000137r 2  A8                   tay                     ; foreground voice
+000138r 2  B9 rr rr             lda     sfx_hi,y
+00013Br 2  D0 0C                bne     @have
+00013Dr 2  AC rr rr             ldy     sfx_chan        ; background voice
+000140r 2  B9 rr rr             lda     sfx_hi,y
+000143r 2  D0 04                bne     @have
+000145r 2  A9 00                lda     #0              ; neither: silent
+000147r 2  F0 4E                beq     @vol
+000149r 2  8A           @have:  txa                     ; the tone period
+00014Ar 2  0A                   asl
+00014Br 2  8D 22 7F             sta     SFX_AY_ADDR
+00014Er 2  B9 rr rr             lda     sfx_perl,y
+000151r 2  8D 23 7F             sta     SFX_AY_DATA
+000154r 2  8A                   txa
+000155r 2  0A                   asl
+000156r 2  09 01                ora     #1
+000158r 2  8D 22 7F             sta     SFX_AY_ADDR
+00015Br 2  B9 rr rr             lda     sfx_perh,y
+00015Er 2  29 0F                and     #$0F
+000160r 2  8D 23 7F             sta     SFX_AY_DATA
+000163r 2  B9 rr rr             lda     sfx_mix,y       ; the mixer bits (0 = on)
+000166r 2  4A                   lsr
+000167r 2  90 09                bcc     @nt
+000169r 2  BD rr rr             lda     sfx_tone_on,x
+00016Cr 2  2D rr rr             and     sfx_mixer
+00016Fr 2  8D rr rr             sta     sfx_mixer
+000172r 2  B9 rr rr     @nt:    lda     sfx_mix,y
+000175r 2  29 02                and     #2
+000177r 2  F0 14                beq     @nn
+000179r 2  BD rr rr             lda     sfx_noise_on,x
+00017Cr 2  2D rr rr             and     sfx_mixer
+00017Fr 2  8D rr rr             sta     sfx_mixer
+000182r 2  A9 06                lda     #6
+000184r 2  8D 22 7F             sta     SFX_AY_ADDR
+000187r 2  B9 rr rr             lda     sfx_noise,y
+00018Ar 2  8D 23 7F             sta     SFX_AY_DATA
+00018Dr 2  B9 rr rr     @nn:    lda     sfx_vol,y
+000190r 2  AC rr rr             ldy     sfx_mute
+000193r 2  F0 02                beq     @vol
+000195r 2  A9 00                lda     #0
+000197r 2  AC rr rr     @vol:   ldy     sfx_chan
+00019Ar 2  AA                   tax
+00019Br 2  98                   tya
+00019Cr 2  18                   clc
+00019Dr 2  69 08                adc     #8
+00019Fr 2  8D 22 7F             sta     SFX_AY_ADDR
+0001A2r 2  8E 23 7F             stx     SFX_AY_DATA
+0001A5r 2  AE rr rr             ldx     sfx_chan
+0001A8r 2  CA                   dex
+0001A9r 2  10 85                bpl     @ch
+0001ABr 2  A9 07                lda     #7
+0001ADr 2  8D 22 7F             sta     SFX_AY_ADDR
+0001B0r 2  AD rr rr             lda     sfx_mixer
+0001B3r 2  8D 23 7F             sta     SFX_AY_DATA
+0001B6r 2  60                   rts
+0001B7r 2  3E 3D 3B     sfx_tone_on:    .byte   $3E, $3D, $3B
+0001BAr 2  37 2F 1F     sfx_noise_on:   .byte   $37, $2F, $1F
+0001BDr 2               
+0001BDr 2               ; one voice (X): the sweep and the decay, then the script when its wait
+0001BDr 2               ; is over
+0001BDr 2               sfx_voice:
+0001BDr 2  BD rr rr             lda     sfx_swl,x       ; the sweep
+0001C0r 2  1D rr rr             ora     sfx_swh,x
+0001C3r 2  F0 13                beq     @ns
+0001C5r 2  BD rr rr             lda     sfx_perl,x
+0001C8r 2  18                   clc
+0001C9r 2  7D rr rr             adc     sfx_swl,x
+0001CCr 2  9D rr rr             sta     sfx_perl,x
+0001CFr 2  BD rr rr             lda     sfx_perh,x
+0001D2r 2  7D rr rr             adc     sfx_swh,x
+0001D5r 2  9D rr rr             sta     sfx_perh,x
+0001D8r 2  BD rr rr     @ns:    lda     sfx_dec,x       ; the decay
+0001DBr 2  F0 10                beq     @nd
+0001DDr 2  DE rr rr             dec     sfx_decc,x
+0001E0r 2  D0 0B                bne     @nd
+0001E2r 2  9D rr rr             sta     sfx_decc,x
+0001E5r 2  BD rr rr             lda     sfx_vol,x
+0001E8r 2  F0 03                beq     @nd
+0001EAr 2  DE rr rr             dec     sfx_vol,x
+0001EDr 2  BD rr rr     @nd:    lda     sfx_wait,x
+0001F0r 2  F0 06                beq     @run
+0001F2r 2  DE rr rr             dec     sfx_wait,x
+0001F5r 2  F0 01                beq     @run
+0001F7r 2  60                   rts
+0001F8r 2  A9 28        @run:   lda     #40             ; (at most 40 commands a tick: a script that
+0001FAr 2  8D rr rr             sta     sfx_guard       ;  never waits can't hang the game)
+0001FDr 2  CE rr rr     @cmd:   dec     sfx_guard
+000200r 2  F0 76                beq     @stop
+000202r 2  20 rr rr             jsr     sfx_byte
+000205r 2  C9 80                cmp     #$80
+000207r 2  90 09                bcc     @nw
+000209r 2  29 7F                and     #$7F            ; wait
+00020Br 2  9D rr rr             sta     sfx_wait,x
+00020Er 2  FE rr rr             inc     sfx_wait,x
+000211r 2  60                   rts
+000212r 2  C9 20        @nw:    cmp     #$20
+000214r 2  90 54                bcc     @op
+000216r 2  38                   sec                     ; a note
+000217r 2  E9 20                sbc     #$20
+000219r 2  C9 60                cmp     #96
+00021Br 2  90 02                bcc     @nt
+00021Dr 2  A9 5F                lda     #95
+00021Fr 2  A0 00        @nt:    ldy     #0              ; octave Y, note A in it
+000221r 2  C9 0C        @oc:    cmp     #12
+000223r 2  90 05                bcc     @ok
+000225r 2  E9 0C                sbc     #12
+000227r 2  C8                   iny
+000228r 2  D0 F7                bne     @oc
+00022Ar 2  8C rr rr     @ok:    sty     sfx_guard+1     ; (as a count)
+00022Dr 2  A8                   tay
+00022Er 2  B9 rr rr             lda     sfx_c1_lo,y     ; the period in octave 1, halved for each
+000231r 2  9D rr rr             sta     sfx_perl,x      ; octave up
+000234r 2  B9 rr rr             lda     sfx_c1_hi,y
+000237r 2  AC rr rr             ldy     sfx_guard+1
+00023Ar 2  F0 16                beq     @p
+00023Cr 2  4A           @sh:    lsr
+00023Dr 2  7E rr rr             ror     sfx_perl,x
+000240r 2  88                   dey
+000241r 2  D0 F9                bne     @sh
+000243r 2  9D rr rr             sta     sfx_perh,x      ; (rounded: the last bit out was a half)
+000246r 2  90 0D                bcc     @r0
+000248r 2  FE rr rr             inc     sfx_perl,x
+00024Br 2  D0 08                bne     @r0
+00024Dr 2  FE rr rr             inc     sfx_perh,x
+000250r 2  D0 03                bne     @r0
+000252r 2  9D rr rr     @p:     sta     sfx_perh,x
+000255r 2               @r0:
+000255r 2  BD rr rr             lda     sfx_base,x
+000258r 2  9D rr rr             sta     sfx_vol,x
+00025Br 2  BD rr rr             lda     sfx_dec,x
+00025Er 2  9D rr rr             sta     sfx_decc,x
+000261r 2  BD rr rr     @len:   lda     sfx_len,x       ; (LEN: wait that long)
+000264r 2  F0 97                beq     @cmd
+000266r 2  9D rr rr             sta     sfx_wait,x
+000269r 2  60                   rts
+00026Ar 2  C9 0C        @op:    cmp     #12
+00026Cr 2  B0 0A                bcs     @stop
+00026Er 2  A8                   tay
+00026Fr 2  B9 rr rr             lda     @hi,y
+000272r 2  48                   pha
+000273r 2  B9 rr rr             lda     @lo,y
+000276r 2  48                   pha
+000277r 2  60                   rts                     ; (to the command, which goes back to @cmd)
+000278r 2  A9 00        @stop:  lda     #0
+00027Ar 2  9D rr rr             sta     sfx_hi,x
+00027Dr 2  9D rr rr             sta     sfx_vol,x
+000280r 2  60                   rts
+000281r 2  rr rr rr rr  @lo:    .lobytes  @stop-1, @per-1, @vl-1, @noi-1, @mix-1, @sw-1, @dc-1, @lp-1, @nx-1, @jp-1, @rest-1, @ln-1
+000285r 2  rr rr rr rr  
+000289r 2  rr rr rr rr  
+00028Dr 2  rr rr rr rr  @hi:    .hibytes  @stop-1, @per-1, @vl-1, @noi-1, @mix-1, @sw-1, @dc-1, @lp-1, @nx-1, @jp-1, @rest-1, @ln-1
+000291r 2  rr rr rr rr  
+000295r 2  rr rr rr rr  
+000299r 2  20 rr rr     @per:   jsr     sfx_byte
+00029Cr 2  9D rr rr             sta     sfx_perl,x
+00029Fr 2  20 rr rr             jsr     sfx_byte
+0002A2r 2  9D rr rr             sta     sfx_perh,x
+0002A5r 2  4C rr rr             jmp     @cmd
+0002A8r 2  20 rr rr     @vl:    jsr     sfx_byte
+0002ABr 2  9D rr rr             sta     sfx_base,x
+0002AEr 2  9D rr rr             sta     sfx_vol,x
+0002B1r 2  BD rr rr             lda     sfx_dec,x
+0002B4r 2  9D rr rr             sta     sfx_decc,x
+0002B7r 2  4C rr rr             jmp     @cmd
+0002BAr 2  20 rr rr     @noi:   jsr     sfx_byte
+0002BDr 2  9D rr rr             sta     sfx_noise,x
+0002C0r 2  4C rr rr             jmp     @cmd
+0002C3r 2  20 rr rr     @mix:   jsr     sfx_byte
+0002C6r 2  9D rr rr             sta     sfx_mix,x
+0002C9r 2  4C rr rr             jmp     @cmd
+0002CCr 2  20 rr rr     @sw:    jsr     sfx_byte
+0002CFr 2  9D rr rr             sta     sfx_swl,x
+0002D2r 2  20 rr rr             jsr     sfx_byte
+0002D5r 2  9D rr rr             sta     sfx_swh,x
+0002D8r 2  4C rr rr             jmp     @cmd
+0002DBr 2  20 rr rr     @dc:    jsr     sfx_byte
+0002DEr 2  9D rr rr             sta     sfx_dec,x
+0002E1r 2  9D rr rr             sta     sfx_decc,x
+0002E4r 2  4C rr rr             jmp     @cmd
+0002E7r 2  20 rr rr     @lp:    jsr     sfx_byte
+0002EAr 2  9D rr rr             sta     sfx_lcnt,x
+0002EDr 2  BD rr rr             lda     sfx_lo,x
+0002F0r 2  9D rr rr             sta     sfx_lpl,x
+0002F3r 2  BD rr rr             lda     sfx_hi,x
+0002F6r 2  9D rr rr             sta     sfx_lph,x
+0002F9r 2  4C rr rr             jmp     @cmd
+0002FCr 2  BD rr rr     @nx:    lda     sfx_lcnt,x
+0002FFr 2  F0 05                beq     @back           ; (0: for ever)
+000301r 2  DE rr rr             dec     sfx_lcnt,x
+000304r 2  F0 0C                beq     @go
+000306r 2  BD rr rr     @back:  lda     sfx_lpl,x
+000309r 2  9D rr rr             sta     sfx_lo,x
+00030Cr 2  BD rr rr             lda     sfx_lph,x
+00030Fr 2  9D rr rr             sta     sfx_hi,x
+000312r 2  4C rr rr     @go:    jmp     @cmd
+000315r 2  20 rr rr     @jp:    jsr     sfx_byte
+000318r 2  48                   pha
+000319r 2  20 rr rr             jsr     sfx_byte
+00031Cr 2  9D rr rr             sta     sfx_hi,x
+00031Fr 2  68                   pla
+000320r 2  9D rr rr             sta     sfx_lo,x
+000323r 2  4C rr rr             jmp     @cmd
+000326r 2  A9 00        @rest:  lda     #0
+000328r 2  9D rr rr             sta     sfx_vol,x
+00032Br 2  4C rr rr             jmp     @len
+00032Er 2  20 rr rr     @ln:    jsr     sfx_byte
+000331r 2  9D rr rr             sta     sfx_len,x
+000334r 2  4C rr rr             jmp     @cmd
+000337r 2               
+000337r 2               ; the next byte of voice X's script
+000337r 2               sfx_byte:
+000337r 2  BD rr rr             lda     sfx_lo,x
+00033Ar 2  8D rr rr             sta     @ld+1
+00033Dr 2  BD rr rr             lda     sfx_hi,x
+000340r 2  8D rr rr             sta     @ld+2
+000343r 2  AD FF FF     @ld:    lda     $FFFF
+000346r 2  FE rr rr             inc     sfx_lo,x
+000349r 2  D0 03                bne     @r
+00034Br 2  FE rr rr             inc     sfx_hi,x
+00034Er 2  60           @r:     rts
+00034Fr 2               
+00034Fr 2               ; the tone periods of C1 .. B1 for the 2 MHz chip clock: 2 MHz / (16 x
+00034Fr 2               ; frequency); each octave up is half (to within a third of a percent)
+00034Fr 2  EE 18 4D 8E  sfx_c1_lo:  .lobytes 3822, 3608, 3405, 3214, 3034, 2863, 2703, 2551, 2408, 2273, 2145, 2025
+000353r 2  DA 2F 8F F7  
+000357r 2  68 E1 61 E9  
+00035Br 2  0E 0E 0D 0C  sfx_c1_hi:  .hibytes 3822, 3608, 3405, 3214, 3034, 2863, 2703, 2551, 2408, 2273, 2145, 2025
+00035Fr 2  0B 0B 0A 09  
+000363r 2  09 08 08 07  
+000367r 2               
+000367r 2               
+000367r 1               
+000367r 1               ; ----------------------------------------------------------------------------
+000367r 1               ; I/O helpers
+000367r 1               ; ----------------------------------------------------------------------------
+000367r 1               putc            = SBC_CHROUT    ; preserves A, X, Y
+000367r 1               getc            = SBC_CHRIN     ; carry set = key in A
+000367r 1               
+000367r 1               ; cursor to column X, row Y (preserves X, Y)
+000367r 1  A9 0F        gotoxy: lda     #TC_ROW
+000369r 1  20 03 FE             jsr     putc
+00036Cr 1  98                   tya
+00036Dr 1  20 03 FE             jsr     putc
+000370r 1  A9 0E                lda     #TC_COL
+000372r 1  20 03 FE             jsr     putc
+000375r 1  8A                   txa
+000376r 1  20 03 FE             jsr     putc
+000379r 1  A9 FF                lda     #$FF            ; the board's cursor tracking is now unsure
+00037Br 1  8D rr rr             sta     cur_y
+00037Er 1  60                   rts
+00037Fr 1               
+00037Fr 1               ; cursor to column X of the current row (preserves X, Y)
+00037Fr 1  A9 0E        setcol: lda     #TC_COL
+000381r 1  20 03 FE             jsr     putc
+000384r 1  8A                   txa
+000385r 1  4C 03 FE             jmp     putc
+000388r 1               
+000388r 1               ; print the string at A (lo) / Y (hi), ended by TERM (any length)
+000388r 1  8D rr rr     print:  sta     @ld+1
+00038Br 1  8C rr rr             sty     @ld+2
+00038Er 1  AD FF FF     @ld:    lda     $FFFF
+000391r 1  C9 FF                cmp     #TERM
+000393r 1  F0 0D                beq     @done
+000395r 1  20 03 FE             jsr     putc
+000398r 1  EE rr rr             inc     @ld+1
+00039Br 1  D0 F1                bne     @ld
+00039Dr 1  EE rr rr             inc     @ld+2
+0003A0r 1  D0 EC                bne     @ld
+0003A2r 1  A9 FF        @done:  lda     #$FF            ; strings may move the cursor or change
+0003A4r 1  8D rr rr             sta     cur_y           ; the attribute: both unknown now
+0003A7r 1  8D rr rr             sta     attr
+0003AAr 1  60                   rts
+0003ABr 1               
+0003ABr 1               txt_mode:
+0003ABr 1  AD rr rr             lda     attr
+0003AEr 1  F0 04                beq     @r
+0003B0r 1  A9 00                lda     #ATTR_TEXT
+0003B2r 1  F0 0B                beq     set_attr
+0003B4r 1  60           @r:     rts
+0003B5r 1               gfx_mode:                       ; block graphics, no repeat
+0003B5r 1  AD rr rr             lda     attr
+0003B8r 1  C9 80                cmp     #ATTR_GFX
+0003BAr 1  D0 01                bne     @set
+0003BCr 1  60                   rts
+0003BDr 1  A9 80        @set:   lda     #ATTR_GFX
+0003BFr 1               set_attr:
+0003BFr 1  48                   pha                     ; the repeat count that goes with it
+0003C0r 1  29 78                and     #$78
+0003C2r 1  4A                   lsr
+0003C3r 1  4A                   lsr
+0003C4r 1  4A                   lsr
+0003C5r 1  D0 02                bne     @rc
+0003C7r 1  A9 01                lda     #1
+0003C9r 1  8D rr rr     @rc:    sta     cur_rep
+0003CCr 1  68                   pla
+0003CDr 1  8D rr rr             sta     attr
+0003D0r 1  48                   pha
+0003D1r 1  A9 18                lda     #TC_ATTR
+0003D3r 1  20 03 FE             jsr     putc
+0003D6r 1  68                   pla
+0003D7r 1  4C 03 FE             jmp     putc
+0003DAr 1               
+0003DAr 1               ; send A as a block graphics character (control codes need the 1A prefix)
+0003DAr 1  C9 20        putblk: cmp     #$20
+0003DCr 1  90 04                bcc     @lit
+0003DEr 1  C9 7F                cmp     #$7F
+0003E0r 1  D0 07                bne     @put
+0003E2r 1  48           @lit:   pha
+0003E3r 1  A9 1A                lda     #TC_LIT
+0003E5r 1  20 03 FE             jsr     putc
+0003E8r 1  68                   pla
+0003E9r 1  4C 03 FE     @put:   jmp     putc
+0003ECr 1               
+0003ECr 1               ; glyph A (a square, two characters): it is terminal tile A
+0003ECr 1               put_glyph:
+0003ECr 1  48                   pha
+0003EDr 1  A9 0B                lda     #TC_TILE
+0003EFr 1  20 03 FE             jsr     putc
+0003F2r 1  68                   pla
+0003F3r 1  4C 03 FE             jmp     putc
+0003F6r 1               
+0003F6r 1               ; store the squares in the terminal as tiles 0..NGLYPH-1 (2 x 1 characters),
+0003F6r 1               ; and the well's sides as tiles (1 x 20)
+0003F6r 1               def_tiles:
+0003F6r 1  A2 00                ldx     #0
+0003F8r 1  A9 19        @g:     lda     #TC_DEFTILE
+0003FAr 1  20 03 FE             jsr     putc
+0003FDr 1  8A                   txa
+0003FEr 1  20 03 FE             jsr     putc            ; slot = glyph number
+000401r 1  A9 02                lda     #2
+000403r 1  20 03 FE             jsr     putc
+000406r 1  A9 01                lda     #1
+000408r 1  20 03 FE             jsr     putc
+00040Br 1  BD rr rr             lda     glyph_l,x
+00040Er 1  20 03 FE             jsr     putc            ; (tile data needs no 1A prefix)
+000411r 1  BD rr rr             lda     glyph_r,x
+000414r 1  20 03 FE             jsr     putc
+000417r 1  E8                   inx
+000418r 1  E0 0B                cpx     #NGLYPH
+00041Ar 1  D0 DC                bne     @g
+00041Cr 1  A9 AA                lda     #$AA            ; the left side: right hand pixels
+00041Er 1  A2 0B                ldx     #T_LEFT
+000420r 1  20 rr rr             jsr     @side
+000423r 1  A9 55                lda     #$55            ; the right side: left hand pixels
+000425r 1  A2 0C                ldx     #T_RIGHT
+000427r 1  8D rr rr     @side:  sta     tmp
+00042Ar 1  A9 19                lda     #TC_DEFTILE
+00042Cr 1  20 03 FE             jsr     putc
+00042Fr 1  8A                   txa
+000430r 1  20 03 FE             jsr     putc
+000433r 1  A9 01                lda     #1
+000435r 1  20 03 FE             jsr     putc
+000438r 1  A9 14                lda     #20
+00043Ar 1  20 03 FE             jsr     putc
+00043Dr 1  A2 14                ldx     #20
+00043Fr 1  AD rr rr             lda     tmp
+000442r 1  20 03 FE     @s:     jsr     putc
+000445r 1  CA                   dex
+000446r 1  D0 FA                bne     @s
+000448r 1  60                   rts
+000449r 1               
+000449r 1               ; repeat each character (and tile) A times from now on (1..15), block graphics
+000449r 1  C9 02        set_rep:cmp     #2
+00044Br 1  90 07                bcc     @one
+00044Dr 1  0A                   asl
+00044Er 1  0A                   asl
+00044Fr 1  0A                   asl
+000450r 1  09 80                ora     #ATTR_GFX
+000452r 1  D0 02                bne     @set
+000454r 1  A9 80        @one:   lda     #ATTR_GFX
+000456r 1  CD rr rr     @set:   cmp     attr            ; (graphics on and this count already?)
+000459r 1  F0 03                beq     @r
+00045Br 1  4C rr rr             jmp     set_attr
+00045Er 1  60           @r:     rts
+00045Fr 1               
+00045Fr 1               ; print A as two BCD digits
+00045Fr 1  48           prbcd:  pha
+000460r 1  4A                   lsr
+000461r 1  4A                   lsr
+000462r 1  4A                   lsr
+000463r 1  4A                   lsr
+000464r 1  09 30                ora     #'0'
+000466r 1  20 03 FE             jsr     putc
+000469r 1  68                   pla
+00046Ar 1  29 0F                and     #$0F
+00046Cr 1  09 30                ora     #'0'
+00046Er 1  4C 03 FE             jmp     putc
+000471r 1               
+000471r 1               ; print A (0..99) as two decimal digits
+000471r 1  A2 30        pr_dec2:ldx     #'0'
+000473r 1  C9 0A        @t:     cmp     #10
+000475r 1  90 05                bcc     @u
+000477r 1  E9 0A                sbc     #10
+000479r 1  E8                   inx
+00047Ar 1  D0 F7                bne     @t
+00047Cr 1  48           @u:     pha
+00047Dr 1  8A                   txa
+00047Er 1  20 03 FE             jsr     putc
+000481r 1  68                   pla
+000482r 1  09 30                ora     #'0'
+000484r 1  4C 03 FE             jmp     putc
+000487r 1               
+000487r 1               ; 16 bit Galois LFSR.  A = a random byte.  Preserves X and Y.
+000487r 1  AD rr rr     rand:   lda     rng+1
+00048Ar 1  4A                   lsr
+00048Br 1  6E rr rr             ror     rng
+00048Er 1  90 02                bcc     @n
+000490r 1  49 B4                eor     #$B4
+000492r 1  8D rr rr     @n:     sta     rng+1
+000495r 1  4D rr rr             eor     rng
+000498r 1  60                   rts
+000499r 1               
+000499r 1               ; wait about A ms.  The inner loop is sized for the clock (CLOCK_MHZ in
+000499r 1               ; sbc_api.inc): 5 + 4 * (CLOCK_MHZ - 1) cycles a turn, DELAY_N turns a ms.
+000499r 1               DELAY_N = (1000 * CLOCK_MHZ - 7) / (5 + 4 * (CLOCK_MHZ - 1))
+000499r 1               delay_ms:
+000499r 1  AA                   tax
+00049Ar 1  F0 0D                beq     @done
+00049Cr 1  20 rr rr     @o:     jsr     sfx_poll        ; (the sound goes on while waiting)
+00049Fr 1  A0 DD                ldy     #DELAY_N
+0004A1r 1               @i:
+0004A1r 1  EA EA        .repeat CLOCK_MHZ - 1           ; (4 more cycles a turn for each MHz above 1)
+0004A3r 1                       nop
+0004A3r 1                       nop
+0004A3r 1               .endrepeat
+0004A3r 1  88                   dey
+0004A4r 1  D0 FB                bne     @i
+0004A6r 1  CA                   dex
+0004A7r 1  D0 F3                bne     @o
+0004A9r 1  60           @done:  rts
+0004AAr 1               
+0004AAr 1               ; wait about A x 50 ms
+0004AAr 1               delay_long:
+0004AAr 1  8D rr rr             sta     tmp
+0004ADr 1  A9 32        @l:     lda     #50
+0004AFr 1  20 rr rr             jsr     delay_ms
+0004B2r 1  20 rr rr             jsr     flush_in        ; keys pressed meanwhile are dropped (so the
+0004B5r 1  CE rr rr             dec     tmp             ; ROM's keyboard buffer never fills up)
+0004B8r 1  D0 F3                bne     @l
+0004BAr 1  60                   rts
+0004BBr 1               
+0004BBr 1               .macro MENU_IDLE
+0004BBr 1                       jsr     rand            ; (waiting for a key stirs the random numbers)
+0004BBr 1                       jsr     sfx_poll
+0004BBr 1               .endmacro
+0004BBr 1               CTRL_COL        = 19
+0004BBr 1               CTRL_ROW        = 18
+0004BBr 1               
+0004BBr 1               ; ============================================================================
+0004BBr 1               ; gamepad and menu input (shared by the SBC games)
+0004BBr 1               ; ============================================================================
+0004BBr 1               PAD_A           = $01           ; bits returned by SBC_PADSTATE
+0004BBr 1               PAD_B           = $02
+0004BBr 1               PAD_SELECT      = $04
+0004BBr 1               PAD_START       = $08
+0004BBr 1               PAD_UP          = $10
+0004BBr 1               PAD_DOWN        = $20
+0004BBr 1               PAD_LEFT        = $40
+0004BBr 1               PAD_RIGHT       = $80
+0004BBr 1               PAD_GO          = $80           ; menu_key's answer for gamepad A or Start
+0004BBr 1               
+0004BBr 1               ; read the gamepad: pad = buttons held now, padnew = buttons pressed since
+0004BBr 1               ; the last call.  Preserves X and Y (SBC_PADSTATE only changes A).
+0004BBr 1               read_pad:
+0004BBr 1  20 12 FE             jsr     SBC_PADSTATE
+0004BEr 1  C9 FF                cmp     #$FF            ; every button "pressed" = no pad
+0004C0r 1  D0 02                bne     @ok
+0004C2r 1  A9 00                lda     #0
+0004C4r 1  8D rr rr     @ok:    sta     pad
+0004C7r 1  AD rr rr             lda     padold
+0004CAr 1  49 FF                eor     #$FF
+0004CCr 1  2D rr rr             and     pad
+0004CFr 1  8D rr rr             sta     padnew
+0004D2r 1  AD rr rr             lda     pad
+0004D5r 1  8D rr rr             sta     padold
+0004D8r 1  60                   rts
+0004D9r 1               
+0004D9r 1               ; throw away waiting characters
+0004D9r 1               flush_in:
+0004D9r 1  20 00 FE             jsr     getc
+0004DCr 1  B0 FB                bcs     flush_in
+0004DEr 1  60                   rts
+0004DFr 1               
+0004DFr 1               ; carry set if A is one of the characters the gamepad driver types for the
+0004DFr 1               ; pad (W A S D and space).  Those are ignored in gamepad mode so that one
+0004DFr 1               ; press doesn't act twice.  Preserves A.
+0004DFr 1               pad_typed:
+0004DFr 1  C9 20                cmp     #' '
+0004E1r 1  F0 12                beq     @y
+0004E3r 1  C9 57                cmp     #'W'
+0004E5r 1  F0 0E                beq     @y
+0004E7r 1  C9 41                cmp     #'A'
+0004E9r 1  F0 0A                beq     @y
+0004EBr 1  C9 53                cmp     #'S'
+0004EDr 1  F0 06                beq     @y
+0004EFr 1  C9 44                cmp     #'D'
+0004F1r 1  F0 02                beq     @y
+0004F3r 1  18                   clc
+0004F4r 1  60                   rts
+0004F5r 1  38           @y:     sec
+0004F6r 1  60                   rts
+0004F7r 1               
+0004F7r 1               ; wait for a menu choice.  Returns a key (letters in upper case), or
+0004F7r 1               ; PAD_GO for the gamepad's A or Start button.
+0004F7r 1               menu_key:
+0004F7r 1  20 rr rr 20  @l:     MENU_IDLE
+0004FBr 1  rr rr        
+0004FDr 1  20 rr rr             jsr     read_pad
+000500r 1  AD rr rr             lda     padnew
+000503r 1  29 09                and     #PAD_A | PAD_START
+000505r 1  D0 21                bne     @pad
+000507r 1  20 00 FE             jsr     getc
+00050Ar 1  90 EB                bcc     @l
+00050Cr 1  C9 20                cmp     #' '            ; a space typed by the pad's A button?
+00050Er 1  D0 0D                bne     @up
+000510r 1  20 rr rr             jsr     read_pad
+000513r 1  AD rr rr             lda     pad
+000516r 1  29 01                and     #PAD_A
+000518r 1  D0 0E                bne     @pad
+00051Ar 1  A9 20                lda     #' '
+00051Cr 1  60                   rts
+00051Dr 1  C9 61        @up:    cmp     #'a'
+00051Fr 1  90 06                bcc     @r
+000521r 1  C9 7B                cmp     #'z'+1
+000523r 1  B0 02                bcs     @r
+000525r 1  29 DF                and     #$DF
+000527r 1  60           @r:     rts
+000528r 1  20 rr rr     @pad:   jsr     flush_in        ; the space the driver typed for it
+00052Br 1  A9 80                lda     #PAD_GO
+00052Dr 1  60                   rts
+00052Er 1               
+00052Er 1               ; print the controls line (CTRL_COL, CTRL_ROW)
+00052Er 1               show_ctrl:
+00052Er 1  20 rr rr             jsr     txt_mode
+000531r 1  A2 13                ldx     #CTRL_COL
+000533r 1  A0 12                ldy     #CTRL_ROW
+000535r 1  20 rr rr             jsr     gotoxy
+000538r 1  AD rr rr             lda     ctrl
+00053Br 1  F0 07                beq     @kb
+00053Dr 1  A9 rr                lda     #<ctrl_pad_txt
+00053Fr 1  A0 rr                ldy     #>ctrl_pad_txt
+000541r 1  4C rr rr             jmp     print
+000544r 1  A9 rr        @kb:    lda     #<ctrl_kb_txt
+000546r 1  A0 rr                ldy     #>ctrl_kb_txt
+000548r 1  4C rr rr             jmp     print
+00054Br 1               
+00054Br 1               ; ============================================================================
+00054Br 1               ; start, title
+00054Br 1               ; ============================================================================
+00054Br 1  D8           start:  cld
+00054Cr 1  A2 FF                ldx     #$FF
+00054Er 1  9A                   txs
+00054Fr 1  A9 00                lda     #0              ; clear the variables (RAM is random at power-up)
+000551r 1  AA                   tax
+000552r 1  A0 03                ldy     #>(bss_end - bss_start + $FF)
+000554r 1  9D rr rr     @c1:    sta     bss_start,x
+000557r 1  E8                   inx
+000558r 1  D0 FA                bne     @c1
+00055Ar 1  EE rr rr             inc     @c1+2
+00055Dr 1  88                   dey
+00055Er 1  D0 F4                bne     @c1
+000560r 1  AD rr rr             lda     ctrl_def
+000563r 1  8D rr rr             sta     ctrl
+000566r 1  A9 5A                lda     #$5A
+000568r 1  8D rr rr             sta     rng
+00056Br 1  A9 FF                lda     #$FF
+00056Dr 1  8D rr rr             sta     attr
+000570r 1  20 rr rr             jsr     sfx_init
+000573r 1  AD rr rr             lda     mute_def
+000576r 1  8D rr rr             sta     sfx_mute
+000579r 1               
+000579r 1  20 rr rr     title:  jsr     sfx_off
+00057Cr 1  A9 rr                lda     #<cls_txt
+00057Er 1  A0 rr                ldy     #>cls_txt
+000580r 1  20 rr rr             jsr     print
+000583r 1  A9 rr                lda     #<title_txt
+000585r 1  A0 rr                ldy     #>title_txt
+000587r 1  20 rr rr             jsr     print
+00058Ar 1  20 rr rr             jsr     def_tiles
+00058Dr 1  20 rr rr             jsr     draw_banner
+000590r 1  20 rr rr             jsr     show_start_level
+000593r 1  20 rr rr             jsr     show_hiscore_title
+000596r 1  20 rr rr             jsr     show_ctrl
+000599r 1  20 rr rr             jsr     read_pad
+00059Cr 1  20 rr rr             jsr     flush_in
+00059Fr 1  20 rr rr     @wait:  jsr     menu_key
+0005A2r 1  C9 51                cmp     #'Q'
+0005A4r 1  D0 03                bne     @notq
+0005A6r 1  4C rr rr             jmp     exit_game
+0005A9r 1  C9 4D        @notq:  cmp     #'M'            ; sound on / off
+0005ABr 1  D0 06                bne     @notm
+0005ADr 1  20 rr rr             jsr     sfx_toggle
+0005B0r 1  4C rr rr             jmp     @wait
+0005B3r 1  C9 47        @notm:  cmp     #'G'            ; switch keyboard / gamepad
+0005B5r 1  D0 0E                bne     @notg
+0005B7r 1  AD rr rr             lda     ctrl
+0005BAr 1  49 01                eor     #1
+0005BCr 1  8D rr rr             sta     ctrl
+0005BFr 1  20 rr rr             jsr     show_ctrl
+0005C2r 1  4C rr rr             jmp     @wait
+0005C5r 1  C9 80        @notg:  cmp     #PAD_GO         ; A or Start on the pad: play with the pad
+0005C7r 1  D0 08                bne     @notp
+0005C9r 1  A9 01                lda     #1
+0005CBr 1  8D rr rr             sta     ctrl
+0005CEr 1  4C rr rr             jmp     new_game
+0005D1r 1  C9 20        @notp:  cmp     #' '
+0005D3r 1  D0 03                bne     @digit
+0005D5r 1  4C rr rr             jmp     new_game
+0005D8r 1  C9 30        @digit: cmp     #'0'            ; 0..9: the starting level
+0005DAr 1  90 C3                bcc     @wait
+0005DCr 1  C9 3A                cmp     #'9'+1
+0005DEr 1  B0 BF                bcs     @wait
+0005E0r 1  29 0F                and     #$0F
+0005E2r 1  8D rr rr             sta     start_level
+0005E5r 1  20 rr rr             jsr     show_start_level
+0005E8r 1  4C rr rr             jmp     @wait
+0005EBr 1               
+0005EBr 1               ; the title banner, made of squares
+0005EBr 1               draw_banner:
+0005EBr 1  20 rr rr             jsr     gfx_mode
+0005EEr 1  A9 rr                lda     #<banner
+0005F0r 1  8D rr rr             sta     @rd+1
+0005F3r 1  A9 rr                lda     #>banner
+0005F5r 1  8D rr rr             sta     @rd+2
+0005F8r 1  A0 02                ldy     #2              ; text row
+0005FAr 1  8C rr rr     @row:   sty     tmp2
+0005FDr 1  A2 0D                ldx     #40 - BANNER_W
+0005FFr 1  20 rr rr             jsr     gotoxy
+000602r 1  A9 1B                lda     #BANNER_W
+000604r 1  8D rr rr             sta     tmp3
+000607r 1               @sq:
+000607r 1  AD FF FF     @rd:    lda     $FFFF
+00060Ar 1  20 rr rr             jsr     put_glyph
+00060Dr 1  EE rr rr             inc     @rd+1
+000610r 1  D0 03                bne     @n
+000612r 1  EE rr rr             inc     @rd+2
+000615r 1  CE rr rr     @n:     dec     tmp3
+000618r 1  D0 ED                bne     @sq
+00061Ar 1  AC rr rr             ldy     tmp2
+00061Dr 1  C8                   iny
+00061Er 1  C0 07                cpy     #2 + BANNER_H
+000620r 1  D0 D8                bne     @row
+000622r 1  60                   rts
+000623r 1               
+000623r 1               show_start_level:
+000623r 1  20 rr rr             jsr     txt_mode
+000626r 1  A2 30                ldx     #48
+000628r 1  A0 0F                ldy     #15
+00062Ar 1  20 rr rr             jsr     gotoxy
+00062Dr 1  AD rr rr             lda     start_level
+000630r 1  18                   clc
+000631r 1  69 30                adc     #'0'
+000633r 1  4C 03 FE             jmp     putc
+000636r 1               
+000636r 1               show_hiscore_title:
+000636r 1  20 rr rr             jsr     txt_mode
+000639r 1  A2 22                ldx     #34
+00063Br 1  A0 15                ldy     #21
+00063Dr 1  20 rr rr             jsr     gotoxy
+000640r 1  A9 rr                lda     #<hi_txt
+000642r 1  A0 rr                ldy     #>hi_txt
+000644r 1  20 rr rr             jsr     print
+000647r 1  4C rr rr             jmp     pr_hiscore
+00064Ar 1               
+00064Ar 1               pr_hiscore:
+00064Ar 1  AD rr rr             lda     hiscore+2
+00064Dr 1  20 rr rr             jsr     prbcd
+000650r 1  AD rr rr             lda     hiscore+1
+000653r 1  20 rr rr             jsr     prbcd
+000656r 1  AD rr rr             lda     hiscore
+000659r 1  4C rr rr             jmp     prbcd
+00065Cr 1               
+00065Cr 1               exit_game:
+00065Cr 1  20 rr rr             jsr     sfx_off
+00065Fr 1  A9 rr                lda     #<bye_txt
+000661r 1  A0 rr                ldy     #>bye_txt
+000663r 1  20 rr rr             jsr     print
+000666r 1  4C 06 FE             jmp     SBC_MENU        ; back to the boot menu
+000669r 1               
+000669r 1               ; ============================================================================
+000669r 1               ; a game
+000669r 1               ; ============================================================================
+000669r 1               new_game:
+000669r 1  A9 00                lda     #0
+00066Br 1  A2 DB                ldx     #BW * BH - 1    ; empty board
+00066Dr 1  9D rr rr     @b:     sta     board,x
+000670r 1  CA                   dex
+000671r 1  E0 FF                cpx     #$FF
+000673r 1  D0 F8                bne     @b
+000675r 1  A2 C7                ldx     #VIS - 1        ; the terminal shows nothing yet
+000677r 1  A9 FF                lda     #$FF
+000679r 1  9D rr rr     @s:     sta     shown,x
+00067Cr 1  CA                   dex
+00067Dr 1  E0 FF                cpx     #$FF
+00067Fr 1  D0 F8                bne     @s
+000681r 1  A9 00                lda     #0
+000683r 1  8D rr rr             sta     score
+000686r 1  8D rr rr             sta     score+1
+000689r 1  8D rr rr             sta     score+2
+00068Cr 1  8D rr rr             sta     lines
+00068Fr 1  8D rr rr             sta     lines+1
+000692r 1  8D rr rr             sta     quit
+000695r 1  8D rr rr             sta     dead
+000698r 1  8D rr rr             sta     bag_n
+00069Br 1  AD rr rr             lda     start_level
+00069Er 1  8D rr rr             sta     level
+0006A1r 1  A9 0A                lda     #10
+0006A3r 1  8D rr rr             sta     to_next
+0006A6r 1  20 rr rr             jsr     screen_setup
+0006A9r 1  20 rr rr             jsr     bag_next
+0006ACr 1  8D rr rr             sta     next
+0006AFr 1  20 rr rr             jsr     spawn
+0006B2r 1  20 rr rr             jsr     show_stats
+0006B5r 1  20 rr rr             jsr     sfx_off         ; the music
+0006B8r 1  A9 00                lda     #MUS_THEME
+0006BAr 1  20 rr rr             jsr     sfx_snd
+0006BDr 1  A9 01                lda     #MUS_THEME+1
+0006BFr 1  20 rr rr             jsr     sfx_snd
+0006C2r 1               
+0006C2r 1               game_loop:
+0006C2r 1  20 rr rr             jsr     sfx_poll
+0006C5r 1  EE rr rr             inc     ticks
+0006C8r 1  20 rr rr             jsr     input
+0006CBr 1  AD rr rr             lda     quit
+0006CEr 1  F0 03                beq     @1
+0006D0r 1  4C rr rr             jmp     title
+0006D3r 1  AD rr rr     @1:     lda     need_lock
+0006D6r 1  D0 08                bne     @lock
+0006D8r 1  20 rr rr             jsr     gravity
+0006DBr 1  AD rr rr             lda     need_lock
+0006DEr 1  F0 0B                beq     @2
+0006E0r 1  20 rr rr     @lock:  jsr     lock_piece
+0006E3r 1  AD rr rr             lda     dead
+0006E6r 1  F0 03                beq     @2
+0006E8r 1  4C rr rr             jmp     game_over
+0006EBr 1  AD rr rr     @2:     lda     dirty
+0006EEr 1  F0 0B                beq     @3
+0006F0r 1  20 rr rr             jsr     compose
+0006F3r 1  20 rr rr             jsr     present
+0006F6r 1  A9 00                lda     #0
+0006F8r 1  8D rr rr             sta     dirty
+0006FBr 1  AD rr rr     @3:     lda     speed
+0006FEr 1  20 rr rr             jsr     delay_ms
+000701r 1  4C rr rr             jmp     game_loop
+000704r 1               
+000704r 1               ; ---- the screen around the board ------------------------------------------------
+000704r 1               screen_setup:
+000704r 1  A9 rr                lda     #<game_txt
+000706r 1  A0 rr                ldy     #>game_txt
+000708r 1  20 rr rr             jsr     print
+00070Br 1  AD rr rr             lda     ctrl            ; the controls for this game
+00070Er 1  F0 0A                beq     @kb
+000710r 1  A9 rr                lda     #<help_pad_txt
+000712r 1  A0 rr                ldy     #>help_pad_txt
+000714r 1  20 rr rr             jsr     print
+000717r 1  4C rr rr             jmp     @frame
+00071Ar 1  A9 rr        @kb:    lda     #<help_kb_txt
+00071Cr 1  A0 rr                ldy     #>help_kb_txt
+00071Er 1  20 rr rr             jsr     print
+000721r 1  20 rr rr     @frame: jsr     gfx_mode        ; the well: a line each side and below
+000724r 1  A2 1D                ldx     #BX-1
+000726r 1  A0 02                ldy     #BY
+000728r 1  20 rr rr             jsr     gotoxy
+00072Br 1  A9 0B                lda     #TC_TILE
+00072Dr 1  20 03 FE             jsr     putc
+000730r 1  A9 0B                lda     #T_LEFT
+000732r 1  20 03 FE             jsr     putc
+000735r 1  A2 32                ldx     #BX+2*BW
+000737r 1  20 rr rr             jsr     gotoxy
+00073Ar 1  A9 0B                lda     #TC_TILE
+00073Cr 1  20 03 FE             jsr     putc
+00073Fr 1  A9 0C                lda     #T_RIGHT
+000741r 1  20 03 FE             jsr     putc
+000744r 1  A2 1D                ldx     #BX-1
+000746r 1  A0 16                ldy     #BY+20
+000748r 1  20 rr rr             jsr     gotoxy
+00074Br 1  A9 02                lda     #$02            ; corner
+00074Dr 1  20 rr rr             jsr     putblk
+000750r 1  A9 0A                lda     #10             ; top pixel row, 20 times (the repeat count
+000752r 1  20 rr rr             jsr     set_rep         ; goes up to 15, so twice 10)
+000755r 1  A9 03                lda     #$03
+000757r 1  20 rr rr             jsr     putblk
+00075Ar 1  A9 03                lda     #$03
+00075Cr 1  20 rr rr             jsr     putblk
+00075Fr 1  A9 01                lda     #1
+000761r 1  20 rr rr             jsr     set_rep
+000764r 1  A9 01                lda     #$01
+000766r 1  20 rr rr             jsr     putblk
+000769r 1  60                   rts
+00076Ar 1               
+00076Ar 1               ; score, lines, level
+00076Ar 1               show_stats:
+00076Ar 1  20 rr rr             jsr     txt_mode
+00076Dr 1  A2 38                ldx     #SX
+00076Fr 1  A0 0B                ldy     #11
+000771r 1  20 rr rr             jsr     gotoxy
+000774r 1  AD rr rr             lda     score+2
+000777r 1  20 rr rr             jsr     prbcd
+00077Ar 1  AD rr rr             lda     score+1
+00077Dr 1  20 rr rr             jsr     prbcd
+000780r 1  AD rr rr             lda     score
+000783r 1  20 rr rr             jsr     prbcd
+000786r 1  A2 3A                ldx     #SX+2
+000788r 1  A0 0E                ldy     #14
+00078Ar 1  20 rr rr             jsr     gotoxy
+00078Dr 1  AD rr rr             lda     lines+1
+000790r 1  20 rr rr             jsr     prbcd
+000793r 1  AD rr rr             lda     lines
+000796r 1  20 rr rr             jsr     prbcd
+000799r 1  A2 3C                ldx     #SX+4
+00079Br 1  A0 11                ldy     #17
+00079Dr 1  20 rr rr             jsr     gotoxy
+0007A0r 1  AD rr rr             lda     level
+0007A3r 1  20 rr rr             jsr     pr_dec2
+0007A6r 1  A2 38                ldx     #SX
+0007A8r 1  A0 14                ldy     #20
+0007AAr 1  20 rr rr             jsr     gotoxy
+0007ADr 1  4C rr rr             jmp     pr_hiscore
+0007B0r 1               
+0007B0r 1               ; the next piece in its box (4 x 2 squares)
+0007B0r 1               draw_next:
+0007B0r 1  A2 07                ldx     #7
+0007B2r 1  A9 0A                lda     #G_BLANK
+0007B4r 1  9D rr rr     @c:     sta     nbuf,x
+0007B7r 1  CA                   dex
+0007B8r 1  10 FA                bpl     @c
+0007BAr 1  AD rr rr             lda     next
+0007BDr 1  0A                   asl
+0007BEr 1  0A                   asl
+0007BFr 1  0A                   asl
+0007C0r 1  0A                   asl
+0007C1r 1  A8                   tay                     ; rotation 0 of that piece
+0007C2r 1  A2 04                ldx     #4
+0007C4r 1  B9 rr rr     @sq:    lda     pc_y,y
+0007C7r 1  0A                   asl
+0007C8r 1  0A                   asl
+0007C9r 1  18                   clc
+0007CAr 1  79 rr rr             adc     pc_x,y
+0007CDr 1  8D rr rr             sta     tmp
+0007D0r 1  AD rr rr             lda     next
+0007D3r 1  18                   clc
+0007D4r 1  69 01                adc     #1
+0007D6r 1  8E rr rr             stx     tmp2
+0007D9r 1  AE rr rr             ldx     tmp
+0007DCr 1  9D rr rr             sta     nbuf,x
+0007DFr 1  AE rr rr             ldx     tmp2
+0007E2r 1  C8                   iny
+0007E3r 1  CA                   dex
+0007E4r 1  D0 DE                bne     @sq
+0007E6r 1  20 rr rr             jsr     gfx_mode
+0007E9r 1  A2 39                ldx     #NX+1
+0007EBr 1  A0 05                ldy     #NY+1
+0007EDr 1  20 rr rr             jsr     gotoxy
+0007F0r 1  A2 00                ldx     #0
+0007F2r 1  8E rr rr     @r0:    stx     tmp2
+0007F5r 1  BD rr rr             lda     nbuf,x
+0007F8r 1  20 rr rr             jsr     put_glyph
+0007FBr 1  AE rr rr             ldx     tmp2
+0007FEr 1  E8                   inx
+0007FFr 1  E0 04                cpx     #4
+000801r 1  D0 EF                bne     @r0
+000803r 1  A2 39                ldx     #NX+1
+000805r 1  A0 06                ldy     #NY+2
+000807r 1  20 rr rr             jsr     gotoxy
+00080Ar 1  A2 04                ldx     #4
+00080Cr 1  8E rr rr     @r1:    stx     tmp2
+00080Fr 1  BD rr rr             lda     nbuf,x
+000812r 1  20 rr rr             jsr     put_glyph
+000815r 1  AE rr rr             ldx     tmp2
+000818r 1  E8                   inx
+000819r 1  E0 08                cpx     #8
+00081Br 1  D0 EF                bne     @r1
+00081Dr 1  60                   rts
+00081Er 1               
+00081Er 1               ; ---- pieces -----------------------------------------------------------------------
+00081Er 1               ; the next piece from the bag: each run of 7 has every piece once
+00081Er 1               bag_next:
+00081Er 1  AD rr rr             lda     bag_n
+000821r 1  D0 31                bne     @take
+000823r 1  A2 06                ldx     #6              ; refill and shuffle (Fisher-Yates)
+000825r 1  8A           @f:     txa
+000826r 1  9D rr rr             sta     bag,x
+000829r 1  CA                   dex
+00082Ar 1  10 F9                bpl     @f
+00082Cr 1  A2 06                ldx     #6
+00082Er 1  8E rr rr     @sh:    stx     tmp
+000831r 1  20 rr rr     @r:     jsr     rand            ; j = random 0..x
+000834r 1  29 07                and     #7
+000836r 1  CD rr rr             cmp     tmp
+000839r 1  F0 02                beq     @ok
+00083Br 1  B0 F4                bcs     @r
+00083Dr 1  A8           @ok:    tay
+00083Er 1  BD rr rr             lda     bag,x
+000841r 1  48                   pha
+000842r 1  B9 rr rr             lda     bag,y
+000845r 1  9D rr rr             sta     bag,x
+000848r 1  68                   pla
+000849r 1  99 rr rr             sta     bag,y
+00084Cr 1  CA                   dex
+00084Dr 1  D0 DF                bne     @sh
+00084Fr 1  A9 07                lda     #7
+000851r 1  8D rr rr             sta     bag_n
+000854r 1  CE rr rr     @take:  dec     bag_n
+000857r 1  AE rr rr             ldx     bag_n
+00085Ar 1  BD rr rr             lda     bag,x
+00085Dr 1  60                   rts
+00085Er 1               
+00085Er 1               ; the next piece comes in at the top
+00085Er 1  EE rr rr     spawn:  inc     npieces
+000861r 1  AD rr rr             lda     next
+000864r 1  8D rr rr             sta     ptype
+000867r 1  20 rr rr             jsr     bag_next
+00086Ar 1  8D rr rr             sta     next
+00086Dr 1  A9 03                lda     #3
+00086Fr 1  8D rr rr             sta     px
+000872r 1  A9 01                lda     #1
+000874r 1  8D rr rr             sta     py
+000877r 1  A9 00                lda     #0
+000879r 1  8D rr rr             sta     prot
+00087Cr 1  8D rr rr             sta     ltimer
+00087Fr 1  8D rr rr             sta     lresets
+000882r 1  8D rr rr             sta     gcount
+000885r 1  8D rr rr             sta     need_lock
+000888r 1  A9 01                lda     #1
+00088Ar 1  8D rr rr             sta     dirty
+00088Dr 1  20 rr rr             jsr     draw_next
+000890r 1  20 rr rr             jsr     fits_here
+000893r 1  90 05                bcc     @ok
+000895r 1  A9 01                lda     #1              ; no room: the game is over
+000897r 1  8D rr rr             sta     dead
+00089Ar 1  60           @ok:    rts
+00089Br 1               
+00089Br 1               ; carry clear if the piece fits at px, py, prot
+00089Br 1               fits_here:
+00089Br 1  AD rr rr             lda     px
+00089Er 1  8D rr rr             sta     tx
+0008A1r 1  AD rr rr             lda     py
+0008A4r 1  8D rr rr             sta     ty
+0008A7r 1  AD rr rr             lda     prot
+0008AAr 1  8D rr rr             sta     trot
+0008ADr 1               ; carry clear if piece ptype fits at tx, ty, trot
+0008ADr 1  AD rr rr     fits:   lda     ptype
+0008B0r 1  0A                   asl
+0008B1r 1  0A                   asl
+0008B2r 1  6D rr rr             adc     trot            ; (carry clear: ptype < 64)
+0008B5r 1  0A                   asl
+0008B6r 1  0A                   asl
+0008B7r 1  8D rr rr             sta     pidx            ; ptype * 16 + trot * 4
+0008BAr 1  A8                   tay
+0008BBr 1  A2 04                ldx     #4
+0008BDr 1  B9 rr rr     @sq:    lda     pc_x,y
+0008C0r 1  18                   clc
+0008C1r 1  6D rr rr             adc     tx
+0008C4r 1  C9 0A                cmp     #BW             ; off the side (or < 0: >= 128)
+0008C6r 1  B0 2B                bcs     @no
+0008C8r 1  8D rr rr             sta     tmp
+0008CBr 1  B9 rr rr             lda     pc_y,y
+0008CEr 1  18                   clc
+0008CFr 1  6D rr rr             adc     ty
+0008D2r 1  C9 16                cmp     #BH             ; below the floor
+0008D4r 1  B0 1D                bcs     @no
+0008D6r 1  8E rr rr             stx     tmp2
+0008D9r 1  AA                   tax
+0008DAr 1  BD rr rr             lda     rowoff,x
+0008DDr 1  18                   clc
+0008DEr 1  6D rr rr             adc     tmp
+0008E1r 1  AA                   tax
+0008E2r 1  BD rr rr             lda     board,x
+0008E5r 1  D0 09                bne     @no2
+0008E7r 1  AE rr rr             ldx     tmp2
+0008EAr 1  C8                   iny
+0008EBr 1  CA                   dex
+0008ECr 1  D0 CF                bne     @sq
+0008EEr 1  18                   clc
+0008EFr 1  60                   rts
+0008F0r 1  AE rr rr     @no2:   ldx     tmp2
+0008F3r 1  38           @no:    sec
+0008F4r 1  60                   rts
+0008F5r 1               
+0008F5r 1               ; a move or turn worked: if the piece is on the ground, it gets a little
+0008F5r 1               ; more time before it locks (but not for ever)
+0008F5r 1  A9 01        moved:  lda     #1
+0008F7r 1  8D rr rr             sta     dirty
+0008FAr 1  AD rr rr             lda     lresets
+0008FDr 1  C9 0F                cmp     #LOCK_RESETS
+0008FFr 1  B0 08                bcs     @r
+000901r 1  EE rr rr             inc     lresets
+000904r 1  A9 00                lda     #0
+000906r 1  8D rr rr             sta     ltimer
+000909r 1  60           @r:     rts
+00090Ar 1               
+00090Ar 1               ; move sideways by A (1 or -1)
+00090Ar 1  18           move:   clc
+00090Br 1  6D rr rr             adc     px
+00090Er 1  8D rr rr             sta     tx
+000911r 1  AD rr rr             lda     py
+000914r 1  8D rr rr             sta     ty
+000917r 1  AD rr rr             lda     prot
+00091Ar 1  8D rr rr             sta     trot
+00091Dr 1  20 rr rr             jsr     fits
+000920r 1  B0 0E                bcs     @r
+000922r 1  AD rr rr             lda     tx
+000925r 1  8D rr rr             sta     px
+000928r 1  A9 02                lda     #SND_MOVE
+00092Ar 1  20 rr rr             jsr     sfx_snd
+00092Dr 1  4C rr rr             jmp     moved
+000930r 1  60           @r:     rts
+000931r 1               
+000931r 1               ; turn by A (1 clockwise, 3 back); if it doesn't fit, try nudging it sideways
+000931r 1  18           rotate: clc
+000932r 1  6D rr rr             adc     prot
+000935r 1  29 03                and     #3
+000937r 1  8D rr rr             sta     trot
+00093Ar 1  AD rr rr             lda     py
+00093Dr 1  8D rr rr             sta     ty
+000940r 1  A2 00                ldx     #0
+000942r 1  8E rr rr     @k:     stx     kick
+000945r 1  AD rr rr             lda     px
+000948r 1  18                   clc
+000949r 1  7D rr rr             adc     kicks,x
+00094Cr 1  8D rr rr             sta     tx
+00094Fr 1  20 rr rr             jsr     fits
+000952r 1  90 12                bcc     @ok
+000954r 1  AE rr rr             ldx     kick
+000957r 1  E8                   inx
+000958r 1  E0 03                cpx     #3              ; I pieces may go 2 squares
+00095Ar 1  D0 05                bne     @k2
+00095Cr 1  AD rr rr             lda     ptype
+00095Fr 1  D0 04                bne     @r              ; (I is piece 0)
+000961r 1  E0 05        @k2:    cpx     #5
+000963r 1  D0 DD                bne     @k
+000965r 1  60           @r:     rts
+000966r 1  AD rr rr     @ok:    lda     tx
+000969r 1  8D rr rr             sta     px
+00096Cr 1  AD rr rr             lda     trot
+00096Fr 1  8D rr rr             sta     prot
+000972r 1  A9 03                lda     #SND_ROTATE
+000974r 1  20 rr rr             jsr     sfx_snd
+000977r 1  4C rr rr             jmp     moved
+00097Ar 1               
+00097Ar 1               ; one row down (a soft drop): if it can't, it locks now
+00097Ar 1               soft_drop:
+00097Ar 1  20 rr rr             jsr     down1
+00097Dr 1  B0 0B                bcs     @lock
+00097Fr 1  A9 01                lda     #1
+000981r 1  20 rr rr             jsr     add_score
+000984r 1  A9 00                lda     #0
+000986r 1  8D rr rr             sta     gcount
+000989r 1  60                   rts
+00098Ar 1  A9 01        @lock:  lda     #1
+00098Cr 1  8D rr rr             sta     need_lock
+00098Fr 1  60                   rts
+000990r 1               
+000990r 1               ; all the way down, and lock
+000990r 1               hard_drop:
+000990r 1  A9 00                lda     #0
+000992r 1  8D rr rr             sta     tmp3
+000995r 1  20 rr rr     @l:     jsr     down1
+000998r 1  B0 05                bcs     @done
+00099Ar 1  EE rr rr             inc     tmp3
+00099Dr 1  D0 F6                bne     @l
+00099Fr 1  AD rr rr     @done:  lda     tmp3
+0009A2r 1  0A                   asl
+0009A3r 1  20 rr rr             jsr     add_score
+0009A6r 1  A9 05                lda     #SND_DROP
+0009A8r 1  20 rr rr             jsr     sfx_snd
+0009ABr 1  A9 01                lda     #1
+0009ADr 1  8D rr rr             sta     need_lock
+0009B0r 1  60                   rts
+0009B1r 1               
+0009B1r 1               ; move the piece down a row if it can (carry clear)
+0009B1r 1  AD rr rr     down1:  lda     px
+0009B4r 1  8D rr rr             sta     tx
+0009B7r 1  AD rr rr             lda     py
+0009BAr 1  18                   clc
+0009BBr 1  69 01                adc     #1
+0009BDr 1  8D rr rr             sta     ty
+0009C0r 1  AD rr rr             lda     prot
+0009C3r 1  8D rr rr             sta     trot
+0009C6r 1  20 rr rr             jsr     fits
+0009C9r 1  B0 09                bcs     @r
+0009CBr 1  EE rr rr             inc     py
+0009CEr 1  A9 01                lda     #1
+0009D0r 1  8D rr rr             sta     dirty
+0009D3r 1  18                   clc
+0009D4r 1  60           @r:     rts
+0009D5r 1               
+0009D5r 1               ; the piece falls a row every so often; on the ground the lock timer runs
+0009D5r 1               gravity:
+0009D5r 1  EE rr rr             inc     gcount
+0009D8r 1  AE rr rr             ldx     level
+0009DBr 1  E0 14                cpx     #NSPEED
+0009DDr 1  90 02                bcc     @l
+0009DFr 1  A2 13                ldx     #NSPEED-1
+0009E1r 1  AD rr rr     @l:     lda     gcount
+0009E4r 1  DD rr rr             cmp     fall_ticks,x
+0009E7r 1  90 10                bcc     @ground
+0009E9r 1  A9 00                lda     #0
+0009EBr 1  8D rr rr             sta     gcount
+0009EEr 1  20 rr rr             jsr     down1
+0009F1r 1  B0 06                bcs     @ground
+0009F3r 1  A9 00                lda     #0              ; a fresh row: a fresh lock timer
+0009F5r 1  8D rr rr             sta     ltimer
+0009F8r 1  60                   rts
+0009F9r 1  AD rr rr     @ground:lda     px              ; standing on something?
+0009FCr 1  8D rr rr             sta     tx
+0009FFr 1  AD rr rr             lda     py
+000A02r 1  18                   clc
+000A03r 1  69 01                adc     #1
+000A05r 1  8D rr rr             sta     ty
+000A08r 1  AD rr rr             lda     prot
+000A0Br 1  8D rr rr             sta     trot
+000A0Er 1  20 rr rr             jsr     fits
+000A11r 1  90 10                bcc     @air
+000A13r 1  EE rr rr             inc     ltimer
+000A16r 1  AD rr rr             lda     ltimer
+000A19r 1  C9 1E                cmp     #LOCK_TICKS
+000A1Br 1  90 05                bcc     @r
+000A1Dr 1  A9 01                lda     #1
+000A1Fr 1  8D rr rr             sta     need_lock
+000A22r 1  60           @r:     rts
+000A23r 1  A9 00        @air:   lda     #0
+000A25r 1  8D rr rr             sta     ltimer
+000A28r 1  60                   rts
+000A29r 1               
+000A29r 1               ; ---- locking, lines ------------------------------------------------------------------
+000A29r 1               lock_piece:
+000A29r 1  A9 04                lda     #SND_LOCK       ; (a hard drop's sound wins: it's louder)
+000A2Br 1  20 rr rr             jsr     sfx_snd
+000A2Er 1  A9 00                lda     #0
+000A30r 1  8D rr rr             sta     need_lock
+000A33r 1  AD rr rr             lda     px              ; write the piece into the board
+000A36r 1  8D rr rr             sta     tx
+000A39r 1  AD rr rr             lda     py
+000A3Cr 1  8D rr rr             sta     ty
+000A3Fr 1  AD rr rr             lda     prot
+000A42r 1  8D rr rr             sta     trot
+000A45r 1  20 rr rr             jsr     fits            ; (sets pidx)
+000A48r 1  AC rr rr             ldy     pidx
+000A4Br 1  A2 04                ldx     #4
+000A4Dr 1  8E rr rr     @sq:    stx     tmp2
+000A50r 1  B9 rr rr             lda     pc_y,y
+000A53r 1  18                   clc
+000A54r 1  6D rr rr             adc     py
+000A57r 1  AA                   tax
+000A58r 1  BD rr rr             lda     rowoff,x
+000A5Br 1  18                   clc
+000A5Cr 1  79 rr rr             adc     pc_x,y
+000A5Fr 1  6D rr rr             adc     px
+000A62r 1  AA                   tax
+000A63r 1  AD rr rr             lda     ptype
+000A66r 1  18                   clc
+000A67r 1  69 01                adc     #1
+000A69r 1  9D rr rr             sta     board,x
+000A6Cr 1  AE rr rr             ldx     tmp2
+000A6Fr 1  C8                   iny
+000A70r 1  CA                   dex
+000A71r 1  D0 DA                bne     @sq
+000A73r 1                       ; full rows?
+000A73r 1  A9 00                lda     #0
+000A75r 1  8D rr rr             sta     nfull
+000A78r 1  A2 15                ldx     #BH-1
+000A7Ar 1  8E rr rr     @row:   stx     tmp
+000A7Dr 1  BD rr rr             lda     rowoff,x
+000A80r 1  A8                   tay
+000A81r 1  A2 0A                ldx     #BW
+000A83r 1  B9 rr rr     @c:     lda     board,y
+000A86r 1  F0 10                beq     @notfull
+000A88r 1  C8                   iny
+000A89r 1  CA                   dex
+000A8Ar 1  D0 F7                bne     @c
+000A8Cr 1  AE rr rr             ldx     nfull
+000A8Fr 1  AD rr rr             lda     tmp
+000A92r 1  9D rr rr             sta     full,x
+000A95r 1  EE rr rr             inc     nfull
+000A98r 1               @notfull:
+000A98r 1  AE rr rr             ldx     tmp
+000A9Br 1  CA                   dex
+000A9Cr 1  10 DC                bpl     @row
+000A9Er 1  AD rr rr             lda     nfull
+000AA1r 1  F0 03                beq     @next
+000AA3r 1  20 rr rr             jsr     clear_lines
+000AA6r 1  4C rr rr     @next:  jmp     spawn
+000AA9r 1               
+000AA9r 1               ; flash the full rows, remove them, score
+000AA9r 1               clear_lines:
+000AA9r 1  AD rr rr             lda     nfull           ; 4 lines: a bigger sound
+000AACr 1  C9 04                cmp     #4
+000AAEr 1  A9 06                lda     #SND_LINE
+000AB0r 1  90 02                bcc     @s
+000AB2r 1  A9 07                lda     #SND_LINES
+000AB4r 1  20 rr rr     @s:     jsr     sfx_snd
+000AB7r 1  20 rr rr             jsr     compose_board   ; the board without a falling piece
+000ABAr 1  AE rr rr             ldx     nfull           ; show the full rows as solid
+000ABDr 1  CA           @f:     dex
+000ABEr 1  30 20                bmi     @show
+000AC0r 1  BD rr rr             lda     full,x
+000AC3r 1  38                   sec
+000AC4r 1  E9 02                sbc     #HIDDEN
+000AC6r 1  90 F5                bcc     @f
+000AC8r 1  A8                   tay
+000AC9r 1  B9 rr rr             lda     rowoff,y
+000ACCr 1  A8                   tay
+000ACDr 1  A9 0A                lda     #BW
+000ACFr 1  8D rr rr             sta     tmp
+000AD2r 1  A9 09                lda     #G_FLASH
+000AD4r 1  99 rr rr     @fc:    sta     disp,y
+000AD7r 1  C8                   iny
+000AD8r 1  CE rr rr             dec     tmp
+000ADBr 1  D0 F7                bne     @fc
+000ADDr 1  4C rr rr             jmp     @f
+000AE0r 1  20 rr rr     @show:  jsr     present
+000AE3r 1  A9 C8                lda     #200
+000AE5r 1  20 rr rr             jsr     delay_ms
+000AE8r 1                       ; remove them: full[] is from the bottom up, so take the highest first
+000AE8r 1  AE rr rr             ldx     nfull
+000AEBr 1  CA           @rm:    dex
+000AECr 1  30 0F                bmi     @scored
+000AEEr 1  8E rr rr             stx     tmp3
+000AF1r 1  BD rr rr             lda     full,x
+000AF4r 1  20 rr rr             jsr     remove_row
+000AF7r 1  AE rr rr             ldx     tmp3
+000AFAr 1  4C rr rr             jmp     @rm
+000AFDr 1  AD rr rr     @scored:lda     nfull           ; points: 40, 100, 300, 1200 x (level + 1)
+000B00r 1  0A                   asl
+000B01r 1  0A                   asl                     ; *4 (3 bytes each, the first unused)
+000B02r 1  38                   sec
+000B03r 1  E9 04                sbc     #4
+000B05r 1  AA                   tax
+000B06r 1  AD rr rr             lda     level
+000B09r 1  8D rr rr             sta     tmp3
+000B0Cr 1  08           @pts:   php
+000B0Dr 1  78                   sei
+000B0Er 1  F8                   sed
+000B0Fr 1  18                   clc
+000B10r 1  AD rr rr             lda     score
+000B13r 1  7D rr rr             adc     line_pts,x
+000B16r 1  8D rr rr             sta     score
+000B19r 1  AD rr rr             lda     score+1
+000B1Cr 1  7D rr rr             adc     line_pts+1,x
+000B1Fr 1  8D rr rr             sta     score+1
+000B22r 1  AD rr rr             lda     score+2
+000B25r 1  7D rr rr             adc     line_pts+2,x
+000B28r 1  8D rr rr             sta     score+2
+000B2Br 1  90 0B                bcc     @nc
+000B2Dr 1  A9 99                lda     #$99            ; (999999 is the most)
+000B2Fr 1  8D rr rr             sta     score
+000B32r 1  8D rr rr             sta     score+1
+000B35r 1  8D rr rr             sta     score+2
+000B38r 1  D8           @nc:    cld
+000B39r 1  28                   plp
+000B3Ar 1  CE rr rr             dec     tmp3
+000B3Dr 1  10 CD                bpl     @pts
+000B3Fr 1  AD rr rr             lda     nfull           ; lines, level
+000B42r 1  8D rr rr             sta     tmp3
+000B45r 1  08           @ln:    php
+000B46r 1  78                   sei
+000B47r 1  F8                   sed
+000B48r 1  18                   clc
+000B49r 1  AD rr rr             lda     lines
+000B4Cr 1  69 01                adc     #1
+000B4Er 1  8D rr rr             sta     lines
+000B51r 1  AD rr rr             lda     lines+1
+000B54r 1  69 00                adc     #0
+000B56r 1  8D rr rr             sta     lines+1
+000B59r 1  D8                   cld
+000B5Ar 1  28                   plp
+000B5Br 1  CE rr rr             dec     to_next
+000B5Er 1  D0 14                bne     @nl
+000B60r 1  A9 0A                lda     #10
+000B62r 1  8D rr rr             sta     to_next
+000B65r 1  AD rr rr             lda     level
+000B68r 1  C9 63                cmp     #99
+000B6Ar 1  B0 08                bcs     @nl
+000B6Cr 1  EE rr rr             inc     level
+000B6Fr 1  A9 08                lda     #SND_LEVEL
+000B71r 1  20 rr rr             jsr     sfx_snd
+000B74r 1  CE rr rr     @nl:    dec     tmp3
+000B77r 1  D0 CC                bne     @ln
+000B79r 1  4C rr rr             jmp     show_stats
+000B7Cr 1               
+000B7Cr 1               ; remove board row A: everything above it moves down one
+000B7Cr 1               remove_row:
+000B7Cr 1  AA                   tax
+000B7Dr 1  BD rr rr             lda     rowoff,x
+000B80r 1  18                   clc
+000B81r 1  69 09                adc     #BW-1
+000B83r 1  AA                   tax                     ; last square of the row
+000B84r 1  E0 0A        @m:     cpx     #BW
+000B86r 1  90 09                bcc     @top
+000B88r 1  BD rr rr             lda     board-BW,x
+000B8Br 1  9D rr rr             sta     board,x
+000B8Er 1  CA                   dex
+000B8Fr 1  D0 F3                bne     @m              ; (X >= BW here, so never 0)
+000B91r 1  A9 00        @top:   lda     #0              ; a new empty row at the top
+000B93r 1  9D rr rr     @t:     sta     board,x
+000B96r 1  CA                   dex
+000B97r 1  10 FA                bpl     @t
+000B99r 1  60                   rts
+000B9Ar 1               
+000B9Ar 1               ; add A (0..99, binary) to the score
+000B9Ar 1               add_score:
+000B9Ar 1  AA                   tax
+000B9Br 1  F0 26                beq     @r
+000B9Dr 1  08           @l:     php
+000B9Er 1  78                   sei
+000B9Fr 1  F8                   sed
+000BA0r 1  18                   clc
+000BA1r 1  AD rr rr             lda     score
+000BA4r 1  69 01                adc     #1
+000BA6r 1  8D rr rr             sta     score
+000BA9r 1  AD rr rr             lda     score+1
+000BACr 1  69 00                adc     #0
+000BAEr 1  8D rr rr             sta     score+1
+000BB1r 1  AD rr rr             lda     score+2
+000BB4r 1  69 00                adc     #0
+000BB6r 1  8D rr rr             sta     score+2
+000BB9r 1  D8                   cld
+000BBAr 1  28                   plp
+000BBBr 1  CA                   dex
+000BBCr 1  D0 DF                bne     @l
+000BBEr 1  A9 01                lda     #1
+000BC0r 1  8D rr rr             sta     score_dirty
+000BC3r 1  60           @r:     rts
+000BC4r 1               
+000BC4r 1               ; ---- drawing the board ---------------------------------------------------------
+000BC4r 1               ; disp = the visible board
+000BC4r 1               compose_board:
+000BC4r 1  A2 C7                ldx     #VIS-1
+000BC6r 1  BD rr rr     @c:     lda     board + HIDDEN * BW,x
+000BC9r 1  9D rr rr             sta     disp,x
+000BCCr 1  CA                   dex
+000BCDr 1  E0 FF                cpx     #$FF
+000BCFr 1  D0 F5                bne     @c
+000BD1r 1  60                   rts
+000BD2r 1               
+000BD2r 1               ; disp = the board + the ghost + the falling piece
+000BD2r 1               compose:
+000BD2r 1  20 rr rr             jsr     compose_board
+000BD5r 1  AD rr rr             lda     px              ; the ghost: as far down as it goes
+000BD8r 1  8D rr rr             sta     tx
+000BDBr 1  AD rr rr             lda     py
+000BDEr 1  8D rr rr             sta     gy
+000BE1r 1  EE rr rr     @g:     inc     gy
+000BE4r 1  AD rr rr             lda     gy
+000BE7r 1  8D rr rr             sta     ty
+000BEAr 1  AD rr rr             lda     prot
+000BEDr 1  8D rr rr             sta     trot
+000BF0r 1  20 rr rr             jsr     fits
+000BF3r 1  90 EC                bcc     @g
+000BF5r 1  CE rr rr             dec     gy
+000BF8r 1  AD rr rr             lda     gy
+000BFBr 1  A2 08                ldx     #G_GHOST
+000BFDr 1  20 rr rr             jsr     put_piece
+000C00r 1  AD rr rr             lda     ptype
+000C03r 1  18                   clc
+000C04r 1  69 01                adc     #1
+000C06r 1  AA                   tax
+000C07r 1  AD rr rr             lda     py
+000C0Ar 1                       ; fall through
+000C0Ar 1               ; put glyph X at the squares of the piece (at px, row A, prot) in disp
+000C0Ar 1               put_piece:
+000C0Ar 1  8D rr rr             sta     tmp
+000C0Dr 1  8E rr rr             stx     tmp3
+000C10r 1  AD rr rr             lda     ptype
+000C13r 1  0A                   asl
+000C14r 1  0A                   asl
+000C15r 1  18                   clc
+000C16r 1  6D rr rr             adc     prot
+000C19r 1  0A                   asl
+000C1Ar 1  0A                   asl
+000C1Br 1  A8                   tay
+000C1Cr 1  A2 04                ldx     #4
+000C1Er 1  8E rr rr     @sq:    stx     tmp2
+000C21r 1  B9 rr rr             lda     pc_y,y
+000C24r 1  18                   clc
+000C25r 1  6D rr rr             adc     tmp
+000C28r 1  38                   sec
+000C29r 1  E9 02                sbc     #HIDDEN
+000C2Br 1  90 12                bcc     @n              ; in the hidden rows
+000C2Dr 1  AA                   tax
+000C2Er 1  BD rr rr             lda     rowoff,x
+000C31r 1  18                   clc
+000C32r 1  79 rr rr             adc     pc_x,y
+000C35r 1  6D rr rr             adc     px
+000C38r 1  AA                   tax
+000C39r 1  AD rr rr             lda     tmp3
+000C3Cr 1  9D rr rr             sta     disp,x
+000C3Fr 1  AE rr rr     @n:     ldx     tmp2
+000C42r 1  C8                   iny
+000C43r 1  CA                   dex
+000C44r 1  D0 D8                bne     @sq
+000C46r 1  60                   rts
+000C47r 1               
+000C47r 1               ; send the squares that differ from what the terminal shows.  A run of the
+000C47r 1               ; same square is sent once with the repeat count (18 n, then 0B tile).
+000C47r 1               present:
+000C47r 1  AD rr rr             lda     score_dirty
+000C4Ar 1  F0 08                beq     @p
+000C4Cr 1  A9 00                lda     #0
+000C4Er 1  8D rr rr             sta     score_dirty
+000C51r 1  20 rr rr             jsr     show_score
+000C54r 1  AD rr rr     @p:     lda     attr            ; block graphics (keep a repeat count it has)
+000C57r 1  C9 FF                cmp     #$FF            ; (unknown)
+000C59r 1  F0 03                beq     @gm
+000C5Br 1  AA                   tax
+000C5Cr 1  30 03                bmi     @g
+000C5Er 1  20 rr rr     @gm:    jsr     gfx_mode
+000C61r 1  A2 00        @g:     ldx     #0              ; square index
+000C63r 1  A9 00                lda     #0
+000C65r 1  8D rr rr             sta     prow
+000C68r 1  A9 00        @row:   lda     #0
+000C6Ar 1  8D rr rr             sta     pcol
+000C6Dr 1  BD rr rr     @sq:    lda     disp,x
+000C70r 1  DD rr rr             cmp     shown,x
+000C73r 1  D0 16                bne     @diff
+000C75r 1  E8           @same:  inx
+000C76r 1  EE rr rr             inc     pcol
+000C79r 1  AD rr rr             lda     pcol
+000C7Cr 1  C9 0A                cmp     #BW
+000C7Er 1  D0 ED                bne     @sq
+000C80r 1  EE rr rr             inc     prow
+000C83r 1  AD rr rr             lda     prow
+000C86r 1  C9 14                cmp     #20
+000C88r 1  D0 DE                bne     @row
+000C8Ar 1  60                   rts
+000C8Br 1  8D rr rr     @diff:  sta     val
+000C8Er 1  8E rr rr             stx     tmp2            ; the run of this square to the end of the row,
+000C91r 1  A9 01                lda     #1              ; and how far into it the last change is
+000C93r 1  8D rr rr             sta     need
+000C96r 1  AC rr rr             ldy     pcol
+000C99r 1  C8                   iny
+000C9Ar 1  C0 0A        @rl:    cpy     #BW
+000C9Cr 1  B0 1C                bcs     @rend
+000C9Er 1  E8                   inx
+000C9Fr 1  BD rr rr             lda     disp,x
+000CA2r 1  CD rr rr             cmp     val
+000CA5r 1  D0 13                bne     @rend
+000CA7r 1  DD rr rr             cmp     shown,x
+000CAAr 1  F0 0B                beq     @rs1
+000CACr 1  98                   tya
+000CADr 1  38                   sec
+000CAEr 1  ED rr rr             sbc     pcol
+000CB1r 1  18                   clc
+000CB2r 1  69 01                adc     #1
+000CB4r 1  8D rr rr             sta     need
+000CB7r 1  C8           @rs1:   iny
+000CB8r 1  D0 E0                bne     @rl
+000CBAr 1  98           @rend:  tya
+000CBBr 1  38                   sec
+000CBCr 1  ED rr rr             sbc     pcol
+000CBFr 1  8D rr rr             sta     runl
+000CC2r 1  AD rr rr             lda     cur_rep         ; draw how many: the repeat count already set
+000CC5r 1  CD rr rr             cmp     need            ; if it fits, one square for a single change,
+000CC8r 1  90 07                bcc     @nofit          ; else the whole run
+000CCAr 1  CD rr rr             cmp     runl
+000CCDr 1  F0 0C                beq     @setk
+000CCFr 1  90 0A                bcc     @setk
+000CD1r 1  AD rr rr     @nofit: lda     need
+000CD4r 1  C9 01                cmp     #1
+000CD6r 1  F0 03                beq     @setk
+000CD8r 1  AD rr rr             lda     runl
+000CDBr 1  8D rr rr     @setk:  sta     kcnt
+000CDEr 1  AD rr rr             lda     pcol            ; the cursor: text column BX + 2 * pcol
+000CE1r 1  0A                   asl
+000CE2r 1  18                   clc
+000CE3r 1  69 1E                adc     #BX
+000CE5r 1  AA                   tax
+000CE6r 1  AD rr rr             lda     prow
+000CE9r 1  18                   clc
+000CEAr 1  69 02                adc     #BY
+000CECr 1  A8                   tay
+000CEDr 1  CC rr rr             cpy     cur_y
+000CF0r 1  D0 0B                bne     @go
+000CF2r 1  EC rr rr             cpx     cur_x
+000CF5r 1  F0 0C                beq     @put
+000CF7r 1  20 rr rr             jsr     setcol
+000CFAr 1  4C rr rr             jmp     @put
+000CFDr 1  20 rr rr     @go:    jsr     gotoxy
+000D00r 1  8C rr rr             sty     cur_y
+000D03r 1  AD rr rr     @put:   lda     kcnt            ; where the cursor will be
+000D06r 1  0A                   asl
+000D07r 1  8D rr rr             sta     tmp
+000D0Ar 1  8A                   txa
+000D0Br 1  18                   clc
+000D0Cr 1  6D rr rr             adc     tmp
+000D0Fr 1  8D rr rr             sta     cur_x
+000D12r 1  AD rr rr             lda     kcnt
+000D15r 1  20 rr rr             jsr     set_rep
+000D18r 1  AD rr rr             lda     val
+000D1Br 1  20 rr rr             jsr     put_glyph
+000D1Er 1  AE rr rr             ldx     tmp2            ; the terminal shows them now
+000D21r 1  AC rr rr             ldy     kcnt
+000D24r 1  AD rr rr             lda     val
+000D27r 1  9D rr rr     @sw:    sta     shown,x
+000D2Ar 1  E8                   inx
+000D2Br 1  88                   dey
+000D2Cr 1  D0 F9                bne     @sw
+000D2Er 1  CA                   dex                     ; (the loop steps on to the next)
+000D2Fr 1  AD rr rr             lda     pcol
+000D32r 1  18                   clc
+000D33r 1  6D rr rr             adc     kcnt
+000D36r 1  38                   sec
+000D37r 1  E9 01                sbc     #1
+000D39r 1  8D rr rr             sta     pcol
+000D3Cr 1  4C rr rr             jmp     @same
+000D3Fr 1               
+000D3Fr 1               show_score:
+000D3Fr 1  20 rr rr             jsr     txt_mode
+000D42r 1  A2 38                ldx     #SX
+000D44r 1  A0 0B                ldy     #11
+000D46r 1  20 rr rr             jsr     gotoxy
+000D49r 1  AD rr rr             lda     score+2
+000D4Cr 1  20 rr rr             jsr     prbcd
+000D4Fr 1  AD rr rr             lda     score+1
+000D52r 1  20 rr rr             jsr     prbcd
+000D55r 1  AD rr rr             lda     score
+000D58r 1  4C rr rr             jmp     prbcd
+000D5Br 1               
+000D5Br 1               ; ============================================================================
+000D5Br 1               ; input
+000D5Br 1               ; ============================================================================
+000D5Br 1  AD rr rr     input:  lda     ctrl
+000D5Er 1  F0 71                beq     @keys
+000D60r 1  20 rr rr             jsr     read_pad
+000D63r 1  AD rr rr             lda     padnew          ; left / right: move now, repeat when held
+000D66r 1  29 C0                and     #PAD_LEFT | PAD_RIGHT
+000D68r 1  F0 0B                beq     @held
+000D6Ar 1  A9 00                lda     #0
+000D6Cr 1  8D rr rr             sta     das
+000D6Fr 1  20 rr rr             jsr     pad_move
+000D72r 1  4C rr rr             jmp     @rot
+000D75r 1  AD rr rr     @held:  lda     pad
+000D78r 1  29 C0                and     #PAD_LEFT | PAD_RIGHT
+000D7Ar 1  F0 12                beq     @rot
+000D7Cr 1  EE rr rr             inc     das
+000D7Fr 1  AD rr rr             lda     das
+000D82r 1  C9 0C                cmp     #DAS_DELAY
+000D84r 1  90 08                bcc     @rot
+000D86r 1  A9 09                lda     #DAS_DELAY - DAS_RATE
+000D88r 1  8D rr rr             sta     das
+000D8Br 1  20 rr rr             jsr     pad_move
+000D8Er 1  AD rr rr     @rot:   lda     padnew
+000D91r 1  29 01                and     #PAD_A
+000D93r 1  F0 05                beq     @b
+000D95r 1  A9 01                lda     #1
+000D97r 1  20 rr rr             jsr     rotate
+000D9Ar 1  AD rr rr     @b:     lda     padnew
+000D9Dr 1  29 02                and     #PAD_B
+000D9Fr 1  F0 05                beq     @up
+000DA1r 1  A9 03                lda     #3
+000DA3r 1  20 rr rr             jsr     rotate
+000DA6r 1  AD rr rr     @up:    lda     padnew
+000DA9r 1  29 10                and     #PAD_UP
+000DABr 1  F0 06                beq     @dn
+000DADr 1  20 rr rr             jsr     hard_drop
+000DB0r 1  4C rr rr             jmp     @st
+000DB3r 1  AD rr rr     @dn:    lda     pad
+000DB6r 1  29 20                and     #PAD_DOWN
+000DB8r 1  F0 0D                beq     @st
+000DBAr 1  EE rr rr             inc     sdcount
+000DBDr 1  AD rr rr             lda     sdcount
+000DC0r 1  29 01                and     #1
+000DC2r 1  F0 03                beq     @st
+000DC4r 1  20 rr rr             jsr     soft_drop
+000DC7r 1  AD rr rr     @st:    lda     padnew
+000DCAr 1  29 08                and     #PAD_START
+000DCCr 1  F0 03                beq     @keys
+000DCEr 1  20 rr rr             jsr     pause
+000DD1r 1  AD rr rr     @keys:  lda     need_lock       ; (stop once the piece is down)
+000DD4r 1  D0 0B                bne     @done
+000DD6r 1  20 00 FE             jsr     getc
+000DD9r 1  90 06                bcc     @done
+000DDBr 1  20 rr rr             jsr     handle_key
+000DDEr 1  4C rr rr             jmp     @keys
+000DE1r 1  60           @done:  rts
+000DE2r 1               
+000DE2r 1               pad_move:
+000DE2r 1  AD rr rr             lda     pad
+000DE5r 1  29 40                and     #PAD_LEFT
+000DE7r 1  F0 05                beq     @r
+000DE9r 1  A9 FF                lda     #$FF
+000DEBr 1  4C rr rr             jmp     move
+000DEEr 1  A9 01        @r:     lda     #1
+000DF0r 1  4C rr rr             jmp     move
+000DF3r 1               
+000DF3r 1               handle_key:
+000DF3r 1  AE rr rr             ldx     esc_st          ; arrow keys: ESC [ A..D
+000DF6r 1  F0 2C                beq     @plain
+000DF8r 1  E0 01                cpx     #1
+000DFAr 1  D0 12                bne     @esc2
+000DFCr 1  C9 5B                cmp     #'['
+000DFEr 1  F0 0A                beq     @br
+000E00r 1  C9 4F                cmp     #'O'
+000E02r 1  F0 06                beq     @br
+000E04r 1  A9 00                lda     #0
+000E06r 1  8D rr rr             sta     esc_st
+000E09r 1  60                   rts
+000E0Ar 1  EE rr rr     @br:    inc     esc_st
+000E0Dr 1  60                   rts
+000E0Er 1  A2 00        @esc2:  ldx     #0
+000E10r 1  8E rr rr             stx     esc_st
+000E13r 1  C9 41                cmp     #'A'
+000E15r 1  F0 60                beq     @rot
+000E17r 1  C9 42                cmp     #'B'
+000E19r 1  F0 66                beq     @down
+000E1Br 1  C9 43                cmp     #'C'
+000E1Dr 1  F0 53                beq     @right
+000E1Fr 1  C9 44                cmp     #'D'
+000E21r 1  F0 4A                beq     @left
+000E23r 1  60                   rts
+000E24r 1  C9 1B        @plain: cmp     #$1B
+000E26r 1  D0 04                bne     @np
+000E28r 1  EE rr rr             inc     esc_st
+000E2Br 1  60                   rts
+000E2Cr 1  AE rr rr     @np:    ldx     ctrl            ; gamepad mode: ignore what the pad types
+000E2Fr 1  F0 06                beq     @kb
+000E31r 1  20 rr rr             jsr     pad_typed
+000E34r 1  90 01                bcc     @kb
+000E36r 1  60                   rts
+000E37r 1  C9 61        @kb:    cmp     #'a'
+000E39r 1  90 06                bcc     @uc
+000E3Br 1  C9 7B                cmp     #'z'+1
+000E3Dr 1  B0 02                bcs     @uc
+000E3Fr 1  29 DF                and     #$DF
+000E41r 1  C9 41        @uc:    cmp     #'A'
+000E43r 1  F0 28                beq     @left
+000E45r 1  C9 44                cmp     #'D'
+000E47r 1  F0 29                beq     @right
+000E49r 1  C9 57                cmp     #'W'
+000E4Br 1  F0 2A                beq     @rot
+000E4Dr 1  C9 58                cmp     #'X'
+000E4Fr 1  F0 26                beq     @rot
+000E51r 1  C9 5A                cmp     #'Z'
+000E53r 1  F0 27                beq     @back
+000E55r 1  C9 53                cmp     #'S'
+000E57r 1  F0 28                beq     @down
+000E59r 1  C9 20                cmp     #' '
+000E5Br 1  F0 27                beq     @drop
+000E5Dr 1  C9 50                cmp     #'P'
+000E5Fr 1  F0 26                beq     @pause
+000E61r 1  C9 51                cmp     #'Q'
+000E63r 1  F0 25                beq     @quit
+000E65r 1  C9 4D                cmp     #'M'
+000E67r 1  D0 03                bne     @r
+000E69r 1  4C rr rr             jmp     sfx_toggle
+000E6Cr 1  60           @r:     rts
+000E6Dr 1  A9 FF        @left:  lda     #$FF
+000E6Fr 1  4C rr rr             jmp     move
+000E72r 1  A9 01        @right: lda     #1
+000E74r 1  4C rr rr             jmp     move
+000E77r 1  A9 01        @rot:   lda     #1
+000E79r 1  4C rr rr             jmp     rotate
+000E7Cr 1  A9 03        @back:  lda     #3
+000E7Er 1  4C rr rr             jmp     rotate
+000E81r 1  4C rr rr     @down:  jmp     soft_drop
+000E84r 1  4C rr rr     @drop:  jmp     hard_drop
+000E87r 1  4C rr rr     @pause: jmp     pause
+000E8Ar 1  A9 01        @quit:  lda     #1
+000E8Cr 1  8D rr rr             sta     quit
+000E8Fr 1  60                   rts
+000E90r 1               
+000E90r 1  20 rr rr     pause:  jsr     sfx_hush        ; (quiet while paused)
+000E93r 1  20 rr rr             jsr     txt_mode
+000E96r 1  A2 38                ldx     #SX
+000E98r 1  A0 08                ldy     #8
+000E9Ar 1  20 rr rr             jsr     gotoxy
+000E9Dr 1  A9 rr                lda     #<paused_txt
+000E9Fr 1  A0 rr                ldy     #>paused_txt
+000EA1r 1  20 rr rr             jsr     print
+000EA4r 1  20 rr rr             jsr     flush_in
+000EA7r 1  20 rr rr     @w:     jsr     read_pad
+000EAAr 1  AD rr rr             lda     padnew
+000EADr 1  29 08                and     #PAD_START
+000EAFr 1  D0 05                bne     @go
+000EB1r 1  20 00 FE             jsr     getc
+000EB4r 1  90 F1                bcc     @w
+000EB6r 1  20 rr rr     @go:    jsr     flush_in
+000EB9r 1  A2 38                ldx     #SX
+000EBBr 1  A0 08                ldy     #8
+000EBDr 1  20 rr rr             jsr     gotoxy
+000EC0r 1  A9 rr                lda     #<unpaused_txt
+000EC2r 1  A0 rr                ldy     #>unpaused_txt
+000EC4r 1  4C rr rr             jmp     print
+000EC7r 1               
+000EC7r 1               ; ============================================================================
+000EC7r 1               ; game over
+000EC7r 1               ; ============================================================================
+000EC7r 1               game_over:
+000EC7r 1  20 rr rr             jsr     sfx_off         ; the music stops
+000ECAr 1  A9 09                lda     #SND_OVERA
+000ECCr 1  20 rr rr             jsr     sfx_snd
+000ECFr 1  A9 0A                lda     #SND_OVERB
+000ED1r 1  20 rr rr             jsr     sfx_snd
+000ED4r 1  20 rr rr             jsr     compose         ; show where it ended
+000ED7r 1  20 rr rr             jsr     present
+000EDAr 1  A9 BE                lda     #VIS - BW       ; fill the well from the bottom up
+000EDCr 1  8D rr rr             sta     tmp3
+000EDFr 1  AE rr rr     @fill:  ldx     tmp3
+000EE2r 1  A0 0A                ldy     #BW
+000EE4r 1  A9 09                lda     #G_FLASH
+000EE6r 1  9D rr rr     @f:     sta     disp,x
+000EE9r 1  E8                   inx
+000EEAr 1  88                   dey
+000EEBr 1  D0 F9                bne     @f
+000EEDr 1  20 rr rr             jsr     present
+000EF0r 1  A9 1E                lda     #30
+000EF2r 1  20 rr rr             jsr     delay_ms
+000EF5r 1  AD rr rr             lda     tmp3
+000EF8r 1  38                   sec
+000EF9r 1  E9 0A                sbc     #BW
+000EFBr 1  8D rr rr             sta     tmp3
+000EFEr 1  B0 DF                bcs     @fill
+000F00r 1  A2 02                ldx     #2              ; new high score?
+000F02r 1  BD rr rr     @hc:    lda     score,x
+000F05r 1  DD rr rr             cmp     hiscore,x
+000F08r 1  90 15                bcc     @nohi
+000F0Ar 1  D0 05                bne     @hi
+000F0Cr 1  CA                   dex
+000F0Dr 1  10 F3                bpl     @hc
+000F0Fr 1  30 0E                bmi     @nohi           ; equal
+000F11r 1  A2 02        @hi:    ldx     #2
+000F13r 1  BD rr rr     @hs:    lda     score,x
+000F16r 1  9D rr rr             sta     hiscore,x
+000F19r 1  CA                   dex
+000F1Ar 1  10 F7                bpl     @hs
+000F1Cr 1  20 rr rr             jsr     show_stats
+000F1Fr 1  A9 rr        @nohi:  lda     #<over_txt
+000F21r 1  A0 rr                ldy     #>over_txt
+000F23r 1  20 rr rr             jsr     print
+000F26r 1  A9 0A                lda     #10
+000F28r 1  20 rr rr             jsr     delay_long      ; ignore keys for half a second
+000F2Br 1  20 rr rr             jsr     flush_in
+000F2Er 1  20 rr rr     @wait:  jsr     menu_key
+000F31r 1  C9 51                cmp     #'Q'
+000F33r 1  D0 03                bne     @nq
+000F35r 1  4C rr rr             jmp     title
+000F38r 1  C9 4D        @nq:    cmp     #'M'
+000F3Ar 1  D0 06                bne     @nm
+000F3Cr 1  20 rr rr             jsr     sfx_toggle
+000F3Fr 1  4C rr rr             jmp     @wait
+000F42r 1  C9 20        @nm:    cmp     #' '
+000F44r 1  F0 04                beq     @again
+000F46r 1  C9 80                cmp     #PAD_GO
+000F48r 1  D0 E4                bne     @wait
+000F4Ar 1  4C rr rr     @again: jmp     new_game
+000F4Dr 1               
+000F4Dr 1               ; ============================================================================
+000F4Dr 1               ; data
+000F4Dr 1               ; ============================================================================
+000F4Dr 1                       .segment "RODATA"
+000000r 1                       .include "stacker_data.inc"
+000000r 2               ; generated by gen.py
+000000r 2               pc_x:   ; [piece * 16 + rotation * 4 + square]
+000000r 2  00 01 02 03          .byte   $00, $01, $02, $03, $02, $02, $02, $02, $00, $01, $02, $03, $01, $01, $01, $01   ; I
+000004r 2  02 02 02 02  
+000008r 2  00 01 02 03  
+000010r 2  01 02 01 02          .byte   $01, $02, $01, $02, $01, $02, $01, $02, $01, $02, $01, $02, $01, $02, $01, $02   ; O
+000014r 2  01 02 01 02  
+000018r 2  01 02 01 02  
+000020r 2  01 00 01 02          .byte   $01, $00, $01, $02, $01, $01, $02, $01, $00, $01, $02, $01, $01, $00, $01, $01   ; T
+000024r 2  01 01 02 01  
+000028r 2  00 01 02 01  
+000030r 2  01 02 00 01          .byte   $01, $02, $00, $01, $01, $01, $02, $02, $01, $02, $00, $01, $00, $00, $01, $01   ; S
+000034r 2  01 01 02 02  
+000038r 2  01 02 00 01  
+000040r 2  00 01 01 02          .byte   $00, $01, $01, $02, $02, $01, $02, $01, $00, $01, $01, $02, $01, $00, $01, $00   ; Z
+000044r 2  02 01 02 01  
+000048r 2  00 01 01 02  
+000050r 2  00 00 01 02          .byte   $00, $00, $01, $02, $01, $02, $01, $01, $00, $01, $02, $02, $01, $01, $00, $01   ; J
+000054r 2  01 02 01 01  
+000058r 2  00 01 02 02  
+000060r 2  02 00 01 02          .byte   $02, $00, $01, $02, $01, $01, $01, $02, $00, $01, $02, $00, $00, $01, $01, $01   ; L
+000064r 2  01 01 01 02  
+000068r 2  00 01 02 00  
+000070r 2               pc_y:   ; [piece * 16 + rotation * 4 + square]
+000070r 2  01 01 01 01          .byte   $01, $01, $01, $01, $00, $01, $02, $03, $02, $02, $02, $02, $00, $01, $02, $03   ; I
+000074r 2  00 01 02 03  
+000078r 2  02 02 02 02  
+000080r 2  00 00 01 01          .byte   $00, $00, $01, $01, $00, $00, $01, $01, $00, $00, $01, $01, $00, $00, $01, $01   ; O
+000084r 2  00 00 01 01  
+000088r 2  00 00 01 01  
+000090r 2  00 01 01 01          .byte   $00, $01, $01, $01, $00, $01, $01, $02, $01, $01, $01, $02, $00, $01, $01, $02   ; T
+000094r 2  00 01 01 02  
+000098r 2  01 01 01 02  
+0000A0r 2  00 00 01 01          .byte   $00, $00, $01, $01, $00, $01, $01, $02, $01, $01, $02, $02, $00, $01, $01, $02   ; S
+0000A4r 2  00 01 01 02  
+0000A8r 2  01 01 02 02  
+0000B0r 2  00 00 01 01          .byte   $00, $00, $01, $01, $00, $01, $01, $02, $01, $01, $02, $02, $00, $01, $01, $02   ; Z
+0000B4r 2  00 01 01 02  
+0000B8r 2  01 01 02 02  
+0000C0r 2  00 01 01 01          .byte   $00, $01, $01, $01, $00, $00, $01, $02, $01, $01, $01, $02, $00, $01, $02, $02   ; J
+0000C4r 2  00 00 01 02  
+0000C8r 2  01 01 01 02  
+0000D0r 2  00 01 01 01          .byte   $00, $01, $01, $01, $00, $01, $02, $02, $01, $01, $01, $02, $00, $00, $01, $02   ; L
+0000D4r 2  00 01 02 02  
+0000D8r 2  01 01 01 02  
+0000E0r 2               NGLYPH = 11
+0000E0r 2  00 3F 37 3B  glyph_l: .byte   $00, $3F, $37, $3B, $19, $2E, $37, $33, $11, $FF, $00
+0000E4r 2  19 2E 37 33  
+0000E8r 2  11 FF 00     
+0000EBr 2  00 15 15 11  glyph_r: .byte   $00, $15, $15, $11, $11, $04, $11, $15, $11, $FF, $00
+0000EFr 2  11 04 11 15  
+0000F3r 2  11 FF 00     
+0000F6r 2               BANNER_W = 27          ; squares
+0000F6r 2               BANNER_H = 5
+0000F6r 2               banner:  ; glyph numbers, row by row
+0000F6r 2  01 01 01 0A          .byte   $01, $01, $01, $0A, $01, $01, $01, $0A, $01, $01, $01, $0A, $01, $01, $01, $0A, $01, $0A, $01, $0A, $01, $01, $01, $0A, $01, $01, $0A
+0000FAr 2  01 01 01 0A  
+0000FEr 2  01 01 01 0A  
+000111r 2  01 0A 0A 0A          .byte   $01, $0A, $0A, $0A, $0A, $01, $0A, $0A, $01, $0A, $01, $0A, $01, $0A, $0A, $0A, $01, $0A, $01, $0A, $01, $0A, $0A, $0A, $01, $0A, $01
+000115r 2  0A 01 0A 0A  
+000119r 2  01 0A 01 0A  
+00012Cr 2  01 01 01 0A          .byte   $01, $01, $01, $0A, $0A, $01, $0A, $0A, $01, $01, $01, $0A, $01, $0A, $0A, $0A, $01, $01, $0A, $0A, $01, $01, $0A, $0A, $01, $01, $0A
+000130r 2  0A 01 0A 0A  
+000134r 2  01 01 01 0A  
+000147r 2  0A 0A 01 0A          .byte   $0A, $0A, $01, $0A, $0A, $01, $0A, $0A, $01, $0A, $01, $0A, $01, $0A, $0A, $0A, $01, $0A, $01, $0A, $01, $0A, $0A, $0A, $01, $0A, $01
+00014Br 2  0A 01 0A 0A  
+00014Fr 2  01 0A 01 0A  
+000162r 2  01 01 01 0A          .byte   $01, $01, $01, $0A, $0A, $01, $0A, $0A, $01, $0A, $01, $0A, $01, $01, $01, $0A, $01, $0A, $01, $0A, $01, $01, $01, $0A, $01, $0A, $01
+000166r 2  0A 01 0A 0A  
+00016Ar 2  01 0A 01 0A  
+00017Dr 2               
+00017Dr 1                       .include "stacker_sound.inc"    ; the music and effects (game_sounds.py)
+00017Dr 2               ; generated by ../ay/tools/game_sounds.py: STACKER (scripts for ay/sfx.s)
+00017Dr 2               
+00017Dr 2               MUS_THEME = 0
+00017Dr 2               SND_MOVE = 2
+00017Dr 2               SND_ROTATE = 3
+00017Dr 2               SND_LOCK = 4
+00017Dr 2               SND_DROP = 5
+00017Dr 2               SND_LINE = 6
+00017Dr 2               SND_LINES = 7
+00017Dr 2               SND_LEVEL = 8
+00017Dr 2               SND_OVERA = 9
+00017Dr 2               SND_OVERB = 10
+00017Dr 2               
+00017Dr 2               sfx_scripts:
+00017Dr 2  rr rr rr rr          .word   mus_themeA, mus_themeB, snd_move, snd_rotate, snd_lock, snd_drop
+000181r 2  rr rr rr rr  
+000185r 2  rr rr rr rr  
+000189r 2  rr rr rr rr          .word   snd_line, snd_lines, snd_level, snd_overA, snd_overB
+00018Dr 2  rr rr rr rr  
+000191r 2  rr rr        
+000193r 2               sfx_prio:                       ; the voice x 16 + the priority
+000193r 2  00 10 51 52          .byte   $00, $10, $51, $52, $53, $54, $56, $57, $37, $39, $49
+000197r 2  53 54 56 57  
+00019Br 2  37 39 49     
+00019Er 2               mus_themeA:
+00019Er 2  02 0A 06 02          .byte   $02, $0A, $06, $02
+0001A2r 2               mus_themeA_l:
+0001A2r 2  0B 18 54 0B          .byte   $0B, $18, $54, $0B, $0C, $4F, $50, $0B, $18, $52, $0B, $0C, $50, $4F, $0B, $18
+0001A6r 2  0C 4F 50 0B  
+0001AAr 2  18 52 0B 0C  
+0001B2r 2  4D 0B 0C 4D          .byte   $4D, $0B, $0C, $4D, $50, $0B, $18, $54, $0B, $0C, $52, $50, $0B, $24, $4F, $0B
+0001B6r 2  50 0B 18 54  
+0001BAr 2  0B 0C 52 50  
+0001C2r 2  0C 50 0B 18          .byte   $0C, $50, $0B, $18, $52, $54, $50, $4D, $0B, $30, $4D, $0B, $0C, $0A, $0B, $18
+0001C6r 2  52 54 50 4D  
+0001CAr 2  0B 30 4D 0B  
+0001D2r 2  52 0B 0C 55          .byte   $52, $0B, $0C, $55, $0B, $18, $59, $0B, $0C, $57, $55, $0B, $24, $54, $0B, $0C
+0001D6r 2  0B 18 59 0B  
+0001DAr 2  0C 57 55 0B  
+0001E2r 2  50 0B 18 54          .byte   $50, $0B, $18, $54, $0B, $0C, $52, $50, $0B, $18, $4F, $0B, $0C, $4F, $50, $0B
+0001E6r 2  0B 0C 52 50  
+0001EAr 2  0B 18 4F 0B  
+0001F2r 2  18 52 54 50          .byte   $18, $52, $54, $50, $4D, $4D, $0A
+0001F6r 2  4D 4D 0A     
+0001F9r 2  09 rr rr             .byte   $09, <mus_themeA_l, >mus_themeA_l
+0001FCr 2               mus_themeB:
+0001FCr 2  02 0B 06 03          .byte   $02, $0B, $06, $03
+000200r 2               mus_themeB_l:
+000200r 2  07 04 0B 0C          .byte   $07, $04, $0B, $0C, $30, $3C, $08, $07, $04, $0B, $0C, $35, $41, $08, $07, $04
+000204r 2  30 3C 08 07  
+000208r 2  04 0B 0C 35  
+000210r 2  0B 0C 30 3C          .byte   $0B, $0C, $30, $3C, $08, $07, $04, $0B, $0C, $35, $41, $08, $07, $04, $0B, $0C
+000214r 2  08 07 04 0B  
+000218r 2  0C 35 41 08  
+000220r 2  2E 3A 08 07          .byte   $2E, $3A, $08, $07, $04, $0B, $0C, $2C, $38, $08, $07, $04, $0B, $0C, $30, $3C
+000224r 2  04 0B 0C 2C  
+000228r 2  38 08 07 04  
+000230r 2  08 07 04 0B          .byte   $08, $07, $04, $0B, $0C, $35, $41, $08
+000234r 2  0C 35 41 08  
+000238r 2  09 rr rr             .byte   $09, <mus_themeB_l, >mus_themeB_l
+00023Br 2               snd_move:
+00023Br 2  02 07 06 01          .byte   $02, $07, $06, $01, $01, $78, $00, $81, $00
+00023Fr 2  01 78 00 81  
+000243r 2  00           
+000244r 2               snd_rotate:
+000244r 2  02 09 06 01          .byte   $02, $09, $06, $01, $01, $A0, $00, $05, $EC, $FF, $82, $00
+000248r 2  01 A0 00 05  
+00024Cr 2  EC FF 82 00  
+000250r 2               snd_lock:
+000250r 2  04 03 03 1E          .byte   $04, $03, $03, $1E, $02, $0B, $06, $01, $01, $B0, $04, $84, $00
+000254r 2  02 0B 06 01  
+000258r 2  01 B0 04 84  
+00025Dr 2               snd_drop:
+00025Dr 2  04 03 03 0C          .byte   $04, $03, $03, $0C, $02, $0D, $06, $01, $01, $2C, $01, $05, $3C, $00, $89, $00
+000261r 2  02 0D 06 01  
+000265r 2  01 2C 01 05  
+00026Dr 2               snd_line:
+00026Dr 2  02 0D 06 01          .byte   $02, $0D, $06, $01, $0B, $03, $5C, $60, $63, $0B, $09, $68, $00
+000271r 2  0B 03 5C 60  
+000275r 2  63 0B 09 68  
+00027Ar 2               snd_lines:
+00027Ar 2  02 0D 06 01          .byte   $02, $0D, $06, $01, $0B, $03, $5C, $60, $63, $68, $60, $63, $68, $6C, $63, $68
+00027Er 2  0B 03 5C 60  
+000282r 2  63 68 60 63  
+00028Ar 2  6C 0B 0C 6F          .byte   $6C, $0B, $0C, $6F, $00
+00028Er 2  00           
+00028Fr 2               snd_level:
+00028Fr 2  02 0C 06 01          .byte   $02, $0C, $06, $01, $0B, $04, $57, $5C, $60, $0B, $08, $63, $0B, $04, $60, $0B
+000293r 2  0B 04 57 5C  
+000297r 2  60 0B 08 63  
+00029Fr 2  10 63 00             .byte   $10, $63, $00
+0002A2r 2               snd_overA:
+0002A2r 2  02 0B 06 01          .byte   $02, $0B, $06, $01, $0B, $0E, $54, $50, $4D, $48, $49, $46, $0B, $1C, $43, $0B
+0002A6r 2  0B 0E 54 50  
+0002AAr 2  4D 48 49 46  
+0002B2r 2  38 41 00             .byte   $38, $41, $00
+0002B5r 2               snd_overB:
+0002B5r 2  02 0B 06 02          .byte   $02, $0B, $06, $02, $0B, $1C, $35, $31, $30, $0B, $38, $29, $00
+0002B9r 2  0B 1C 35 31  
+0002BDr 2  30 0B 38 29  
+0002C2r 2               ; (292 bytes of scripts)
+0002C2r 2               
+0002C2r 1               
+0002C2r 1               rowoff:
+0002C2r 1  00 0A 14 1E  .repeat BH, R
+0002C6r 1  28 32 3C 46  
+0002CAr 1  50 5A 64 6E  
+0002D8r 1                       .byte   R * BW
+0002D8r 1               .endrepeat
+0002D8r 1  00 FF 01 FE  kicks:  .byte   0, $FF, 1, $FE, 2       ; sideways nudges when turning
+0002DCr 1  02           
+0002DDr 1               ; ticks per row by level (a tick is about 17 ms)
+0002DDr 1               fall_ticks:
+0002DDr 1  30 2B 26 21          .byte   48, 43, 38, 33, 28, 23, 18, 13, 8, 6, 5, 5, 5, 4, 4, 4, 3, 3, 3, 2
+0002E1r 1  1C 17 12 0D  
+0002E5r 1  08 06 05 05  
+0002F1r 1               NSPEED = * - fall_ticks
+0002F1r 1               line_pts:       ; BCD, 4 bytes each (1 to 4 lines)
+0002F1r 1  40 00 00 00          .byte   $40, $00, $00, 0
+0002F5r 1  00 01 00 00          .byte   $00, $01, $00, 0
+0002F9r 1  00 03 00 00          .byte   $00, $03, $00, 0
+0002FDr 1  00 12 00 00          .byte   $00, $12, $00, 0
+000301r 1               
+000301r 1  18 00 0C 02  cls_txt:.byte   TC_ATTR, ATTR_TEXT, TC_CLS, TC_CURSOR, 0, TERM
+000305r 1  00 FF        
+000307r 1               title_txt:
+000307r 1  0F 09 0E 14          .byte   TC_ROW, 9, TC_COL, 20, "A FALLING BLOCKS GAME FOR THE 6502 SBC"
+00030Br 1  41 20 46 41  
+00030Fr 1  4C 4C 49 4E  
+000331r 1  0F 0B 0E 0C          .byte   TC_ROW, 11, TC_COL, 12, "KEYS: A/D MOVE   W ROTATE   Z ROTATE BACK   S DOWN   SPACE DROP"
+000335r 1  4B 45 59 53  
+000339r 1  3A 20 41 2F  
+000374r 1  0F 0C 0E 0C          .byte   TC_ROW, 12, TC_COL, 12, "PAD:  LEFT/RIGHT MOVE   A/B ROTATE   DOWN DOWN   UP DROP"
+000378r 1  50 41 44 3A  
+00037Cr 1  20 20 4C 45  
+0003B0r 1  0F 0D 0E 0C          .byte   TC_ROW, 13, TC_COL, 12, "P OR START PAUSES, M SOUND, Q QUITS"
+0003B4r 1  50 20 4F 52  
+0003B8r 1  20 53 54 41  
+0003D7r 1  0F 0F 0E 1A          .byte   TC_ROW, 15, TC_COL, 26, "STARTING LEVEL (0-9):"
+0003DBr 1  53 54 41 52  
+0003DFr 1  54 49 4E 47  
+0003F0r 1  0F 17 0E 15          .byte   TC_ROW, 23, TC_COL, 21, "SPACE OR START: PLAY      Q: QUIT", TERM
+0003F4r 1  53 50 41 43  
+0003F8r 1  45 20 4F 52  
+000416r 1  48 49 47 48  hi_txt: .byte   "HIGH SCORE ", TERM
+00041Ar 1  20 53 43 4F  
+00041Er 1  52 45 20 FF  
+000422r 1               game_txt:
+000422r 1  18 00 0C 02          .byte   TC_ATTR, ATTR_TEXT, TC_CLS, TC_CURSOR, 0
+000426r 1  00           
+000427r 1  0F 00 0E 24          .byte   TC_ROW, 0, TC_COL, 36, "STACKER"
+00042Br 1  53 54 41 43  
+00042Fr 1  4B 45 52     
+000432r 1  0F 04 0E 38          .byte   TC_ROW, NY, TC_COL, NX, "NEXT"
+000436r 1  4E 45 58 54  
+00043Ar 1  0F 0A 0E 38          .byte   TC_ROW, 10, TC_COL, SX, "SCORE"
+00043Er 1  53 43 4F 52  
+000442r 1  45           
+000443r 1  0F 0D 0E 38          .byte   TC_ROW, 13, TC_COL, SX, "LINES"
+000447r 1  4C 49 4E 45  
+00044Br 1  53           
+00044Cr 1  0F 10 0E 38          .byte   TC_ROW, 16, TC_COL, SX, "LEVEL"
+000450r 1  4C 45 56 45  
+000454r 1  4C           
+000455r 1  0F 13 0E 38          .byte   TC_ROW, 19, TC_COL, SX, "HIGH", TERM
+000459r 1  48 49 47 48  
+00045Dr 1  FF           
+00045Er 1               help_kb_txt:
+00045Er 1  0F 04 0E 03          .byte   TC_ROW, 4, TC_COL, 3, "A D    MOVE"
+000462r 1  41 20 44 20  
+000466r 1  20 20 20 4D  
+00046Dr 1  0F 05 0E 03          .byte   TC_ROW, 5, TC_COL, 3, "W X    ROTATE"
+000471r 1  57 20 58 20  
+000475r 1  20 20 20 52  
+00047Er 1  0F 06 0E 03          .byte   TC_ROW, 6, TC_COL, 3, "Z      ROTATE BACK"
+000482r 1  5A 20 20 20  
+000486r 1  20 20 20 52  
+000494r 1  0F 07 0E 03          .byte   TC_ROW, 7, TC_COL, 3, "S      DOWN"
+000498r 1  53 20 20 20  
+00049Cr 1  20 20 20 44  
+0004A3r 1  0F 08 0E 03          .byte   TC_ROW, 8, TC_COL, 3, "SPACE  DROP"
+0004A7r 1  53 50 41 43  
+0004ABr 1  45 20 20 44  
+0004B2r 1  0F 0A 0E 03          .byte   TC_ROW, 10, TC_COL, 3, "ARROWS WORK TOO"
+0004B6r 1  41 52 52 4F  
+0004BAr 1  57 53 20 57  
+0004C5r 1  0F 0C 0E 03          .byte   TC_ROW, 12, TC_COL, 3, "P      PAUSE"
+0004C9r 1  50 20 20 20  
+0004CDr 1  20 20 20 50  
+0004D5r 1  0F 0D 0E 03          .byte   TC_ROW, 13, TC_COL, 3, "Q      QUIT"
+0004D9r 1  51 20 20 20  
+0004DDr 1  20 20 20 51  
+0004E4r 1  0F 0E 0E 03          .byte   TC_ROW, 14, TC_COL, 3, "M      SOUND", TERM
+0004E8r 1  4D 20 20 20  
+0004ECr 1  20 20 20 53  
+0004F5r 1               help_pad_txt:
+0004F5r 1  0F 04 0E 03          .byte   TC_ROW, 4, TC_COL, 3, "LEFT RIGHT  MOVE"
+0004F9r 1  4C 45 46 54  
+0004FDr 1  20 52 49 47  
+000509r 1  0F 05 0E 03          .byte   TC_ROW, 5, TC_COL, 3, "A           ROTATE"
+00050Dr 1  41 20 20 20  
+000511r 1  20 20 20 20  
+00051Fr 1  0F 06 0E 03          .byte   TC_ROW, 6, TC_COL, 3, "B           ROTATE BACK"
+000523r 1  42 20 20 20  
+000527r 1  20 20 20 20  
+00053Ar 1  0F 07 0E 03          .byte   TC_ROW, 7, TC_COL, 3, "DOWN        DOWN"
+00053Er 1  44 4F 57 4E  
+000542r 1  20 20 20 20  
+00054Er 1  0F 08 0E 03          .byte   TC_ROW, 8, TC_COL, 3, "UP          DROP"
+000552r 1  55 50 20 20  
+000556r 1  20 20 20 20  
+000562r 1  0F 0C 0E 03          .byte   TC_ROW, 12, TC_COL, 3, "START       PAUSE"
+000566r 1  53 54 41 52  
+00056Ar 1  54 20 20 20  
+000577r 1  0F 0D 0E 03          .byte   TC_ROW, 13, TC_COL, 3, "Q (KEY)     QUIT"
+00057Br 1  51 20 28 4B  
+00057Fr 1  45 59 29 20  
+00058Br 1  0F 0E 0E 03          .byte   TC_ROW, 14, TC_COL, 3, "M (KEY)     SOUND", TERM
+00058Fr 1  4D 20 28 4B  
+000593r 1  45 59 29 20  
+0005A1r 1               paused_txt:
+0005A1r 1  1B 5B 37 6D          .byte   RV_ON, " PAUSED ", RV_OFF, TC_ATTR, ATTR_TEXT, TERM
+0005A5r 1  20 50 41 55  
+0005A9r 1  53 45 44 20  
+0005B5r 1               unpaused_txt:
+0005B5r 1  20 20 20 20          .byte   "        ", TERM
+0005B9r 1  20 20 20 20  
+0005BDr 1  FF           
+0005BEr 1               over_txt:
+0005BEr 1  1B 5B 37 6D          .byte   RV_ON
+0005C2r 1  0F 09 0E 1E          .byte   TC_ROW, 9, TC_COL, BX, "                    "
+0005C6r 1  20 20 20 20  
+0005CAr 1  20 20 20 20  
+0005DAr 1  0F 0A 0E 1E          .byte   TC_ROW, 10, TC_COL, BX, "     GAME  OVER     "
+0005DEr 1  20 20 20 20  
+0005E2r 1  20 47 41 4D  
+0005F2r 1  0F 0B 0E 1E          .byte   TC_ROW, 11, TC_COL, BX, "                    "
+0005F6r 1  20 20 20 20  
+0005FAr 1  20 20 20 20  
+00060Ar 1  0F 0C 0E 1E          .byte   TC_ROW, 12, TC_COL, BX, "  SPACE / A: AGAIN  "
+00060Er 1  20 20 53 50  
+000612r 1  41 43 45 20  
+000622r 1  0F 0D 0E 1E          .byte   TC_ROW, 13, TC_COL, BX, "  Q: TITLE          "
+000626r 1  20 20 51 3A  
+00062Ar 1  20 54 49 54  
+00063Ar 1  0F 0E 0E 1E          .byte   TC_ROW, 14, TC_COL, BX, "                    "
+00063Er 1  20 20 20 20  
+000642r 1  20 20 20 20  
+000652r 1  1B 5B 32 37          .byte   RV_OFF, TC_ATTR, ATTR_TEXT, TERM
+000656r 1  6D 18 00 FF  
+00065Ar 1  18 00 0C 02  bye_txt:.byte   TC_ATTR, ATTR_TEXT, TC_CLS, TC_CURSOR, '_', TERM
+00065Er 1  5F FF        
+000660r 1               ctrl_kb_txt:
+000660r 1  43 4F 4E 54          .byte   "CONTROLS: KEYBOARD   (G: USE THE GAMEPAD)", TERM
+000664r 1  52 4F 4C 53  
+000668r 1  3A 20 4B 45  
+00068Ar 1               ctrl_pad_txt:
+00068Ar 1  43 4F 4E 54          .byte   "CONTROLS: GAMEPAD    (G: USE THE KEYBOARD)", TERM
+00068Er 1  52 4F 4C 53  
+000692r 1  3A 20 47 41  
+0006B5r 1               
+0006B5r 1               ; ============================================================================
+0006B5r 1               ; variables (not in the file; cleared at start)
+0006B5r 1               ; ============================================================================
+0006B5r 1                       .segment "BSS"
+000075r 1               bss_start:
+000075r 1  xx           ctrl:       .res 1              ; 0 keyboard, 1 gamepad
+000076r 1  xx           pad:        .res 1              ; gamepad buttons held
+000077r 1  xx           padold:     .res 1
+000078r 1  xx           padnew:     .res 1              ; newly pressed this tick
+000079r 1  xx xx        rng:        .res 2
+00007Br 1  xx           attr:       .res 1              ; the terminal's attribute ($FF = unknown)
+00007Cr 1  xx           cur_x:      .res 1              ; where the cursor is (cur_y $FF = unknown)
+00007Dr 1  xx           cur_y:      .res 1
+00007Er 1  xx           esc_st:     .res 1
+00007Fr 1  xx           quit:       .res 1
+000080r 1  xx           ticks:      .res 1              ; counts game ticks
+000081r 1  xx           npieces:    .res 1              ; counts pieces
+000082r 1  xx           dead:       .res 1
+000083r 1  xx           start_level:.res 1
+000084r 1  xx           level:      .res 1
+000085r 1  xx           to_next:    .res 1              ; lines to the next level
+000086r 1  xx xx xx     score:      .res 3              ; BCD, low byte first
+000089r 1  xx xx xx     hiscore:    .res 3
+00008Cr 1  xx xx        lines:      .res 2              ; BCD
+00008Er 1  xx           score_dirty:.res 1
+00008Fr 1  xx           ptype:      .res 1              ; the falling piece: 0..6
+000090r 1  xx           px:         .res 1              ; its box's square (may be < 0)
+000091r 1  xx           py:         .res 1              ; its box's row (0 = the top hidden row)
+000092r 1  xx           prot:       .res 1
+000093r 1  xx           next:       .res 1
+000094r 1  xx           tx:         .res 1              ; a place to test
+000095r 1  xx           ty:         .res 1
+000096r 1  xx           trot:       .res 1
+000097r 1  xx           pidx:       .res 1
+000098r 1  xx           gy:         .res 1              ; the ghost's row
+000099r 1  xx           kick:       .res 1
+00009Ar 1  xx           gcount:     .res 1              ; ticks since the last fall
+00009Br 1  xx           ltimer:     .res 1              ; ticks on the ground
+00009Cr 1  xx           lresets:    .res 1
+00009Dr 1  xx           need_lock:  .res 1
+00009Er 1  xx           dirty:      .res 1              ; the board picture changed
+00009Fr 1  xx           das:        .res 1
+0000A0r 1  xx           sdcount:    .res 1
+0000A1r 1  xx xx xx xx  bag:        .res 7
+0000A5r 1  xx xx xx     
+0000A8r 1  xx           bag_n:      .res 1
+0000A9r 1  xx           nfull:      .res 1
+0000AAr 1  xx xx xx xx  full:       .res 4              ; full rows, bottom first
+0000AEr 1  xx xx xx xx  nbuf:       .res 8
+0000B2r 1  xx xx xx xx  
+0000B6r 1  xx           prow:       .res 1
+0000B7r 1  xx           cur_rep:    .res 1              ; the terminal's repeat count now
+0000B8r 1  xx           val:        .res 1
+0000B9r 1  xx           need:       .res 1
+0000BAr 1  xx           runl:       .res 1
+0000BBr 1  xx           kcnt:       .res 1
+0000BCr 1  xx           pcol:       .res 1
+0000BDr 1  xx           tmp:        .res 1
+0000BEr 1  xx           tmp2:       .res 1
+0000BFr 1  xx           tmp3:       .res 1
+0000C0r 1  xx xx xx xx  board:      .res BW * BH
+0000C4r 1  xx xx xx xx  
+0000C8r 1  xx xx xx xx  
+00019Cr 1  xx xx xx xx  disp:       .res VIS
+0001A0r 1  xx xx xx xx  
+0001A4r 1  xx xx xx xx  
+000264r 1  xx xx xx xx  shown:      .res VIS
+000268r 1  xx xx xx xx  
+00026Cr 1  xx xx xx xx  
+00032Cr 1               bss_end:
+00032Cr 1               
