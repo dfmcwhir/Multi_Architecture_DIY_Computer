@@ -1,0 +1,3 @@
+#<h2> ISA_6502_Serial_Rev3 </h2>
+<p>This is a new card that hasn't been built or tested yet. It has the same 6551 ACIA chip and MAX232 serial interface, but now a PS2 keyboard and mouse interface has been moved to this board. The keyboard and mouse interfaces to the bus using an ATMEGA328 microcontroller. The code for the ATMEGA238 is based on Grant Searle code here: http://searle.x10host.com/MonitorKeyboard/index.html. The ATMEGA also provides a TTL serial console interface that can be read from and written to. This is for providing a UI when you don't have a keyboard and display hooked up to the computer without having to dedicate the card's main serial interface to that.</p>
+
