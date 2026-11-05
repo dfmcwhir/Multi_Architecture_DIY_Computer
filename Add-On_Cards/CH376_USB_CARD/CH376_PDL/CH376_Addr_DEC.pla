@@ -1,0 +1,33 @@
+# Berkeley PLA format generated using
+#
+# CUPL(WM)        5.0a Serial# MW-10400000
+# Device          g16v8s  Library DLIB-h-40-9
+# Created         Thu Oct 01 23:41:26 2026
+# Name            CH375ISA
+# Partno          
+# Revision        1
+# Date            2026-05-04
+# Designer        dfmcwhir
+# Company         
+# Assembly        
+# Location        
+#
+# Inputs  a1 a4 a5 a6 
+#         a7 act d0 int 
+#         ior iow usb 
+# Outputs act usb 
+.i 11
+.o 2
+.p 11
+----1------ 1~
+---1------- 1~
+--0-------- 1~
+-1--------- 1~
+--------11- 1~
+----1------ ~1
+---1------- ~1
+--0-------- ~1
+-1--------- ~1
+1---------- ~1
+--------11- ~1
+.end

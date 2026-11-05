@@ -1,0 +1,34 @@
+%SIGNAL
+PIN   3 =  a1 
+PIN   4 =  a4 
+PIN   5 =  a5 
+PIN   6 =  a6 
+PIN   7 =  a7 
+PIN  14 =  act 
+PIN  12 =  d0 
+PIN  13 =  int 
+PIN   2 =  ior 
+PIN   1 =  iow 
+PIN  15 =  usb 
+%END
+
+%FIELD
+%END
+
+%EQUATION
+act =>
+    a7
+  # a6
+  # !a5
+  # a4
+  # ior & iow
+
+usb =>
+    a7
+  # a6
+  # !a5
+  # a4
+  # a1
+  # ior & iow
+
+%END

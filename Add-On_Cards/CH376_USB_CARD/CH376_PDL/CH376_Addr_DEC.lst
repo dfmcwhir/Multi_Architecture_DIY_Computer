@@ -1,0 +1,52 @@
+LISTING FOR LOGIC DESCRIPTION FILE: CH376_Addr_DEC.pld               Page 1
+
+CUPL(WM): Universal Compiler for Programmable Logic
+Version 5.0a Serial# MW-10400000
+Copyright (c) 1983, 1998 Logical Devices, Inc.
+Created Thu Oct 01 23:41:26 2026
+
+  1:Name       CH375ISA;
+  2:Date        2026-05-04;
+  3:Revision    1;
+  4:Designer    dfmcwhir;
+  5:Company     ;
+  6:Assembly    ;
+  7:Location    ;
+  8:Device      g16v8;
+  9:PartNo  ;
+ 10:
+ 11:
+ 12:
+ 13:
+ 14:/** Inputs **/
+ 15:pin 1  = iow ;
+ 16:pin 2 = ior ;
+ 17:pin 3  = a1 ;
+ 18:pin 4  = a4 ;
+ 19:pin 5  = a5 ;
+ 20:pin 6  = a6 ;
+ 21:pin 7  = a7 ;
+ 22:pin 13 = int ;
+ 23:
+ 24:
+ 25:/** Outputs **/
+ 26:pin 12 = d0 ;
+ 27:pin 14 = act ;
+ 28:pin 15 = usb ;
+ 29:
+ 30:/** Declarations and Intermediate Variable Definitions  **/
+ 31:
+ 32:
+ 33:/** Logic Equations **/
+ 34:
+ 35:usb = a7 # a6 # !a5 # a4 # a1 # ( ior & iow);
+ 36:act = a7 # a6 # !a5 # a4 # ( ior & iow );
+ 37:/**d0  = int; **/
+ 38:/**d0.oe = a7 # a6 # !a5 # a4 # !a1 # ior; **/
+ 39:
+ 40:
+
+
+
+Jedec Fuse Checksum       (344e)
+Jedec Transmit Checksum   (bda8)

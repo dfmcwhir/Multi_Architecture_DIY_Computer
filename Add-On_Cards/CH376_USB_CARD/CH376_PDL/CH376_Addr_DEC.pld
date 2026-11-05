@@ -1,0 +1,38 @@
+Name       CH375ISA;
+Date        2026-05-04;
+Revision    1;
+Designer    dfmcwhir;
+Company     ;
+Assembly    ;
+Location    ;
+Device      g16v8;
+PartNo	;
+
+
+
+
+/** Inputs **/
+pin 1  = iow ;
+pin 2 = ior ;
+pin 3  = a1 ;
+pin 4  = a4 ;
+pin 5  = a5 ;
+pin 6  = a6 ;
+pin 7  = a7 ;
+pin 13 = int ;
+
+
+/** Outputs **/
+pin 12 = d0 ;
+pin 14 = act ;
+pin 15 = usb ;
+
+/** Declarations and Intermediate Variable Definitions  **/
+
+
+/** Logic Equations **/
+
+usb = a7 # a6 # !a5 # a4 # a1 # ( ior & iow);
+act = a7 # a6 # !a5 # a4 # ( ior & iow );
+/**d0  = int; **/
+/**d0.oe = a7 # a6 # !a5 # a4 # !a1 # ior; **/
