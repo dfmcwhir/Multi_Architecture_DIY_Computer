@@ -1,5 +1,5 @@
 <h1> 6502 CPU rev1 card</h1>
-<p>The initial idea was to make modular version of Ben Eater's breadboard 6502 on a PCB. Really there isn't a lot left of Ben's design. This is the card that all of the software in the 6502 was made for and tested on.</p>
+<p>The initial idea was to make modular version of Ben Eater's breadboard 6502 on a PCB. Really there isn't a lot left of Ben's design. This is the card that all of the software in the 6502_Software folder was made for and tested on.</p>
 
 <h2>Known Bugs</h2>
 <p>
