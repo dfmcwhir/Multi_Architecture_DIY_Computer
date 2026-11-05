@@ -1,0 +1,142 @@
+LISTING FOR LOGIC DESCRIPTION FILE: 6502_INTERRUPT.pld               Page 1
+
+CUPL(WM): Universal Compiler for Programmable Logic
+Version 5.0a Serial# MW-10400000
+Copyright (c) 1983, 1998 Logical Devices, Inc.
+Created Mon Oct 26 16:34:59 2026
+
+  1:Name     ISA_6502_CPU_INTERRUPT ;
+  2:PartNo   00 ;
+  3:Date     10/25/2026 ;
+  4:Revision 02 ;
+  5:Designer Engineer ;
+  6:Company  none ;
+  7:Assembly None ;
+  8:Location  ;
+  9:Device   g22v10 ;
+ 10:
+ 11:/*
+ 12: * CPU board I/O registers:
+ 13: *   $7FFF read : interrupt register ('574 /OE)
+ 14: *   $7FFE write: bank register  (D3-D0 -> bus A19-A16)
+ 15: *   $7FFE read : bank register readback on D3-D0 (D7-D4 not driven:
+ 16: *                use AND #$0F)
+ 17: *
+ 18: * Rev 02 changes
+ 19: *   - Interrupt register /OE now requires a read. Before, a write to $7FFF
+ 20: *     would have the '574 and the CPU driving the data bus together.
+ 21: *     It is still not gated with the clock (fast enough for 8 MHz):
+ 22: *     driving during clock-low of a read cycle is harmless here.
+ 23: *   - 4-bit bank register, loaded on the rising edge of /CLK (pin 1, from
+ 24: *     the 74ACT74 /Q), i.e. a few ns after the CPU clock falls at the end
+ 25: *     of the write cycle - inside the 65C02's write data hold time.
+ 26: *   - Bank outputs drive bus A16-A19 except while /DMA is low, so a future
+ 27: *     DMA master can drive those lines itself.
+ 28: *
+ 29: * /RESET (pin 22) clears the bank register to bank 0. Writing 0 to $7FFE
+ 30: * in BIOS init as well does no harm.
+ 31: *
+ 32: * New connections compared with rev 01:
+ 33: *   pin 1   <- /CLK (74ACT74 FF1 /Q)
+ 34: *   pin 11  <- R/W (CPU, or buffered R/W from the 74ACT00)
+ 35: *   pin 13  <- /DMA (bus DRQ2 line, high = normal)
+ 36: *   pins 14-17 <-> D0-D3 (data bus)
+ 37: *   pins 18-21  -> bus A16-A19
+ 38: *   pin 22  <- /RESET (was a spare copy of /OE)
+ 39: *   pin 23   -> interrupt register '574 /OE, as before
+ 40: */
+ 41:
+ 42:/* *************** INPUT PINS *********************/
+ 43:PIN 1    =  nCLK                     ; /* /CLK, register clock              */
+ 44:PIN 2    =  A0                       ;
+ 45:PIN 3    =  A1                       ;
+ 46:PIN 4    =  A2                       ;
+ 47:PIN 5    =  A3                       ;
+ 48:PIN 6    =  A4                       ;
+ 49:PIN 7    =  A5                       ;
+ 50:PIN 8    =  A6                       ;
+ 51:PIN 9    =  A7                       ;
+ 52:PIN 10   =  IOen                     ; /* /IOen from main GAL (pin level)   */
+ 53:PIN 11   =  RW                       ; /* R/W, high = read                  */
+
+LISTING FOR LOGIC DESCRIPTION FILE: 6502_INTERRUPT.pld               Page 2
+
+CUPL(WM): Universal Compiler for Programmable Logic
+Version 5.0a Serial# MW-10400000
+Copyright (c) 1983, 1998 Logical Devices, Inc.
+Created Mon Oct 26 16:34:59 2026
+
+ 54:PIN 13   =  nDMA                     ; /* /DMA, high = normal               */
+ 55:
+ 56:/* *************** I/O AND OUTPUT PINS ***************/
+ 57:PIN 14   =  D0                       ; /* data bus, bidirectional           */
+ 58:PIN 15   =  D1                       ;
+ 59:PIN 16   =  D2                       ;
+ 60:PIN 17   =  D3                       ;
+ 61:PIN 18   =  BA16                     ; /* bank bit 0 -> bus A16 (registered) */
+ 62:PIN 19   =  BA17                     ; /* bank bit 1 -> bus A17             */
+ 63:PIN 20   =  BA18                     ; /* bank bit 2 -> bus A18             */
+ 64:PIN 21   =  BA19                     ; /* bank bit 3 -> bus A19             */
+ 65:PIN 22   =  nRESET                   ; /* bus /RESET, clears bank register  */
+ 66:PIN 23   =  !OE                      ; /* interrupt register /OE -> '574    */
+ 67:
+ 68:/** Declarations and Intermediate Variable Definitions  **/
+ 69:
+ 70:field addr = [A7..0] ;
+ 71:
+ 72:INTSEL  = addr:['h'ff] & !IOen;      /* $7FFF */
+ 73:BANKSEL = addr:['h'fe] & !IOen;      /* $7FFE */
+ 74:BANKWR  = BANKSEL & !RW;
+ 75:BANKRD  = BANKSEL & RW;
+ 76:
+ 77:/** Logic Equations **/
+ 78:
+ 79:/* interrupt register: reads only */
+ 80:OE    = INTSEL & RW;
+ 81:
+ 82:/* bank register: load D3-D0 on a write to $7FFE, otherwise hold */
+ 83:BA16.d = (BANKWR & D0) # (!BANKWR & BA16);
+ 84:BA17.d = (BANKWR & D1) # (!BANKWR & BA17);
+ 85:BA18.d = (BANKWR & D2) # (!BANKWR & BA18);
+ 86:BA19.d = (BANKWR & D3) # (!BANKWR & BA19);
+ 87:
+ 88:BA16.oe = nDMA;
+ 89:BA17.oe = nDMA;
+ 90:BA18.oe = nDMA;
+ 91:BA19.oe = nDMA;
+ 92:
+ 93:/* /RESET clears the bank register to bank 0 (AR and SP are shared by
+ 94:   all registers in a 22V10, so set once) */
+ 95:BA16.ar = !nRESET;
+ 96:BA16.sp = 'b'0;
+ 97:
+ 98:/* bank register readback: drive D3-D0 on a read of $7FFE */
+ 99:D0 = BA16;
+100:D1 = BA17;
+101:D2 = BA18;
+102:D3 = BA19;
+103:D0.oe = BANKRD;
+104:D1.oe = BANKRD;
+105:D2.oe = BANKRD;
+106:D3.oe = BANKRD;
+107:
+
+LISTING FOR LOGIC DESCRIPTION FILE: 6502_INTERRUPT.pld               Page 3
+
+CUPL(WM): Universal Compiler for Programmable Logic
+Version 5.0a Serial# MW-10400000
+Copyright (c) 1983, 1998 Logical Devices, Inc.
+Created Mon Oct 26 16:34:59 2026
+
+108:
+
+[0016cb] Please note: no expression assigned to:  BA17.ar
+[0016cb] Please note: no expression assigned to:  BA17.sp
+[0016cb] Please note: no expression assigned to:  BA18.ar
+[0016cb] Please note: no expression assigned to:  BA18.sp
+[0016cb] Please note: no expression assigned to:  BA19.ar
+[0016cb] Please note: no expression assigned to:  BA19.sp
+
+
+Jedec Fuse Checksum       (3258)
+Jedec Transmit Checksum   (225e)

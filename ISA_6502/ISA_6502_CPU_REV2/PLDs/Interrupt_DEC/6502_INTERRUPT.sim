@@ -1,0 +1,146 @@
+%SIGNAL
+PIN   2 =  A0 
+PIN   3 =  A1 
+PIN   4 =  A2 
+PIN   5 =  A3 
+PIN   6 =  A4 
+PIN   7 =  A5 
+PIN   8 =  A6 
+PIN   9 =  A7 
+PIN  18 =  BA16 
+PIN  19 =  BA17 
+PIN  20 =  BA18 
+PIN  21 =  BA19 
+PIN  14 =  D0 
+PIN  15 =  D1 
+PIN  16 =  D2 
+PIN  17 =  D3 
+PIN  10 =  IOen 
+PIN  23 = !OE 
+PIN  11 =  RW 
+PIN   1 =  nCLK 
+PIN  13 =  nDMA 
+PIN  22 =  nRESET 
+%END
+
+%FIELD
+FIELD addr = A7,A6,A5,A4,A3,A2,A1,A0
+%END
+
+%EQUATION
+BA16.d  =>
+    !A0 & A1 & A2 & A3 & A4 & A5 & A6 & A7 & D0 & !IOen & !RW
+  # !BA16 & RW
+  # !BA16 & IOen
+  # !A7 & !BA16
+  # !A6 & !BA16
+  # !A5 & !BA16
+  # !A4 & !BA16
+  # !A3 & !BA16
+  # !A2 & !BA16
+  # !A1 & !BA16
+  # A0 & !BA16
+
+BA16.ar  =>
+    !nRESET
+
+BA16.oe  =>
+    nDMA
+
+BA16.sp  =>
+    0 
+
+BA17.d  =>
+    !A0 & A1 & A2 & A3 & A4 & A5 & A6 & A7 & D1 & !IOen & !RW
+  # !BA17 & RW
+  # !BA17 & IOen
+  # !A7 & !BA17
+  # !A6 & !BA17
+  # !A5 & !BA17
+  # !A4 & !BA17
+  # !A3 & !BA17
+  # !A2 & !BA17
+  # !A1 & !BA17
+  # A0 & !BA17
+
+BA17.oe  =>
+    nDMA
+
+BA18.d  =>
+    !A0 & A1 & A2 & A3 & A4 & A5 & A6 & A7 & D2 & !IOen & !RW
+  # !BA18 & RW
+  # !BA18 & IOen
+  # !A7 & !BA18
+  # !A6 & !BA18
+  # !A5 & !BA18
+  # !A4 & !BA18
+  # !A3 & !BA18
+  # !A2 & !BA18
+  # !A1 & !BA18
+  # A0 & !BA18
+
+BA18.oe  =>
+    nDMA
+
+BA19.d  =>
+    !A0 & A1 & A2 & A3 & A4 & A5 & A6 & A7 & D3 & !IOen & !RW
+  # !BA19 & RW
+  # !BA19 & IOen
+  # !A7 & !BA19
+  # !A6 & !BA19
+  # !A5 & !BA19
+  # !A4 & !BA19
+  # !A3 & !BA19
+  # !A2 & !BA19
+  # !A1 & !BA19
+  # A0 & !BA19
+
+BA19.oe  =>
+    nDMA
+
+BANKRD =>
+    !A0 & A1 & A2 & A3 & A4 & A5 & A6 & A7 & !IOen & RW
+
+BANKSEL =>
+    !A0 & A1 & A2 & A3 & A4 & A5 & A6 & A7 & !IOen
+
+BANKWR =>
+    !A0 & A1 & A2 & A3 & A4 & A5 & A6 & A7 & !IOen & !RW
+
+D0 =>
+    !BA16
+
+D0.oe  =>
+    !A0 & A1 & A2 & A3 & A4 & A5 & A6 & A7 & !IOen & RW
+
+D1 =>
+    !BA17
+
+D1.oe  =>
+    !A0 & A1 & A2 & A3 & A4 & A5 & A6 & A7 & !IOen & RW
+
+D2 =>
+    !BA18
+
+D2.oe  =>
+    !A0 & A1 & A2 & A3 & A4 & A5 & A6 & A7 & !IOen & RW
+
+D3 =>
+    !BA19
+
+D3.oe  =>
+    !A0 & A1 & A2 & A3 & A4 & A5 & A6 & A7 & !IOen & RW
+
+INTSEL =>
+    A0 & A1 & A2 & A3 & A4 & A5 & A6 & A7 & !IOen
+
+OE =>
+    A0 & A1 & A2 & A3 & A4 & A5 & A6 & A7 & !IOen & RW
+
+OE.oe  =>
+    1 
+
+nRESET.oe  =>
+    0 
+
+%END

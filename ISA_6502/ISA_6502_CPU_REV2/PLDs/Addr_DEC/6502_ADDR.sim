@@ -1,0 +1,94 @@
+%SIGNAL
+PIN  10 =  A8 
+PIN   9 =  A9 
+PIN   8 =  A10 
+PIN   7 =  A11 
+PIN   6 =  A12 
+PIN   5 =  A13 
+PIN   4 =  A14 
+PIN   3 =  A15 
+PIN  20 =  CLK_D 
+PIN  11 =  CLK_IN 
+PIN   2 =  DMA 
+PIN   1 =  IOREADY 
+PIN  17 = !IOen 
+PIN  14 = !IOr 
+PIN  15 = !IOw 
+PIN  22 = !OPT_RAM_EN 
+PIN  23 = !OPT_ROM_EN 
+PIN  16 =  RDY 
+PIN  21 =  RDYS 
+PIN  18 =  RD_N 
+PIN  13 =  RW 
+PIN  19 =  WR_N 
+%END
+
+%FIELD
+FIELD addr = A15,A14,A13,A12,A11,A10,A9,A8
+%END
+
+%EQUATION
+CLK_D =>
+    CLK_IN & RDYS
+
+IOen =>
+    A8 & A9 & A10 & A11 & A12 & A13 & A14 & !A15
+
+IOr =>
+    CLK_IN & !IOen & RW
+
+IOw =>
+    !IOen & !RW
+
+OPT_RAM_EN =>
+    !A14 & !A15 & CLK_IN
+  # !A13 & !A15 & CLK_IN
+  # !A12 & !A15 & CLK_IN
+  # !A11 & !A15 & CLK_IN
+  # !A10 & !A15 & CLK_IN
+  # !A8 & !A15 & CLK_IN
+  # !A9 & !A15 & CLK_IN
+
+OPT_ROM_EN =>
+    A15
+
+RDY =>
+    0 
+
+RDY.oe  =>
+    !IOREADY
+
+RD_N =>
+    !RW
+
+WR_N =>
+    RW
+
+CLK_D.oe  =>
+    1 
+
+IOen.oe  =>
+    1 
+
+IOr.oe  =>
+    1 
+
+IOw.oe  =>
+    1 
+
+OPT_RAM_EN.oe  =>
+    1 
+
+OPT_ROM_EN.oe  =>
+    1 
+
+RDYS.oe  =>
+    0 
+
+RD_N.oe  =>
+    1 
+
+WR_N.oe  =>
+    1 
+
+%END

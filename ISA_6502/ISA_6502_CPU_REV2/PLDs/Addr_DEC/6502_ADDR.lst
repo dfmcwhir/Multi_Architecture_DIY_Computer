@@ -1,0 +1,114 @@
+LISTING FOR LOGIC DESCRIPTION FILE: 6502_ADDR.pld                    Page 1
+
+CUPL(WM): Universal Compiler for Programmable Logic
+Version 5.0a Serial# MW-10400000
+Copyright (c) 1983, 1998 Logical Devices, Inc.
+Created Mon Oct 26 16:48:51 2026
+
+  1:Name     ISA_6502_CPU_ADDR_DEC ;
+  2:PartNo   00 ;
+  3:Date     10/26/2026 ;
+  4:Revision 03 ;
+  5:Designer Engineer ;
+  6:Company  none ;
+  7:Assembly None ;
+  8:Location  ;
+  9:Device   G22V10 ;
+ 10:
+ 11:/*
+ 12: * Rev 03 - absorbs the CPU board's 74ACT00 (the 74ACT74 stays: the
+ 13: * W65C02S clock input needs a CMOS high of VDD-0.4 V, which a GAL output
+ 14: * does not guarantee).
+ 15: *
+ 16: *   /RD    = NOT R/W   -> bus pin 12 (/SMEMR) via 33R: low on every read
+ 17: *   /WR    = R/W       -> bus pin 11 (/SMEMW) via 33R: low on every write
+ 18: *   CLK_D  = NAND(CLK, RDYS) -> 74ACT74 FF1 D (clock stretcher)
+ 19: *            Not critical: it only has to settle before the next OSC edge
+ 20: *            (125 ns at 4 MHz), so any GAL speed grade is fine.
+ 21: *
+ 22: *   RDY: open-drain (pulled low while IOREADY is low), 1K pull-up.
+ 23: *        Open-drain matters: the W65C02S drives RDY low itself on WAI.
+ 24: *
+ 25: * /DMA: CPU BE (wired directly) and the interrupt GAL (tri-states
+ 26: * BA16-BA19) listen to it. A DMA master must also pull IOREADY low so the
+ 27: * CPU stops (see RDY.oe below). Pin 2 is still an input but unused.
+ 28: */
+ 29:
+ 30:/* *************** INPUT PINS *********************/
+ 31:PIN 1     = IOREADY                    ; /* bus pin 41, low = card wants a wait */
+ 32:PIN 2     = DMA                        ; /* /DMA (bus DRQ2), low = DMA master   */
+ 33:PIN 3     = A15                        ;
+ 34:PIN 4     = A14                        ;
+ 35:PIN 5     = A13                        ;
+ 36:PIN 6     = A12                        ;
+ 37:PIN 7     = A11                        ;
+ 38:PIN 8     = A10                        ;
+ 39:PIN 9     = A9                         ;
+ 40:PIN 10    = A8                         ;
+ 41:PIN 11    = CLK_IN                     ; /* CPU clock (74ACT74 FF1 Q)           */
+ 42:PIN 13    = RW                         ;
+ 43:PIN 21    = RDYS                       ; /* 74ACT74 FF2 Q (I/O pin as input)    */
+ 44:
+ 45:/* *************** OUTPUT PINS *********************/
+ 46:PIN 14    = !IOr                       ;
+ 47:PIN 15    = !IOw                       ;
+ 48:PIN 16    = RDY                        ; /* to CPU RDY, open drain + 1K pull-up */
+ 49:PIN 17    = !IOen                      ;
+ 50:PIN 18    = RD_N                       ; /* /RD to bus pin 12 (via 33R)         */
+ 51:PIN 19    = WR_N                       ; /* /WR to bus pin 11 (via 33R)         */
+ 52:PIN 20    = CLK_D                      ; /* to 74ACT74 FF1 D                    */
+ 53:PIN 22    = !OPT_RAM_EN                ; /* on-board RAM /CE                    */
+
+LISTING FOR LOGIC DESCRIPTION FILE: 6502_ADDR.pld                    Page 2
+
+CUPL(WM): Universal Compiler for Programmable Logic
+Version 5.0a Serial# MW-10400000
+Copyright (c) 1983, 1998 Logical Devices, Inc.
+Created Mon Oct 26 16:48:51 2026
+
+ 54:PIN 23    = !OPT_ROM_EN                ; /* on-board ROM /CS                    */
+ 55:
+ 56:/** Declarations and Intermediate Variable Definitions  **/
+ 57:
+ 58:field addr = [A15..8] ;
+ 59:
+ 60:/** Logic Equations **/
+ 61:
+ 62:IOen = addr:['h'7f00..7fff];
+ 63:IOr  = IOen & RW & CLK_IN;
+ 64:IOw  = IOen & !RW;
+ 65:
+ 66:/* open drain: output is always 0, only enabled (pulling low) when needed.
+ 67:   A 22V10 output enable is a single product term, so it can't be
+ 68:   "IOREADY low OR /DMA low". A DMA master card must therefore pull BOTH
+ 69:   /DMA (floats the CPU bus via BE) and IOREADY (stops the CPU via RDY). */
+ 70:RDY    = 'b'0;
+ 71:RDY.oe = !IOREADY;
+ 72:
+ 73:/* R/W on the bus */
+ 74:RD_N = !RW;
+ 75:WR_N = RW;
+ 76:
+ 77:/* On-board memory. Pick ONE block; the memory card's PLD must not
+ 78:   answer the same addresses.
+ 79:
+ 80:   Block A - on-board RAM and ROM (no memory card). RAM /CE is gated with
+ 81:   CLK because RAM /WE is the unclocked /WR: the write ends when CLK falls.
+ 82:   Needs a RAM of 70 ns or faster at 4 MHz. */
+ 83:OPT_RAM_EN =  !A15 & CLK_IN & (!A14 # !A13 # !A12 # !A11 # !A10 # !A9 # !A8); /* $0000-$7EFF */
+ 84:OPT_ROM_EN = A15;                     /* $8000-$FFFF */
+ 85:
+ 86:/* Block B - memory card supplies everything:
+ 87:OPT_RAM_EN = 'b'0;
+ 88:OPT_ROM_EN = 'b'0;
+ 89:*/
+ 90:
+ 91:/* clock stretcher next-state: FF1 stays high while RDYS is low */
+ 92:CLK_D = !(CLK_IN & RDYS);
+ 93:
+ 94:
+
+
+
+Jedec Fuse Checksum       (7c25)
+Jedec Transmit Checksum   (a48a)

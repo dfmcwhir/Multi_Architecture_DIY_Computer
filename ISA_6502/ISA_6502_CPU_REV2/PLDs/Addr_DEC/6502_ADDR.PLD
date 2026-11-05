@@ -1,0 +1,93 @@
+Name     ISA_6502_CPU_ADDR_DEC ;
+PartNo   00 ;
+Date     10/26/2026 ;
+Revision 03 ;
+Designer Engineer ;
+Company  none ;
+Assembly None ;
+Location  ;
+Device   G22V10 ;
+
+/*
+ * Rev 03 - absorbs the CPU board's 74ACT00 (the 74ACT74 stays: the
+ * W65C02S clock input needs a CMOS high of VDD-0.4 V, which a GAL output
+ * does not guarantee).
+ *
+ *   /RD    = NOT R/W   -> bus pin 12 (/SMEMR) via 33R: low on every read
+ *   /WR    = R/W       -> bus pin 11 (/SMEMW) via 33R: low on every write
+ *   CLK_D  = NAND(CLK, RDYS) -> 74ACT74 FF1 D (clock stretcher)
+ *            Not critical: it only has to settle before the next OSC edge
+ *            (125 ns at 4 MHz), so any GAL speed grade is fine.
+ *
+ *   RDY: open-drain (pulled low while IOREADY is low), 1K pull-up.
+ *        Open-drain matters: the W65C02S drives RDY low itself on WAI.
+ *
+ * /DMA: CPU BE (wired directly) and the interrupt GAL (tri-states
+ * BA16-BA19) listen to it. A DMA master must also pull IOREADY low so the
+ * CPU stops (see RDY.oe below). Pin 2 is still an input but unused.
+ */
+
+/* *************** INPUT PINS *********************/
+PIN 1     = IOREADY                    ; /* bus pin 41, low = card wants a wait */
+PIN 2     = DMA                        ; /* /DMA (bus DRQ2), low = DMA master   */
+PIN 3     = A15                        ;
+PIN 4     = A14                        ;
+PIN 5     = A13                        ;
+PIN 6     = A12                        ;
+PIN 7     = A11                        ;
+PIN 8     = A10                        ;
+PIN 9     = A9                         ;
+PIN 10    = A8                         ;
+PIN 11    = CLK_IN                     ; /* CPU clock (74ACT74 FF1 Q)           */
+PIN 13    = RW                         ;
+PIN 21    = RDYS                       ; /* 74ACT74 FF2 Q (I/O pin as input)    */
+
+/* *************** OUTPUT PINS *********************/
+PIN 14    = !IOr                       ;
+PIN 15    = !IOw                       ;
+PIN 16    = RDY                        ; /* to CPU RDY, open drain + 1K pull-up */
+PIN 17    = !IOen                      ;
+PIN 18    = RD_N                       ; /* /RD to bus pin 12 (via 33R)         */
+PIN 19    = WR_N                       ; /* /WR to bus pin 11 (via 33R)         */
+PIN 20    = CLK_D                      ; /* to 74ACT74 FF1 D                    */
+PIN 22    = !OPT_ROM_EN                ; /* on-board ROM /CS                    */
+PIN 23    = !OPT_RAM_EN                ; /* on-board RAM /CE                    */
+
+
+/** Declarations and Intermediate Variable Definitions  **/
+
+field addr = [A15..8] ;
+
+/** Logic Equations **/
+
+IOen = addr:['h'7f00..7fff];
+IOr  = IOen & RW & CLK_IN;
+IOw  = IOen & !RW;
+
+/* open drain: output is always 0, only enabled (pulling low) when needed.
+   A 22V10 output enable is a single product term, so it can't be
+   "IOREADY low OR /DMA low". A DMA master card must therefore pull BOTH
+   /DMA (floats the CPU bus via BE) and IOREADY (stops the CPU via RDY). */
+RDY    = 'b'0;
+RDY.oe = !IOREADY;
+
+/* R/W on the bus */
+RD_N = !RW;
+WR_N = RW;
+
+/* On-board memory. Pick ONE block; the memory card's PLD must not
+   answer the same addresses.
+
+   Block A - on-board RAM and ROM (no memory card). RAM /CE is gated with
+   CLK because RAM /WE is the unclocked /WR: the write ends when CLK falls.
+   Needs a RAM of 70 ns or faster at 4 MHz. */
+OPT_RAM_EN =  !A15 & CLK_IN & (!A14 # !A13 # !A12 # !A11 # !A10 # !A9 # !A8); /* $0000-$7EFF */
+OPT_ROM_EN = A15;                     /* $8000-$FFFF */
+
+/* Block B - memory card supplies everything:
+OPT_RAM_EN = 'b'0;
+OPT_ROM_EN = 'b'0;
+*/
+
+/* clock stretcher next-state: FF1 stays high while RDYS is low */
+CLK_D = !(CLK_IN & RDYS);

@@ -1,0 +1,117 @@
+[Info] Opening project file
+[Info] Running compilation ...
+
+===================================== Compiler Message Begins =====================================
+cuplx
+time: 0 secs
+cupla
+time: 0 secs
+cuplb
+time: 0 secs
+cuplm
+time: 0 secs
+cuplc
+[0006cc] excessive number of product terms:  RDY.oe
+time: 0 secs
+Total time: 0 secs
+CUPL errors encountered!
+Normal exit
+Error Code = 1
+
+====================================== Compiler Message Ends ======================================
+[Error #1066] Compilation failed
+[Info] Running compilation ...
+
+===================================== Compiler Message Begins =====================================
+cuplx
+time: 0 secs
+cupla
+time: 0 secs
+cuplb
+time: 0 secs
+cuplm
+time: 0 secs
+cuplc
+[0006cc] excessive number of product terms:  OPT_RAM_EN
+time: 0 secs
+Total time: 0 secs
+CUPL errors encountered!
+Normal exit
+Error Code = 1
+
+====================================== Compiler Message Ends ======================================
+[Error #1066] Compilation failed
+[Info] Running compilation ...
+
+===================================== Compiler Message Begins =====================================
+cuplx
+time: 0 secs
+cupla
+ 83:OPT_RAM_EN =  !IOen & !A15 5 & CLK_IN;   /* $0000-$7EFF */
+                               ^
+[0009ca] missing symbol:  ;
+time: 0 secs
+Total time: 0 secs
+Fatal CUPL errors encountered ... program aborted!
+Normal exit
+Error Code = 1
+
+====================================== Compiler Message Ends ======================================
+[Error #1066] Compilation failed
+[Info] Running compilation ...
+
+===================================== Compiler Message Begins =====================================
+cuplx
+time: 0 secs
+cupla
+time: 0 secs
+cuplb
+time: 0 secs
+cuplm
+time: 0 secs
+cuplc
+time: 0 secs
+total time: 0 secs
+Normal exit
+Error Code = 0
+
+====================================== Compiler Message Ends ======================================
+[Info] Design compiled successfully
+[Info] Running compilation ...
+
+===================================== Compiler Message Begins =====================================
+cuplx
+time: 0 secs
+cupla
+time: 0 secs
+cuplb
+time: 0 secs
+cuplm
+time: 0 secs
+cuplc
+time: 0 secs
+total time: 0 secs
+Normal exit
+Error Code = 0
+
+====================================== Compiler Message Ends ======================================
+[Info] Design compiled successfully
+[Info] Running compilation ...
+
+===================================== Compiler Message Begins =====================================
+cuplx
+time: 0 secs
+cupla
+time: 0 secs
+cuplb
+time: 0 secs
+cuplm
+time: 0 secs
+cuplc
+time: 0 secs
+total time: 0 secs
+Normal exit
+Error Code = 0
+
+====================================== Compiler Message Ends ======================================
+[Info] Design compiled successfully
