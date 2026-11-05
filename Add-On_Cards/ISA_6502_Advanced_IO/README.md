@@ -1,19 +1,9 @@
 # <h2> Advanced I/O Card</h2>
 <p>New card that hasn't been built or tested yet. It has 3 functions:
-<ol>SPI Interface</ol>
-<ol>CH376 USB module</ol>
-<ol>IDE interface</ol></p>
+<ol>1. SPI Interface</ol>
+<ol>2. CH376 USB module</ol>
+<ol>3. IDE interface</ol></p>
 
-<p> As the schematic shows, most of the components are not populated for use in the DIY ISA computer system. To simplify it even more, the PCB includes a the option to install a CH375 and a bunch of discrete components to use it OR install a CH736 module from Aliexpress (such as: https://www.aliexpress.us/item/3256809583660052.html). So with a module like that plus a GAL and a latch we get a usable USB mass storage system for the computer. Because the original schematic didn't fully decode the address, the card ends up using 8 addresses instead of just the 2 that are required. This will be fixed when the CH376 is implemented on a purpose built card.</p>
+<p>The SPI and IDE interface essentially the same circuit and firmware that Daryl Rictor created. Documented here: https://sbc.rictor.org/65spi2.html and here: https://sbc.rictor.org/ide.html. The only real differences are a small change in the ide circuit and firmware to use an ATMEGA32 instead of an ATMEGA324 and using a DS1302 RTC module instead of a discrete DS1302 chip and supporting components.</p>
 
-<h2> Resources: </h2>
-<table><tr><th>Address</th><th>Use</th></tr>
-<tr><td>7F20</td><td>CH376 Data port</td></tr>
-<tr><td>7F21</td><td>CH376 command port</td></tr>
-<tr><td>7F24</td><td>CH376 Data port MIRROR</td></tr>
-<tr><td>7F25</td><td>CH376 command port MIRROR</td></tr>
-<tr><td>7F28</td><td>CH376 Data port MIRROR</td></tr>
-<tr><td>7F29</td><td>CH376 command port MIRROR</td></tr>
-<tr><td>7F2C</td><td>CH376 Data port MIRROR</td></tr>
-<tr><td>7F2D</td><td>H376 command port MIRROR</td></tr>
-</table>
+<p>The SPI controller will require 4 addresses (Exact addresses TBD, but will likely use some of the addresses freed from replacing the old CH376 USB card) and the USB controller will require 2 addresses. The SPI controller can generate an interrupt and that can be attached to the bus IRQ7 via a jumper. The IDE controller uses the SPI interface, so doesn't require any additional addresses.</p>
