@@ -1,0 +1,83 @@
+Name     VGAGLUE ;
+PartNo   01 ;
+Date     10/17/2026 ;
+Revision 01 ;
+Designer 6502 SBC ;
+Company  none ;
+Assembly ESP32-S3 VGA adapter ;
+Location U1 ;
+Device   g22v10 ;
+
+/*
+ * Glue logic + 5 V -> 3.3 V level shifting for the ESP32-S3 VGA adapter.
+ *
+ * Adapter registers: $7F18-$7F1B
+ *   /IO_EN (from the SBC) is low when A15-A8 = $7F.
+ *   This GAL decodes A7-A2 = %000110 ($18-$1B) and makes CS internally.
+ *   /IO_EN must come from the address only, NOT qualified with PHI2:
+ *   CS has to stay asserted for the whole RDY-stretched cycle.
+ *
+ * Outputs to the ESP32 (*_33) are open drain: the output is fixed at 0 and
+ * only its output enable switches. Pull each one up to 3.3 V with 1 k
+ * (not 10 k: the PHI2 copy has to rise in well under 250 ns). An optional
+ * 100 R series resistor between each *_33 pin and the ESP32 protects the
+ * ESP32 if the GAL is ever mis-programmed to drive high.
+ *
+ * RDY and nIRQ are open drain to the CPU and pulled up to 5 V on the SBC.
+ * nBUSEN is a normal push-pull output to the 74LVC8T245 /OE.
+ *
+ * ACK and IRQREQ come from ESP32 GPIO17/GPIO18 at 3.3 V; GAL inputs are
+ * TTL level so that is fine. Keep a 10 k pull-up to 3.3 V on ACK so the
+ * CPU is not stalled while the ESP32 boots, and a 10 k pull-down on IRQREQ.
+ */
+
+/* ---------------------------------------------------------------- inputs */
+PIN 1  = PHI2 ;
+PIN 2  = RW ;
+PIN 3  = A0 ;
+PIN 4  = A1 ;
+PIN 5  = A2 ;
+PIN 6  = A3 ;
+PIN 7  = A4 ;
+PIN 8  = A5 ;
+PIN 9  = A6 ;
+PIN 10 = A7 ;
+PIN 11 = nIO_EN ;
+PIN 13 = ACK ;        /* ESP32 GPIO17: 0 = hold RDY low while selected */
+PIN 23 = IRQREQ ;     /* ESP32 GPIO18: 1 = pull /IRQ low                */
+
+/* ---------------------------------------------------------------- outputs */
+PIN 14 = RDY ;        /* to CPU RDY      (open drain, 5 V pull-up on SBC)  */
+PIN 15 = nIRQ ;       /* to CPU /IRQ     (open drain, 5 V pull-up on SBC)  */
+PIN 16 = nBUSEN ;     /* to 74LVC8T245 /OE (push-pull)                    */
+PIN 17 = nCS_33 ;     /* ESP32 GPIO15    (open drain, 1 k to 3.3 V)        */
+PIN 18 = PHI2_33 ;    /* ESP32 GPIO16                                      */
+PIN 19 = RW_33 ;      /* ESP32 GPIO14                                      */
+PIN 20 = A1_33 ;      /* ESP32 GPIO13                                      */
+PIN 21 = A0_33 ;      /* ESP32 GPIO12                                      */
+/* PIN 22: spare */
+
+/* ---------------------------------------------------------------- logic */
+CS = !nIO_EN & !A7 & !A6 & !A5 & A4 & A3 & !A2 ;     /* $7F18-$7F1B */
+
+/* data buffer drives the CPU bus only while selected and PHI2 is high */
+nBUSEN = !(CS & PHI2) ;
+
+/* wait states: RDY low while selected and the ESP32 has not acknowledged */
+RDY      = 'b'0 ;
+RDY.oe   = CS & !ACK ;
+
+nIRQ     = 'b'0 ;
+nIRQ.oe  = IRQREQ ;
+
+/* open-drain copies for the ESP32: pull low when the input is low */
+nCS_33     = 'b'0 ;
+nCS_33.oe  = CS ;
+PHI2_33    = 'b'0 ;
+PHI2_33.oe = !PHI2 ;
+RW_33      = 'b'0 ;
+RW_33.oe   = !RW ;
+A1_33      = 'b'0 ;
+A1_33.oe   = !A1 ;
+A0_33      = 'b'0 ;
+A0_33.oe   = !A0 ;

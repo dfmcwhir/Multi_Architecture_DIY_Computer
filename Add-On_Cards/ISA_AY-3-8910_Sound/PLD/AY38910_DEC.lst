@@ -1,0 +1,80 @@
+LISTING FOR LOGIC DESCRIPTION FILE: AY38910_DEC.pld                  Page 1
+
+CUPL(WM): Universal Compiler for Programmable Logic
+Version 5.0a Serial# MW-10400000
+Copyright (c) 1983, 1998 Logical Devices, Inc.
+Created Thu Oct 22 02:49:52 2026
+
+  1:Name       AY38910_DEC.pld;
+  2:PartNo   00 ;
+  3:Date     10/21/2026 ;
+  4:Revision 01 ;
+  5:Designer Engineer ;
+  6:Company  none ;
+  7:Assembly None ;
+  8:Location  ;
+  9:Device   g22v10 ;
+ 10:
+ 11:/* 
+ 12:GAL20V10
+ 13:
+ 14:Input Pins
+ 15:*/
+ 16:
+ 17:PIN 2 = A0;
+ 18:PIN 3 = A1;
+ 19:PIN 4 = A2;
+ 20:PIN 5 = A3;
+ 21:PIN 6 = A4;
+ 22:PIN 7 = A5;
+ 23:PIN 8 = A6;
+ 24:PIN 9 = A7;
+ 25:PIN 10 = IOr;
+ 26:PIN 11 = IOen;
+ 27:
+ 28:/* Output Pins */
+ 29:PIN 20 = CSR;
+ 30:PIN 21 = CSW;
+ 31:PIN 22 = BC1;
+ 32:PIN 23 = BDir;
+ 33:
+ 34:/* Addresses
+ 35:AYcmd= 7F22=    01111111 00100010
+ 36:AYdata= 7F23=   01111111 00100011
+ 37:SPOcs= 7F26=    01111111 00100110
+ 38:
+ 39:*/
+ 40:
+ 41:baseAddr = !IOen & !A7 & !A6 & A5 & !A4 & !A3 & A1;
+ 42:AYcmd = baseAddr & !A2 & !A0;
+ 43:AYdata = baseAddr & !A2 & A0;
+ 44:SPOcs = baseAddr & A2 & !A0;
+ 45:
+ 46:BDir = (AYcmd & IOr) # (AYdata & IOr);
+ 47:BC1 = (AYdata & !IOr) # (AYcmd & IOr);
+ 48:CSR = !SPOcs # IOr;
+ 49:CSW = !SPOcs # !IOr;
+ 50:
+ 51:/*      AYcmd   AYdata  IOr     | Bdir  BC1     | State
+ 52:        0               0               X       |       0       0       |       INACTIVE
+ 53:        0               1               0       |       0       1       |       PSG Read
+
+LISTING FOR LOGIC DESCRIPTION FILE: AY38910_DEC.pld                  Page 2
+
+CUPL(WM): Universal Compiler for Programmable Logic
+Version 5.0a Serial# MW-10400000
+Copyright (c) 1983, 1998 Logical Devices, Inc.
+Created Thu Oct 22 02:49:52 2026
+
+ 54:        0               1               1       |       1       0       |       PSG Write
+ 55:        1               0               1       |       1       1       |       Address Latch
+ 56:
+ 57:/CSW = SPOcs & IOr      = Write to SPO
+ 58:/CSR = SPOcs & !IOr     = Read SPO status
+ 59:*/
+ 60:
+
+
+
+Jedec Fuse Checksum       (9203)
+Jedec Transmit Checksum   (98e1)

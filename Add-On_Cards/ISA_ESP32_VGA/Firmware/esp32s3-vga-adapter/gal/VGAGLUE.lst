@@ -1,0 +1,105 @@
+LISTING FOR LOGIC DESCRIPTION FILE: VGAGLUE.pld                      Page 1
+
+CUPL(WM): Universal Compiler for Programmable Logic
+Version 5.0a Serial# MW-10400000
+Copyright (c) 1983, 1998 Logical Devices, Inc.
+Created Sun Oct 18 07:28:37 2026
+
+  1:Name     VGAGLUE ;
+  2:PartNo   01 ;
+  3:Date     10/17/2026 ;
+  4:Revision 01 ;
+  5:Designer 6502 SBC ;
+  6:Company  none ;
+  7:Assembly ESP32-S3 VGA adapter ;
+  8:Location U1 ;
+  9:Device   g22v10 ;
+ 10:
+ 11:/*
+ 12: * Glue logic + 5 V -> 3.3 V level shifting for the ESP32-S3 VGA adapter.
+ 13: *
+ 14: * Adapter registers: $7F18-$7F1B
+ 15: *   /IO_EN (from the SBC) is low when A15-A8 = $7F.
+ 16: *   This GAL decodes A7-A2 = %000110 ($18-$1B) and makes CS internally.
+ 17: *   /IO_EN must come from the address only, NOT qualified with PHI2:
+ 18: *   CS has to stay asserted for the whole RDY-stretched cycle.
+ 19: *
+ 20: * Outputs to the ESP32 (*_33) are open drain: the output is fixed at 0 and
+ 21: * only its output enable switches. Pull each one up to 3.3 V with 1 k
+ 22: * (not 10 k: the PHI2 copy has to rise in well under 250 ns). An optional
+ 23: * 100 R series resistor between each *_33 pin and the ESP32 protects the
+ 24: * ESP32 if the GAL is ever mis-programmed to drive high.
+ 25: *
+ 26: * RDY and nIRQ are open drain to the CPU and pulled up to 5 V on the SBC.
+ 27: * nBUSEN is a normal push-pull output to the 74LVC8T245 /OE.
+ 28: *
+ 29: * ACK and IRQREQ come from ESP32 GPIO17/GPIO18 at 3.3 V; GAL inputs are
+ 30: * TTL level so that is fine. Keep a 10 k pull-up to 3.3 V on ACK so the
+ 31: * CPU is not stalled while the ESP32 boots, and a 10 k pull-down on IRQREQ.
+ 32: */
+ 33:
+ 34:/* ---------------------------------------------------------------- inputs */
+ 35:PIN 1  = PHI2 ;
+ 36:PIN 2  = RW ;
+ 37:PIN 3  = A0 ;
+ 38:PIN 4  = A1 ;
+ 39:PIN 5  = A2 ;
+ 40:PIN 6  = A3 ;
+ 41:PIN 7  = A4 ;
+ 42:PIN 8  = A5 ;
+ 43:PIN 9  = A6 ;
+ 44:PIN 10 = A7 ;
+ 45:PIN 11 = nIO_EN ;
+ 46:PIN 13 = ACK ;        /* ESP32 GPIO17: 0 = hold RDY low while selected */
+ 47:PIN 23 = IRQREQ ;     /* ESP32 GPIO18: 1 = pull /IRQ low                */
+ 48:
+ 49:/* ---------------------------------------------------------------- outputs */
+ 50:PIN 14 = RDY ;        /* to CPU RDY      (open drain, 5 V pull-up on SBC)  */
+ 51:PIN 15 = nIRQ ;       /* to CPU /IRQ     (open drain, 5 V pull-up on SBC)  */
+ 52:PIN 16 = nBUSEN ;     /* to 74LVC8T245 /OE (push-pull)                    */
+ 53:PIN 17 = nCS_33 ;     /* ESP32 GPIO15    (open drain, 1 k to 3.3 V)        */
+
+LISTING FOR LOGIC DESCRIPTION FILE: VGAGLUE.pld                      Page 2
+
+CUPL(WM): Universal Compiler for Programmable Logic
+Version 5.0a Serial# MW-10400000
+Copyright (c) 1983, 1998 Logical Devices, Inc.
+Created Sun Oct 18 07:28:37 2026
+
+ 54:PIN 18 = PHI2_33 ;    /* ESP32 GPIO16                                      */
+ 55:PIN 19 = RW_33 ;      /* ESP32 GPIO14                                      */
+ 56:PIN 20 = A1_33 ;      /* ESP32 GPIO13                                      */
+ 57:PIN 21 = A0_33 ;      /* ESP32 GPIO12                                      */
+ 58:/* PIN 22: spare */
+ 59:
+ 60:/* ---------------------------------------------------------------- logic */
+ 61:CS = !nIO_EN & !A7 & !A6 & !A5 & A4 & A3 & !A2 ;     /* $7F18-$7F1B */
+ 62:
+ 63:/* data buffer drives the CPU bus only while selected and PHI2 is high */
+ 64:nBUSEN = !(CS & PHI2) ;
+ 65:
+ 66:/* wait states: RDY low while selected and the ESP32 has not acknowledged */
+ 67:RDY      = 'b'0 ;
+ 68:RDY.oe   = CS & !ACK ;
+ 69:
+ 70:nIRQ     = 'b'0 ;
+ 71:nIRQ.oe  = IRQREQ ;
+ 72:
+ 73:/* open-drain copies for the ESP32: pull low when the input is low */
+ 74:nCS_33     = 'b'0 ;
+ 75:nCS_33.oe  = CS ;
+ 76:PHI2_33    = 'b'0 ;
+ 77:PHI2_33.oe = !PHI2 ;
+ 78:RW_33      = 'b'0 ;
+ 79:RW_33.oe   = !RW ;
+ 80:A1_33      = 'b'0 ;
+ 81:A1_33.oe   = !A1 ;
+ 82:A0_33      = 'b'0 ;
+ 83:A0_33.oe   = !A0 ;
+ 84:
+ 85:
+
+
+
+Jedec Fuse Checksum       (336a)
+Jedec Transmit Checksum   (0dbb)

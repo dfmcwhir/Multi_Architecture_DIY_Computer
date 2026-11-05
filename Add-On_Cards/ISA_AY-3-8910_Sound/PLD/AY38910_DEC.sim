@@ -1,0 +1,77 @@
+%SIGNAL
+PIN   2 =  A0 
+PIN   3 =  A1 
+PIN   4 =  A2 
+PIN   5 =  A3 
+PIN   6 =  A4 
+PIN   7 =  A5 
+PIN   8 =  A6 
+PIN   9 =  A7 
+PIN  22 =  BC1 
+PIN  23 =  BDir 
+PIN  20 =  CSR 
+PIN  21 =  CSW 
+PIN  11 =  IOen 
+PIN  10 =  IOr 
+%END
+
+%FIELD
+%END
+
+%EQUATION
+AYcmd =>
+    !A0 & A1 & !A2 & !A3 & !A4 & A5 & !A6 & !A7 & !IOen
+
+AYdata =>
+    A0 & A1 & !A2 & !A3 & !A4 & A5 & !A6 & !A7 & !IOen
+
+BC1 =>
+    A0 & A1 & !A2 & !A3 & !A4 & A5 & !A6 & !A7 & !IOen & !IOr
+  # !A0 & A1 & !A2 & !A3 & !A4 & A5 & !A6 & !A7 & !IOen & IOr
+
+BDir =>
+    A1 & !A2 & !A3 & !A4 & A5 & !A6 & !A7 & !IOen & IOr
+
+CSR =>
+    IOen
+  # A7
+  # A6
+  # !A5
+  # A4
+  # A3
+  # !A1
+  # !A2
+  # A0
+  # IOr
+
+CSW =>
+    IOen
+  # A7
+  # A6
+  # !A5
+  # A4
+  # A3
+  # !A1
+  # !A2
+  # A0
+  # !IOr
+
+SPOcs =>
+    !A0 & A1 & A2 & !A3 & !A4 & A5 & !A6 & !A7 & !IOen
+
+baseAddr =>
+    A1 & !A3 & !A4 & A5 & !A6 & !A7 & !IOen
+
+BC1.oe  =>
+    1 
+
+BDir.oe  =>
+    1 
+
+CSR.oe  =>
+    1 
+
+CSW.oe  =>
+    1 
+
+%END

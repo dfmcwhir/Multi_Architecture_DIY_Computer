@@ -1,0 +1,83 @@
+%SIGNAL
+PIN   3 =  A0 
+PIN   4 =  A1 
+PIN   5 =  A2 
+PIN   6 =  A3 
+PIN   7 =  A4 
+PIN   8 =  A5 
+PIN   9 =  A6 
+PIN  10 =  A7 
+PIN  21 =  A0_33 
+PIN  20 =  A1_33 
+PIN  13 =  ACK 
+PIN  23 =  IRQREQ 
+PIN   1 =  PHI2 
+PIN  18 =  PHI2_33 
+PIN  14 =  RDY 
+PIN   2 =  RW 
+PIN  19 =  RW_33 
+PIN  16 =  nBUSEN 
+PIN  17 =  nCS_33 
+PIN  11 =  nIO_EN 
+PIN  15 =  nIRQ 
+%END
+
+%FIELD
+%END
+
+%EQUATION
+A0_33 =>
+    0 
+
+A0_33.oe  =>
+    !A0
+
+A1_33 =>
+    0 
+
+A1_33.oe  =>
+    !A1
+
+CS =>
+    !A2 & A3 & A4 & !A5 & !A6 & !A7 & !nIO_EN
+
+PHI2_33 =>
+    0 
+
+PHI2_33.oe  =>
+    !PHI2
+
+RDY =>
+    0 
+
+RDY.oe  =>
+    !A2 & A3 & A4 & !A5 & !A6 & !A7 & !ACK & !nIO_EN
+
+RW_33 =>
+    0 
+
+RW_33.oe  =>
+    !RW
+
+nBUSEN =>
+    !A2 & A3 & A4 & !A5 & !A6 & !A7 & PHI2 & !nIO_EN
+
+nCS_33 =>
+    0 
+
+nCS_33.oe  =>
+    !A2 & A3 & A4 & !A5 & !A6 & !A7 & !nIO_EN
+
+nIRQ =>
+    0 
+
+nIRQ.oe  =>
+    IRQREQ
+
+IRQREQ.oe  =>
+    0 
+
+nBUSEN.oe  =>
+    1 
+
+%END

@@ -1,0 +1,87 @@
+Name       AY38910_DEC ;
+PartNo     00 ;
+Date       10/31/2026 ;
+Revision   02 ;
+Designer   Engineer ;
+Company    none ;
+Assembly   AY-3-8910 / SPO256 sound card ;
+Location   U1 ;
+Device     g22v10 ;
+
+/*
+ * Rev 02
+ *  1. Read/write now comes from /IOw (pin 13, low = write, not clock-gated).
+ *     Rev 01 treated "/IOr not active" as a write. /IOr is clock-gated, so
+ *     during the clock-low half of every READ the card was put in the write
+ *     state: reading the PSG data register wrote the floating bus into it,
+ *     and reading SPO status wrote a garbage allophone.
+ *  2. Wait states: while the AY or SPO is selected, WAITQ (pin 19) holds
+ *     the bus IOREADY line low through the 2N7000 for 4 edges of the pin 1
+ *     clock, then releases. BDIR/BC1/CSW follow /IO_EN and /IOw (no clock
+ *     gating), so they stay steady through the wait on either CPU card.
+ *     Pin 1 must be a FREE-RUNNING clock: bus TC (pin 27), with the CPU
+ *     card's J1 (RAW_OSC_EN) fitted -> 8 MHz, 4 edges ~ 500 ns.
+ *     (Rev 01 boards have pin 1 on bus OSC/CPU clock. That works with the
+ *     6502 card, whose RDY waits keep the clock running, but the Z80 card
+ *     stretches the CPU clock, so the count would freeze and never end.)
+ *     J8 must be on 2-3 so the 2N7000 drives IOREADY.
+ *
+ * Addresses (6502 / Z80 port):
+ *   AY command  $7F22 / $22     AY data  $7F23 / $23     SPO  $7F26 / $26
+ *
+ *   AYcmd AYdata write | BDIR BC1 | state
+ *     0     0     x    |  0    0  | inactive
+ *     0     1     0    |  0    1  | PSG read
+ *     0     1     1    |  1    0  | PSG write
+ *     1     0     1    |  1    1  | latch address
+ *   SPO: /CSW = selected & write (allophone), /CSR = selected & /IOr (status)
+ */
+
+/* Input pins */
+PIN 1  = WCLK;       /*  bus CLK (OSC pin 30). Needs to be bus TC (pin 27) = OSC2X - counter clock for Z80 CPU     */
+PIN 2  = A0;
+PIN 3  = A1;
+PIN 4  = A2;
+PIN 5  = A3;
+PIN 6  = A4;
+PIN 7  = A5;
+PIN 8  = A6;
+PIN 9  = A7;
+PIN 10 = IOr;        /* bus /IOR, raw pin level (low = read strobe)  */
+PIN 11 = IOen;       /* bus /IO_EN, raw pin level                    */
+PIN 13 = IOw;        /* bus /IOW, raw pin level (low = write)        */
+
+/* Output pins */
+PIN 14 = Q0;         /* wait counter - no connection                 */
+PIN 15 = Q1;
+PIN 16 = Q2;
+PIN 19 = WAITQ;      /* high = hold IOREADY low (2N7000 gate)        */
+PIN 20 = CSR;
+PIN 21 = CSW;
+PIN 22 = BC1;
+PIN 23 = BDir;
+
+/* Decodes */
+baseAddr = !IOen & !A7 & !A6 & A5 & !A4 & !A3 & A1;
+AYcmd  = baseAddr & !A2 & !A0;
+AYdata = baseAddr & !A2 & A0;
+SPOcs  = baseAddr & A2 & !A0;
+SEL    = AYcmd # AYdata # SPOcs;
+WRITE  = !IOw;
+
+/* AY bus control */
+BDir = (AYcmd # AYdata) & WRITE;
+BC1  = (AYdata & !WRITE) # (AYcmd & WRITE);
+
+/* SPO256 */
+CSR = !(SPOcs & !IOr);
+CSW = !(SPOcs & WRITE);
+
+/* Wait counter: 0..4 while selected, cleared when not selected */
+Q0.d = SEL & !Q2 & !Q0;
+Q1.d = SEL & !Q2 & (Q1 $ Q0);
+Q2.d = SEL & (Q2 # (Q1 & Q0));
+Q0.ar = 'b'0;
+Q0.sp = 'b'0;
+
+WAITQ = SEL & !Q2;
