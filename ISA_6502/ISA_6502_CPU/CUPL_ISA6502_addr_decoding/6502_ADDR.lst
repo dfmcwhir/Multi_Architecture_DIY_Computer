@@ -1,0 +1,60 @@
+LISTING FOR LOGIC DESCRIPTION FILE: 6502_ADDR.pld                    Page 1
+
+CUPL(WM): Universal Compiler for Programmable Logic
+Version 5.0a Serial# MW-10400000
+Copyright (c) 1983, 1998 Logical Devices, Inc.
+Created Thu Oct 22 20:00:25 2026
+
+  1:Name     ISA_6502_CPU_ADDR_DEC ;
+  2:PartNo   00 ;
+  3:Date     5/4/2026 ;
+  4:Revision 01 ;
+  5:Designer Engineer ;
+  6:Company  none ;
+  7:Assembly None ;
+  8:Location  ;
+  9:Device   G22V10 ;
+ 10:
+ 11:/* *************** INPUT PINS *********************/
+ 12:PIN 2     = DMA                         ; /*                                 */ 
+ 13:PIN 3     = A15                        ; /*                                 */ 
+ 14:PIN 4     = A14                        ; /*                                 */ 
+ 15:PIN 5     = A13                        ; /*                                 */ 
+ 16:PIN 6     =  A12                       ; /*                                 */ 
+ 17:PIN 7     =  A11                       ; /*                                 */ 
+ 18:PIN 8     =  A10                       ; /*                                 */ 
+ 19:PIN 9     =  A9                       ; /*                                 */ 
+ 20:PIN 10     =  A8                       ; /*                                 */ 
+ 21:PIN 11     =  CLK_IN                       ; /*                                 */ 
+ 22:PIN 13     =  RW                       ; /*                                 */ 
+ 23:
+ 24:/* *************** OUTPUT PINS *********************/
+ 25:PIN 14     = !IOr                        ; /*                                 */ 
+ 26:PIN 15     = !IOw                        ; /*                                 */ 
+ 27:PIN 16     = !ROMen                        ; /*                                 */ 
+ 28:PIN 17     = !IOen                        ; /*                                 */ 
+ 29:PIN 18     = !RAMen                        ; /*                                 */ 
+ 30:PIN 19     = !CLK_OUT                        ; /*                                 */ 
+ 31:PIN 22     = !MEMr                        ; /*                                 */ 
+ 32:PIN 23     = !MEMw                        ; /*                                 */ 
+ 33:
+ 34:/** Declarations and Intermediate Variable Definitions  **/
+ 35:
+ 36:field addr = [A15..8] ;
+ 37:
+ 38:/** Logic Equations **/
+ 39:
+ 40:ROMen = addr:['h'8000..ffff];
+ 41:RAMen = (addr:['h'0000..7eff] & CLK_IN) # !DMA;
+ 42:IOen = addr:['h'7f00..7fff];
+ 43:IOr  = IOen & RW & CLK_IN;
+ 44:IOw = IOen & !RW;
+ 45:MEMr = (RAMen # ROMen) & RW;
+ 46:MEMw = RAMen & !RW;
+ 47:CLK_OUT = CLK_IN;
+ 48:
+
+
+
+Jedec Fuse Checksum       (934d)
+Jedec Transmit Checksum   (cb08)

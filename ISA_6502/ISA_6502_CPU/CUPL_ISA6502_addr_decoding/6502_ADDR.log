@@ -1,0 +1,22 @@
+[Info] Saving new project file [D:\Retro_Electronics\ISA_6502\ISA_6502_CPU\CUPL_ISA6502_addr_decoding\6502_ADDR.wcp]
+[Info] Adding existing CUPL design file into project
+[Info] Running compilation ...
+
+===================================== Compiler Message Begins =====================================
+cuplx
+time: 0 secs
+cupla
+time: 0 secs
+cuplb
+time: 0 secs
+cuplm
+time: 0 secs
+cuplc
+time: 0 secs
+total time: 0 secs
+Normal exit
+Error Code = 0
+
+====================================== Compiler Message Ends ======================================
+[Info] Design compiled successfully
+[Info] Current project being saved

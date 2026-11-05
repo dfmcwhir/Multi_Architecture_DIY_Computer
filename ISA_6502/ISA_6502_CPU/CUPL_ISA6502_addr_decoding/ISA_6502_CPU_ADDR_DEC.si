@@ -1,0 +1,25 @@
+Name     ;
+PartNo   ;
+Date     ;
+Revision ;
+Designer ;
+Company  ;
+Assembly ;
+Location ;
+
+
+ORDER: addr, CLK_IN, DMA, !IOen, !IOw, !MEMr, !IOr, !MEMw, !RAMen, !ROMen, !CLK_OUT, RW; 
+
+
+VECTORS:
+********01*******Z*
+********11*******Z*
+********01*******Z*
+********11*******Z*
+********01*******Z*
+********11*******Z*
+********01*******Z*
+*********1*******Z*
+********11*H*****Z*
+********ZZZZZZZZZZZ
+*******************

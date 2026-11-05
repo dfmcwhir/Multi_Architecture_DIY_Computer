@@ -1,0 +1,47 @@
+Name     ISA_6502_CPU_ADDR_DEC ;
+PartNo   00 ;
+Date     5/4/2026 ;
+Revision 01 ;
+Designer Engineer ;
+Company  none ;
+Assembly None ;
+Location  ;
+Device   G22V10 ;
+
+/* *************** INPUT PINS *********************/
+PIN 2     = DMA                         ; /*                                 */ 
+PIN 3     = A15                        ; /*                                 */ 
+PIN 4     = A14                        ; /*                                 */ 
+PIN 5     = A13                        ; /*                                 */ 
+PIN 6     =  A12                       ; /*                                 */ 
+PIN 7     =  A11                       ; /*                                 */ 
+PIN 8     =  A10                       ; /*                                 */ 
+PIN 9     =  A9                       ; /*                                 */ 
+PIN 10     =  A8                       ; /*                                 */ 
+PIN 11     =  CLK_IN                       ; /*                                 */ 
+PIN 13     =  RW                       ; /*                                 */ 
+
+/* *************** OUTPUT PINS *********************/
+PIN 14     = !IOr                        ; /*                                 */ 
+PIN 15     = !IOw                        ; /*                                 */ 
+PIN 16     = !ROMen                        ; /*                                 */ 
+PIN 17     = !IOen                        ; /*                                 */ 
+PIN 18     = !RAMen                        ; /*                                 */ 
+PIN 19     = !CLK_OUT                        ; /*                                 */ 
+PIN 22     = !MEMr                        ; /*                                 */ 
+PIN 23     = !MEMw                        ; /*                                 */ 
+
+/** Declarations and Intermediate Variable Definitions  **/
+
+field addr = [A15..8] ;
+
+/** Logic Equations **/
+
+ROMen = addr:['h'8000..ffff];
+RAMen = (addr:['h'0000..7eff] & CLK_IN) # !DMA;
+IOen = addr:['h'7f00..7fff];
+IOr  = IOen & RW & CLK_IN;
+IOw = IOen & !RW;
+MEMr = (RAMen # ROMen) & RW;
+MEMw = RAMen & !RW;
+CLK_OUT = CLK_IN;

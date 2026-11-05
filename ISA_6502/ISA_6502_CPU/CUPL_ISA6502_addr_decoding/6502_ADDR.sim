@@ -1,0 +1,88 @@
+%SIGNAL
+PIN  10 =  A8 
+PIN   9 =  A9 
+PIN   8 =  A10 
+PIN   7 =  A11 
+PIN   6 =  A12 
+PIN   5 =  A13 
+PIN   4 =  A14 
+PIN   3 =  A15 
+PIN  11 =  CLK_IN 
+PIN  19 = !CLK_OUT 
+PIN   2 =  DMA 
+PIN  17 = !IOen 
+PIN  14 = !IOr 
+PIN  15 = !IOw 
+PIN  22 = !MEMr 
+PIN  23 = !MEMw 
+PIN  18 = !RAMen 
+PIN  16 = !ROMen 
+PIN  13 =  RW 
+%END
+
+%FIELD
+FIELD addr = A15,A14,A13,A12,A11,A10,A9,A8
+%END
+
+%EQUATION
+CLK_OUT =>
+    CLK_IN
+
+IOen =>
+    A8 & A9 & A10 & A11 & A12 & A13 & A14 & !A15
+
+IOr =>
+    CLK_IN & !IOen & RW
+
+IOw =>
+    !IOen & !RW
+
+MEMr =>
+    !RAMen & RW
+  # !ROMen & RW
+
+MEMw =>
+    !RAMen & !RW
+
+RAMen =>
+    !A8 & A9 & A10 & A11 & A12 & A13 & A14 & !A15 & CLK_IN
+  # !A9 & A11 & A12 & !A15 & CLK_IN
+  # !A11 & !A12 & !A13 & !A15 & CLK_IN
+  # A9 & A10 & A11 & A12 & A13 & !A14 & !A15 & CLK_IN
+  # A10 & !A11 & !A12 & A13 & !A15 & CLK_IN
+  # !A10 & A11 & !A12 & !A13 & !A15 & CLK_IN
+  # !A10 & !A12 & A13 & !A15 & CLK_IN
+  # A10 & A11 & !A12 & !A15 & CLK_IN
+  # A9 & A10 & A11 & A12 & !A13 & !A15 & CLK_IN
+  # A9 & !A10 & A11 & A12 & !A15 & CLK_IN
+  # !A11 & A12 & !A15 & CLK_IN
+  # !DMA
+
+ROMen =>
+    A15
+
+CLK_OUT.oe  =>
+    1 
+
+IOen.oe  =>
+    1 
+
+IOr.oe  =>
+    1 
+
+IOw.oe  =>
+    1 
+
+MEMr.oe  =>
+    1 
+
+MEMw.oe  =>
+    1 
+
+RAMen.oe  =>
+    1 
+
+ROMen.oe  =>
+    1 
+
+%END

@@ -1,0 +1,33 @@
+Name     ISA_6502_CPU_INTERRUPT ;
+PartNo   00 ;
+Date     5/4/2026 ;
+Revision 01 ;
+Designer Engineer ;
+Company  none ;
+Assembly None ;
+Location  ;
+Device   g22v10 ;
+
+/* *************** INPUT PINS *********************/
+PIN 2    =  A0                       ; /*                                 */ 
+PIN 3    =  A1                       ; /*                                 */ 
+PIN 4    =  A2                       ; /*                                 */ 
+PIN 5    =  A3                       ; /*                                 */ 
+PIN 6    =  A4                       ; /*                                 */ 
+PIN 7    =  A5                       ; /*                                 */ 
+PIN 8    =  A6                       ; /*                                 */ 
+PIN 9    =  A7                       ; /*                                 */ 
+PIN 10    = IOen                       ; /*                                 */ 
+
+/* *************** OUTPUT PINS *********************/
+PIN 22   =  !OE                       ; /*                                 */ 
+Pin 23   =  !OEtmp;
+
+/** Declarations and Intermediate Variable Definitions  **/
+
+field addr = [A7..0] ;
+
+/** Logic Equations **/
+
+OE = addr:['h'ff] & !IOen;
+OEtmp = OE; /*work around for pin 23 not having enough product terms */

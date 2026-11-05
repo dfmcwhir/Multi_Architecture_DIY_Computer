@@ -1,0 +1,34 @@
+# Berkeley PLA format generated using
+#
+# CUPL(WM)        5.0a Serial# 60008009
+# Device          g22v10  Library DLIB-h-40-1
+# Created         Mon May 04 13:32:03 2026
+# Name            ISA_6502_CPU_INTERRUPT 
+# Partno          00 
+# Revision        01 
+# Date            5/4/2026 
+# Designer        Engineer 
+# Company         none 
+# Assembly        None 
+# Location        
+#
+# Inputs  1 A0 A1 A2 
+#         A3 A4 A5 A6 
+#         A7 IOen !OE !OEtmp 
+# Outputs OE OEtmp OE.oe OEtmp.oe 
+.i 12
+.o 4
+.p 12
+--------0--- 1~~~
+-------0---- 1~~~
+------0----- 1~~~
+-----0------ 1~~~
+----0------- 1~~~
+---0-------- 1~~~
+--0--------- 1~~~
+-0---------- 1~~~
+---------1-- 1~~~
+----------0- ~1~~
+1----------- ~~1~
+1----------- ~~~1
+.end
