@@ -1,0 +1,150 @@
+Name       VDPGLUE;
+PartNo     01;
+Date       10/25/26;
+Revision   06;
+Designer   ;
+Company    ;
+Assembly   PICO9918 video + PS/2 keyboard + serial console card for 6502 SBC;
+Location   U1;
+Device     g22v10;
+
+/*
+ * Glue logic for a PICO9918 v2.0 module plus an ATmega328P keyboard and
+ * serial console interface (SBCInterface.c) on the 6502 SBC bus.
+ * Timing target: 6502 at up to 4 MHz, no wait states.
+ *
+ * Address block: $7F1C-$7F1F  (/IO_EN low = A15-A8 == $7F, A7-A2 = 000111)
+ *
+ *   Addr   Read                          Write
+ *   $7F1C  VDP data      (MODE=0)        VDP data
+ *   $7F1D  VDP status    (MODE=1)        VDP register/address
+ *   $7F1E  key code ('573 -> bus)        serial TX byte (bus -> '574)
+ *   $7F1F  status: D7=KBAVAIL D6=DBUSY   (nothing)
+ *
+ * Status: BIT $7F1F  ->  N = key waiting, V = TX byte not taken yet.
+ * Only D7 and D6 are driven on a status read; D5-D0 float.
+ *
+ * Rev 05 change - read strobes no longer use /IOr:
+ *   A read is "card selected, /IOw not active, PHI2 high". /IO_EN, A7-A0
+ *   and /IOw (address-only on this SBC) are all valid during PHI2 low, so
+ *   the only delay left in the read strobes is this GAL's PHI2 -> output
+ *   time. That removes the main GAL's /IOr delay from the VDP read path:
+ *     PHI2 rise -> /CSR (this GAL)        15-25 ns
+ *     /CSR -> data at socket (PICO9918)   44-86 ns
+ *     6502 data setup before PHI2 falls   10 ns
+ *     worst case                          ~121 ns  <=  125 ns PHI2 high @ 4 MHz
+ *   /KBRD is a full PHI2-high pulse (~125 ns at 4 MHz), longer than one
+ *   AVR clock (90 ns at 11.0592 MHz), so INT0 catches it reliably.
+ *   Pin 2 (/IOr) is no longer used. Keep it connected so the input
+ *   doesn't float.
+ *
+ * The VDP is selected only at $7F1C/$7F1D, so MODE1 (bus A1) is always 0
+ * during VDP cycles. Wiring A1 to MODE1 is harmless; tying MODE1 to GND
+ * works too.
+ *
+ * DBUSY is a register clocked by PHI2 (pin 1) rising edges:
+ *   - set at the start of a write cycle to $7F1E (address and /IOw are
+ *     valid during PHI2 low, before the edge),
+ *   - cleared on an edge where the AVR holds /DOE low (it is reading the
+ *     '574), unless a new write is starting in that same cycle.
+ * Power-up state is not relied on: the AVR pulses /DOE at start-up.
+ *
+ * Wired directly, not through this GAL:
+ *   bus A0       -> VDP pin 13 (MODE)
+ *   bus A1       -> VDP pin 11 (MODE1)  (or GND)
+ *   bus /RESET   -> VDP pin 34
+ *   VDP /INT     -> SBC IRQ6 (socket pin 16)
+ *   6502 D0..D7  -> VDP pins 17..24 (CD7..CD0, reversed: D7 -> pin 24)
+ *   '573: D <- AVR bus, Q -> 6502 bus, LE <- AVR PD5, /OE <- nKBRD
+ *   TX latch: see below.
+ *
+ * Rev 06 change - the serial TX latch is clocked straight from PHI2:
+ *   nDISPWE (pin 21) is now "write cycle to $7F1E" with NO PHI2 term. It is
+ *   settled during PHI2 low, long before PHI2 falls at the end of the cycle.
+ *   The latch clock edge is then made from PHI2 by a fast gate on the card,
+ *   a few ns after PHI2 falls - inside the 65C02's ~10 ns write data hold -
+ *   so GAL speed no longer matters for this latch. Two ways to build it:
+ *
+ *   A) 74HCT574 (keep it), CLK <- 74ACT02 NOR(PHI2, nDISPWE), /OE <- /DOE
+ *        CLK rises when PHI2 falls during a $7F1E write.
+ *        It also rises once early in that write cycle (when nDISPWE goes
+ *        low while PHI2 is still low), latching junk that the real edge
+ *        then overwrites - harmless, as the handshake guarantees the AVR
+ *        has already taken the previous byte.
+ *        One gate, no other new chips.
+ *
+ *   B) 74HCT377, /E <- nDISPWE, CLK <- PHI2 via 74ACT04/74F04 inverter,
+ *      plus a 74HCT541 between the '377 Q outputs and the AVR bus
+ *      (/OE <- /DOE), because the '377 has no output enable.
+ *        Cleanest: exactly one clock edge per cycle, no early edge.
+ *        Costs two extra chips.
+ */
+
+/* ---------------- Inputs ---------------- */
+PIN 1  = PHI2;      /* bus CLK_IN (PHI2), also the register clock */
+PIN 2  = nIOR;      /* /IOr from main GAL - not used in rev 05    */
+PIN 3  = nIOW;      /* /IOw from main GAL (address only)         */
+PIN 4  = nIO_EN;    /* /IO_EN, low when A15-A8 = $7F             */
+PIN 5  = A7;
+PIN 6  = A6;
+PIN 7  = A5;
+PIN 8  = A4;
+PIN 9  = A3;
+PIN 10 = A2;
+PIN 11 = A1;
+PIN 13 = A0;
+PIN 14 = KBAVAIL;   /* from AVR PC5, active high (I/O pin as input) */
+PIN 23 = nDOE;      /* from AVR PD4, low while AVR reads '574       */
+
+/* ---------------- Outputs ---------------- */
+PIN 15 = nKBIRQ;    /* to SBC IRQ5, active low                   */
+PIN 16 = D7;        /* to 6502 data bus D7, tri-state            */
+PIN 17 = nKBRD;     /* to '573 /OE and AVR PD2 (INT0)            */
+PIN 18 = nCSW;      /* to VDP pin 14                             */
+PIN 19 = nCSR;      /* to VDP pin 15                             */
+PIN 20 = D6;        /* to 6502 data bus D6, tri-state            */
+PIN 21 = nDISPWE;   /* TX latch enable (no PHI2) - see rev 06    */
+PIN 22 = DBUSY;     /* registered, to AVR PD3                    */
+
+/* ---------------- Logic ---------------- */
+
+/* card selected: $7F1C-$7F1F (address only, valid during PHI2 low) */
+SEL = !nIO_EN & !A7 & !A6 & !A5 & A4 & A3 & A2;
+
+/* read = selected and not a write; strobes are PHI2-gated here */
+RD  = SEL & nIOW & PHI2;
+WR  = SEL & !nIOW & PHI2;
+
+/* VDP: $7F1C/$7F1D only */
+nCSR = !(RD & !A1);
+nCSW = !(WR & !A1);
+
+/* keyboard data read at $7F1E */
+nKBRD = !(RD & A1 & !A0);
+
+/* serial TX byte write at $7F1E: latch enable, NOT gated with PHI2.
+   The clock edge is made from PHI2 by the fast gate on the card. */
+nDISPWE = !(SEL & !nIOW & A1 & !A0);
+
+/* TX handshake flag, sampled on PHI2 rising edges (no PHI2 term) */
+DBUSY.d  = (SEL & !nIOW & A1 & !A0)
+         # (DBUSY & nDOE);
+DBUSY.ar = 'b'0;
+DBUSY.sp = 'b'0;
+
+/* status read at $7F1F */
+D7    = KBAVAIL;
+D7.oe = RD & A1 & A0;
+D6    = DBUSY;
+D6.oe = RD & A1 & A0;
+
+/* keyboard interrupt, active low */
+nKBIRQ = !KBAVAIL;
+
+/* always-enabled outputs */
+nCSR.oe    = 'b'1;
+nCSW.oe    = 'b'1;
+nKBRD.oe   = 'b'1;
+nKBIRQ.oe  = 'b'1;
+nDISPWE.oe = 'b'1;
+DBUSY.oe   = 'b'1;

@@ -1,0 +1,65 @@
+Name     PICO9918_DEC ;
+PartNo   00 ;
+Date     11/04/2026 ;
+Revision 08 ;
+Designer Engineer ;
+Company  none ;
+Assembly ISA PICO9918 video card (keyboard moved to the serial card) ;
+Location U1 ;
+Device   G22V10 ;
+
+/*
+ * Address map (6502 / Z80 port):
+ *   $7F1C / $1C   VDP data             (MODE = A0 = 0)
+ *   $7F1D / $1D   VDP status / register (MODE = A0 = 1)
+ *   $7F1E-$7F1F belong to the serial card's keyboard; this card ignores them
+ *   (selected only when A1 = 0, so MODE1 is always 0 here).
+ *
+ * Wired directly, not through this GAL:
+ *   bus A0 -> VDP MODE (socket pin 13), bus A1 or GND -> MODE1 (pin 11),
+ *   bus /RESET -> pin 34, 6502 D0..D7 -> CD7..CD0 (reversed).
+ *
+ * "Read" = selected and /IOw high (valid during clock-low); both strobes
+ * are gated with CLK so each access gives exactly one pulse.
+ *
+ * Pinout assumed from the last PICO card schematic: pins 1-13 unchanged,
+ * /CSW on pin 18, /CSR on pin 19. Pins 14-17 and 20-23 are now unused.
+ */
+
+/* *************** INPUT PINS *********************/
+PIN 1  = CLK ;       /* bus OSC (CPU clock)                       */
+PIN 2  = nIOR ;      /* bus /IOR - not used                       */
+PIN 3  = nIOW ;      /* bus /IOW - low = write, not clock-gated   */
+PIN 4  = nIOEN ;     /* bus /IO_EN                                */
+PIN 5  = A7 ;
+PIN 6  = A6 ;
+PIN 7  = A5 ;
+PIN 8  = A4 ;
+PIN 9  = A3 ;
+PIN 10 = A2 ;
+PIN 11 = A1 ;
+PIN 13 = A0 ;
+
+/* *************** OUTPUT PINS *********************/
+PIN 18 = !CSW ;      /* VDP socket pin 14                         */
+PIN 19 = !CSR ;      /* VDP socket pin 15                         */
+
+/** Decode (address only): $1C-$1D **/
+SELVDP = !nIOEN & !A7 & !A6 & !A5 & A4 & A3 & A2 & !A1;
+
+CSR = SELVDP & nIOW & CLK;
+CSW = SELVDP & !nIOW & CLK;
+
+CSR.oe = 'b'1;
+CSW.oe = 'b'1;
+
+/*
+ * Optional, if the board revision routes the module's /INT through the GAL
+ * (pin 14 = module /INT in, pin 15 = open-drain IRQ out) instead of the
+ * 2N7000 - uncomment:
+ *
+ * PIN 14 = nVDPINT ;
+ * PIN 15 = nIRQOUT ;
+ * nIRQOUT    = 'b'0;
+ * nIRQOUT.oe = !nVDPINT;
+ */
