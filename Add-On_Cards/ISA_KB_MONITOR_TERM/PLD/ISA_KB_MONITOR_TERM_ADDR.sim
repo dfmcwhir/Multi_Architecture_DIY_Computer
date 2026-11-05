@@ -1,0 +1,24 @@
+%SIGNAL
+PIN   8 =  A2 
+PIN   7 =  A3 
+PIN   6 =  A4 
+PIN   5 =  A5 
+PIN   4 =  A6 
+PIN   3 =  A7 
+PIN  19 =  CS1 
+PIN   2 =  IOEN 
+PIN  18 =  RESET 
+PIN   9 =  RESETRAW 
+%END
+
+%FIELD
+%END
+
+%EQUATION
+CS1 =>
+    !A2 & A3 & A4 & !A5 & !A6 & !A7 & !IOEN
+
+RESET =>
+    RESETRAW
+
+%END

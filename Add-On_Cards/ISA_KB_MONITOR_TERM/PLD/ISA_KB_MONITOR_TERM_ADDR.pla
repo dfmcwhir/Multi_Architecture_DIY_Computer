@@ -1,0 +1,24 @@
+# Berkeley PLA format generated using
+#
+# CUPL(WM)        5.0a Serial# MW-10400000
+# Device          g16v8s  Library DLIB-h-40-9
+# Created         Thu Aug 06 02:45:39 2026
+# Name            ISA6502_KB_MONITOR_TERM_ADDR
+# Partno          00 
+# Revision        01 
+# Date            01.06.2026 
+# Designer        dylan 
+# Company         unknown 
+# Assembly        None 
+# Location        unknown 
+#
+# Inputs  A2 A3 A4 A5 
+#         A6 A7 CS1 IOEN 
+#         RESET RESETRAW 
+# Outputs CS1 RESET 
+.i 10
+.o 2
+.p 2
+011000-0-- 1~
+---------1 ~1
+.end

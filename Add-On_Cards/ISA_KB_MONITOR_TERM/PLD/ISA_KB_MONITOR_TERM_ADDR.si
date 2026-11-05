@@ -1,0 +1,17 @@
+Name     ISA6502_KB_MONITOR_TERM_ADDR;
+PartNo   00 ;
+Date     01.06.2026 ;
+Revision 01 ;
+Designer dylan ;
+Company  unknown ;
+Assembly None ;
+Location unknown ;
+Device   g16v8a ;
+
+ORDER: IOen, A7, A6, A5, A4, A3, A2, RESETRAW, CS1, RESET;
+  
+VECTORS:
+0000111HH
+1XXXXX1LH
+0100111LH
+XXXXXX0XL

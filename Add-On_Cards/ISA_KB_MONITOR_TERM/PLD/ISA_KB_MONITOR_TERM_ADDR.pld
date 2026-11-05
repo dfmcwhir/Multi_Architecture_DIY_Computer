@@ -1,0 +1,26 @@
+Name     ISA6502_KB_MONITOR_TERM_ADDR;
+PartNo   00 ;
+Date     01.06.2026 ;
+Revision 01 ;
+Designer dylan ;
+Company  unknown ;
+Assembly None ;
+Location unknown ;
+Device   g16v8a ;
+
+/* inputs */
+PIN 9 = RESETRAW;
+PIN 8 = A2;
+PIN 7 = A3;
+PIN 6 = A4;
+PIN 5 = A5;
+PIN 4 = A6;
+PIN 3 = A7;
+PIN 2 = IOEN;
+/* outputs */
+PIN 19 = CS1;
+PIN 18 = RESET;
+
+/* combinatorial logic */
+CS1 = !IOEN & !A2 & A3 & A4 & !A5 & !A6 & !A7;
+RESET = RESETRAW;

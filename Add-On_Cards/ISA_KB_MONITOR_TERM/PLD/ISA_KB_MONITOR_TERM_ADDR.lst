@@ -1,0 +1,39 @@
+LISTING FOR LOGIC DESCRIPTION FILE: ISA_KB_MONITOR_TERM_ADDR.pld     Page 1
+
+CUPL(WM): Universal Compiler for Programmable Logic
+Version 5.0a Serial# MW-10400000
+Copyright (c) 1983, 1998 Logical Devices, Inc.
+Created Thu Aug 06 02:45:39 2026
+
+  1:Name     ISA6502_KB_MONITOR_TERM_ADDR;
+  2:PartNo   00 ;
+  3:Date     01.06.2026 ;
+  4:Revision 01 ;
+  5:Designer dylan ;
+  6:Company  unknown ;
+  7:Assembly None ;
+  8:Location unknown ;
+  9:Device   g16v8a ;
+ 10:
+ 11:/* inputs */
+ 12:PIN 9 = RESETRAW;
+ 13:PIN 8 = A2;
+ 14:PIN 7 = A3;
+ 15:PIN 6 = A4;
+ 16:PIN 5 = A5;
+ 17:PIN 4 = A6;
+ 18:PIN 3 = A7;
+ 19:PIN 2 = IOEN;
+ 20:/* outputs */
+ 21:PIN 19 = CS1;
+ 22:PIN 18 = RESET;
+ 23:
+ 24:/* combinatorial logic */
+ 25:CS1 = !IOEN & !A2 & A3 & A4 & !A5 & !A6 & !A7;
+ 26:RESET = RESETRAW;
+ 27:
+
+
+
+Jedec Fuse Checksum       (10a5)
+Jedec Transmit Checksum   (85a2)
