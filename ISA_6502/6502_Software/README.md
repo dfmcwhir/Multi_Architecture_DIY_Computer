@@ -2,7 +2,126 @@
 <p>This folder includes EhBasic ported to work with the 6502 CPU rev1 card, the monitor program (which includes commands to load programs) and all the programs I have been playing with so far. Because all of this has been written for use the current add-on cards (specifically the MON_KEYBOARD_TERM card), none of it will likely be directly compatible with any new display and/or keyboard interface cards. New/updated software for the new cards will likely be placed in a new software rev2 folder. What I would like to do is make it so the display and/or keyboard drivers are not so integrated in the rest of the code, so that the type of display card installed can be specified at the top of the firmware code and it will pull everything in correctly.</p>
 
 <h2>EhBasic</h2>
-<p>Some of the commands that have been added to EhBasic are for using I2C, LCDs (via I2C), sound, and loading/saving files via the USB. Instructions for using those features are in the EhBASIC for the 6502 SBC manual.</p>
+<p>Some of the commands that have been added to EhBasic are for using I2C, LCDs (via I2C), sound, and loading/saving files via the USB. Instructions for using those features are in the EhBASIC for the 6502 SBC manual.</p><p>It can be built using CA65 and these commands:<br>
+ca65 main.s -o main.o -l main.lst<br>
+ld65 -C sbc.cfg main.o -o rom.bin -m rom.map<br></p>
+
+## Boot menu
+    6502 SBC - EhBASIC 2.22
+    [C]old start, [W]arm start, [M]onitor?
+C = EhBASIC cold start, W = warm start (keeps program), M = wozmon.
+CTRL-C in wozmon returns to the menu. From BASIC: `CALL 65280` enters wozmon.
+Wozmon accepts lower case; load/modify memory as usual (`0300: DE AD`, `0300.030F`, `E000R`).
+
+## Files
+| file | what |
+|---|---|
+| main.s | top level; includes everything (order matters) |
+| basic.s | EhBASIC (patched: no .org, Ram_base $0500, Ram_top $7F00, IRQ_vec/NMI_vec defined, blank INPUT line accepted instead of ending the program) |
+| bios.s | your hardware layer + boot menu + vector setup + IRQ dispatch |
+| ch376_abs.s / ch376_loadsave.s | CH376 driver; LOAD/SAVE/LOAD "$" adapted to EhBASIC |
+| pcf8584.s | PCF8584 I2C bridge driver (init, start/send/read/stop, delay) |
+| lcd_i2c.s | HD44780 LCD behind an MCP23008 (4-bit) |
+| basic_i2c.s | BASIC statements/function for the I2C bridge and LCD |
+| wozmon.s | monitor (at $FF00) |
+| sbc.cfg | linker memory map (edit if your decoding differs) |
+
+## BASIC file commands
+`SAVE "NAME"` -> /NAME.BAS      `LOAD "NAME"`      `LOAD "$"` or `LOAD "$*.BAS"` = directory
+
+## Memory map (sbc.cfg)
+$0200 wozmon buffer | $0280 CH376 vars | $0300 EhBASIC vars | $0380 BIOS vars |
+$0400 serial buffer | $0500-$7EFF BASIC RAM | $7F00 I/O | $8000 ROM | $FF00 wozmon | $FFFA vectors
+Zero page: BIOS uses $E2-$E7 (free in EhBASIC); wozmon uses $24-$2B (free in EhBASIC).
+
+## Verification
+verify/ holds a ca65-subset assembler and 6502 emulator used to test this (ca65 itself wasn't available).
+
+## tools/ebtok.py - tokenize ASCII BASIC on your PC
+    python3 tools/ebtok.py hello.bas          # -> HELLO.BAS, copy to the drive's root
+    python3 tools/ebtok.py prog.txt --upper   # upper-cases keywords/variables for you
+Then on the SBC: `LOAD "HELLO"`. Source lines must be numbered; keywords must be UPPER CASE
+(or use --upper). Same tokenizing rules as EhBASIC itself (e.g. TOTAL becomes TO+"TAL").
+`verify/t4.py` checks the tokenizer's bytes against a program typed into the emulated BASIC.
+
+## I2C and LCD keywords (pcf8584.s, lcd_i2c.s, basic_i2c.s)
+    I2CINIT                      init PCF8584 (also automatic on first use)
+    I2CWRITE addr, b1 [,b2...]   write up to 32 bytes to 7-bit address addr (0-127); no ACK -> "I2C Error"
+    x = I2CREAD(addr)            read one byte (0-255); -1 if the device doesn't answer
+    LCDINIT [addr]               (re)initialise the LCD (also automatic on first use). addr (0-127) selects an LCD at
+                                 another I2C address from then on; plain LCDINIT returns to the default (0x20)
+    LCDPRINT s$                  print a string at the cursor
+    LCDPOS col, row              col 0-39, row 0-3
+    LCDCLS                       clear
+    LCDCMD n                     raw HD44780 command byte
+Settings to check: CPU_MHZ (top of main.s - the ONE clock setting, used by the CH376 and I2C/LCD delays),
+PCF_CLOCK and PCF_OWN in pcf8584.s; MCP_ADDR_W (default LCD address) and the nibble_tab wiring in lcd_i2c.s.
+The LCD code drives an MCP23008 backpack. A PCF8574 backpack is NOT compatible (see notes below).
+Don't start a variable name with I2CINIT / I2CWRITE / I2CREAD / LCDxxxx (EhBASIC tokenizes keywords anywhere).
+**Tokens moved:** adding the keywords renumbers every token after NMI. Re-tokenize old programs from their
+ASCII source with tools/ebtok.py; .BAS files saved by the previous ROM will not LIST/RUN correctly.
+After adding keywords to basic.s, run `python3 tools/gen_keywords.py basic.s tools/ebtok.py`.
+`verify/t6.py` tests all of this in the emulator with a PCF8584 / MCP23008 / HD44780 model.
+
+## basic.s patch: stack flush vs. interrupts
+LAB_1491 (stack flush) now runs SEI ... CLI around the moment its return address is parked on the stack,
+so the serial receive interrupt can no longer overwrite it (this caused random jumps to address $0001).
+
+## Disk errors
+`?DISK ERROR $xx` now shows the CH376 status code: $FF = the chip never answered (timeout), $82 = drive removed,
+$41/$42-type codes = file system problems.  Report that code when something fails.
+
+
+## LCDINIT [addr [, type]]
+- `LCDINIT` - default address 0x20, MCP23008 backpack
+- `LCDINIT 39` - address 39 ($27), MCP23008
+- `LCDINIT 39, 1` - PCF8574 backpack. type 0 = MCP23008 (default), 1 = PCF8574
+- PCF8574 pin mapping: P0=RS, P1=RW (held low), P2=E, P3=backlight, P4-P7=D4-D7
+
+## LOADRAW / SAVERAW (raw memory block files)
+- `SAVERAW "NAME", start, end` - writes the bytes start .. end-1 (end is NOT included) to NAME.DAT
+- `LOADRAW "NAME" [, start]` - reads the whole file to `start`; without `start` it goes to the first byte above BASIC memory
+- ".DAT" is added if the name has no extension (LOAD/SAVE still add ".BAS"). Addresses can be hex, e.g. `$7000`.
+- SAVERAW can save any memory range. LOADRAW only writes from the top of BASIC memory up to $7EFF, so it cannot damage the program, variables, strings or system RAM. To reserve space, answer the cold start question `Memory size ?` with a lower number (e.g. 28672 reserves $7000-$7EFF).
+- Errors: ?Function call error (bad range or address), ?FILE TOO LARGE (does not fit), ?FILE NOT FOUND.
+
+## SAVEARR / LOADARR (whole numeric arrays)
+- `SAVEARR "NAME", A()` - saves the whole array A (any number of dimensions) to NAME.ARR
+- `LOADARR "NAME", A()` - reads it back into A
+- LOADARR needs the array to exist already with the same dimensions (`DIM A(9)` first). If the file's dimensions do not match, or the file is short, you get `?BAD FILE` and the array is not changed.
+- Only numeric arrays. String arrays (`A$()`) give ?Type mismatch. An array that does not exist gives ?Function call error.
+- The file holds the dimension header followed by the data, so a 10 element array is 1+2+10*4 = 43 bytes.
+
+## Monitor commands (monitor_cmds.s)
+At the monitor prompt (`\`):
+- `?` - list the commands
+- `L` - list the files on the USB drive
+- `L` - list the files and sub-directories (`<DIR>`) of the current USB directory, headed by its path (`/` is the root).
+- `L DIR` - change into directory DIR. `L ..` goes up one level, `L \` or `L /` back to the root. Paths work too: `L GAMES/DEEP`, `L /GAMES`. The monitor starts in the root directory. BASIC `LOAD`/`SAVE` always use the root.
+- `L NAME [XXXX]` - load NAME.BIN from the current USB directory into RAM at hex address XXXX. Without XXXX the file goes to the monitor's current address (type an address and Enter first, e.g. `2000` then `L PROG`). `.BIN` is added when NAME has no extension; any other extension you type is used as is.
+- Allowed load range is $0500-$7EFF; anything else gives `?SYNTAX`. A file that does not fit gives `?FILE TOO LARGE`.
+- After a load the monitor's current address is the load address, so `R` runs the program.
+- Disk errors print the same messages as BASIC and return to the monitor prompt.
+- wozmon.s calls `MON_HOOK` when Enter is pressed (5 bytes in the WOZMON segment, which now has 4 bytes free). Add further commands in monitor_cmds.s. They must start with a character that is not a hex digit or `R`.
+
+## NES gamepad (gamepad.s)
+A NES style pad (4021 shift register) on the 65C22 VIA port A, polled 60 times a second from the VIA timer 1 interrupt (IRQ2). Button presses are put into the input buffer like typed characters, so BASIC (`GET`, `INPUT`) and the monitor see them; a held button auto-repeats.
+- Wiring: PA0 <- DATA (10k pull-up to +5V), PA1 -> LATCH, PA2 -> CLOCK, plus +5V and GND. Other port A pins are not touched. Pins are set by `PAD_*_BIT` at the top of gamepad.s.
+- Buttons are numbered in the order the pad shifts them out: 0=A 1=B 2=Select 3=Start 4=Up 5=Down 6=Left 7=Right.
+- Defaults: Up `W`, Down `S`, Left `A`, Right `D` (upper case), A = space. B, Select, Start are unassigned.
+- `PADKEY button, char` - assign a character (0-255; 0 switches the button off), e.g. `PADKEY 1,13` (B = Enter), `PADKEY 4,ASC("W")`. `PADKEY` alone restores the defaults. Edit `pad_defaults` to change the power-up mapping.
+- Repeat: `PAD_REPEAT_DELAY` (20 polls = 1/3 s) then every `PAD_REPEAT_RATE` (6 polls); set the rate to 0 for no repeat. `PAD_ENABLE = 0` turns the whole feature off.
+- Needs the VIA's interrupt on IRQ2 (as in bios.s). The timer period comes from `CPU_MHZ` (up to 3 MHz).
+- The chip is not touched if all 8 buttons read as pressed (an unplugged or shorted data line).
+
+## Fixed entry points for your own programs (jumptable.s, sbc_api.inc)
+The BIOS routines move whenever the ROM is rebuilt, so a program you assemble separately and load with `L NAME ADDR` must not call them by address. The table at $FE00 never moves (each entry is a JMP):
+- `$FE00` CHRIN (carry set + A = char; carry clear = none waiting; keyboard, serial and gamepad) - `$FE03` CHROUT (print A; A, X, Y preserved)
+- `$FE06` boot menu - `$FE09` BASIC cold start - `$FE0C` BASIC warm start - `$FE0F` monitor prompt
+- `$FE12` PADSTATE (A = buttons held right now, bit0 A, 1 B, 2 Select, 3 Start, 4 Up, 5 Down, 6 Left, 7 Right)
+- `$FE15` LOAD (`SBC_LOAD`): load a whole file from the USB drive, silently. A/Y = low/high byte of a parameter block: `.word` load address, `.word` most bytes to write, then the 8.3 file name ending in a 0 byte. The name is relative to the monitor's current directory (`L DIR`; the root unless changed; set `SBC_LOAD_USES_CWD = 0` in monitor_cmds.s to always use the root). Returns carry clear + X/Y = length loaded (a longer file is cut at max and still counts as success), or carry set + A = error code ($42 file not found, other CH376 status codes, $FF timeout / no drive, $FE bad parameter block). It prints nothing, never jumps to the monitor, never writes past address+max-1, closes the file before returning, and mounts the drive if needed. Changes A, X, Y and flags.
+`.include "sbc_api.inc"` gives the same addresses as ca65 equates. `R` runs the program with the stack reset, so end it with `JMP $FF00` (monitor) or `JMP $FE06` (menu), not RTS.
+
 
 <h2>Games for the 6502 SBC</h2>
 
