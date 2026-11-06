@@ -4,7 +4,8 @@
 
 <h2>Features:</h2>
 <li>Display: 640x480 @ 60 Hz progressive.</li>
-<li>Input: PS/2 keyboard and mouse, plus USB keyboards and mice on the S3’s own USB port (hubs and wireless combo receivers work).</li>
+<li>Input: PS/2 keyboard and mouse.</li>
+<li>TTL serial console header pins for a serial UI when a display and/or kb is not attached to the computer.</li>
 
 <h2>Resources</h2>
 <table><thead><tr><th>Address</th><th>Function</th></tr></thead>
