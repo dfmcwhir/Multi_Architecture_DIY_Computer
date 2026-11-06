@@ -9,7 +9,7 @@
 <h2>Resources</h2>
 <table><thead><tr><th>Address</th><th>Function</th></tr></thead>
 <tr><td>7F1C</td><td>Pico9918 VRAM Register</td></tr>
-<tr><td>7F19</td><td>Pico9918 Status Register</td></tr>
+<tr><td>7F1D</td><td>Pico9918 Status Register</td></tr>
 <tr><td>7F1E</td><td>KB/Mouse Data Register</td></tr>
 <tr><td>7F1F</td><td>KB/Mouse Status Register</td></tr>
 </table>
