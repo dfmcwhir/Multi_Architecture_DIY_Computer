@@ -7,10 +7,10 @@
 
 <h2>Resources</h2>
 <table><thead><tr><th>Address</th><th>Function</th></tr></thead>
-<tr><td>7F14</td><td>Data Register</td></tr>
-<tr><td>7F15</td><td>Status Register</td></tr>
-<tr><td>7F16</td><td>Command Register</td></tr>
-<tr><td>7F17</td><td>Control Register</td></tr>
+<tr><td>7F18</td><td>Data Register</td></tr>
+<tr><td>7F19</td><td>Status Register</td></tr>
+<tr><td>7F1A</td><td>Command Register</td></tr>
+<tr><td>7F1B</td><td>Control Register</td></tr>
 </table>
 
-IRQ3
+IRQ5
