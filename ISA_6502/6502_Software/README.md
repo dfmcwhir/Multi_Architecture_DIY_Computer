@@ -1,4 +1,10 @@
-# Games for the 6502 SBC
+#  <h1>Software</h1>
+<p>This folder includes EhBasic ported to work with the 6502 CPU rev1 card, the monitor program (which includes commands to load programs) and all the programs I have been playing with so far. Because all of this has been written for use the current add-on cards (specifically the MON_KEYBOARD_TERM card), none of it will likely be directly compatible with any new display and/or keyboard interface cards. New/updated software for the new cards will likely be placed in a new software rev2 folder. What I would like to do is make it so the display and/or keyboard drivers are not so integrated in the rest of the code, so that the type of display card installed can be specified at the top of the firmware code and it will pull everything in correctly.</p>
+
+<h2>EhBasic</h2>
+<p>Some of the commands that have been added to EhBasic are for using I2C, LCDs (via I2C), sound, and loading/saving files via the USB. Instructions for using those features are in the EhBASIC for the 6502 SBC manual.</p>
+
+<h2>Games for the 6502 SBC</h2>
 
 | Folder | Game |
 |---|---|
