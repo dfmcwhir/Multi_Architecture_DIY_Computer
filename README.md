@@ -4,7 +4,7 @@ A DIY computer system that uses a common backplane with swappable 8-bit CPU and 
 Up front, I will state the following:
   1. I started the project for my own learning and enjoyment. There will be documentation shortfalls and hardware and SW bugs that I missed and/or fixed and forgot about. There will also be plenty of poor design choices and probletunities for improvement. 
   2. Most of the electrical designs borrow ideas/circuits from other peoples work and I have modified them to work in my systems. I will try to make sure I document where I got what from.
-  3. For the software and firmware, initially I was doing my own development, but I'm not a coder so I progress was really slow/non-existent. More recently, I have started using AI which has led to a lot of progress and really all the working code on this site.
+  3. For the software and firmware, initially I was doing my own development, but I'm not a coder so I progress was really slow/non-existent. More recently, I have started using AI which has led to a lot of progress. Really all the software and firmware in this project is either a slight modifications of other people's code or done by AI.
 
 <br>
 <h2> The Concept </h2>
