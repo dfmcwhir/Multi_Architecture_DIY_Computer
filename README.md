@@ -31,7 +31,7 @@ Possible interface cards:
 </b></i>
 </quote>
 <br>
-So far I have done the 6502 and 8085 CPU cards with the Z80 on the way. The plans for the add-cards changed over time, I didn't do all the ones listed (yet), but I have a number of others. Most of them are in ISA_6502 folder, because that is the CPU I started with, but should at least theoretically be compatible with other CPU cards if they are designed to interface with the bus as I have defined it and with the correct software.
+So far I have done the 6502 and 8085 CPU cards with the Z80 on the way. The plans for the add-cards changed over time, I didn't do all the ones listed (yet), but I have a number of others. Most of them have ISA_6502 in the name, because that is the CPU I started with, but should at least theoretically be compatible with other CPU cards if they are designed to interface with the bus as I have defined it and with the correct software.
 
 <h2> The "ISA" Bus </h2>
 <p>To make it very clear, I am using the physical ISA bus for interfacing but in no way indicating that it meets any ISA specification or standards. Putting a normal ISA card into the system will almost definitely not work and may damage everything. </p>
