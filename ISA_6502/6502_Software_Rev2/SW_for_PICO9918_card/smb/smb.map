@@ -1,0 +1,32 @@
+Modules list:
+-------------
+smb.o:
+    CODE              Offs=000000  Size=002A6F  Align=00001  Fill=0000
+    RODATA            Offs=000000  Size=0028DF  Align=00001  Fill=0000
+    BSS               Offs=000000  Size=0003A9  Align=00001  Fill=0000
+    BUFS              Offs=000000  Size=001B00  Align=00001  Fill=0000
+
+
+Segment list:
+-------------
+Name                   Start     End    Size  Align
+----------------------------------------------------
+CODE                  000800  00326E  002A6F  00001
+RODATA                00326F  005B4D  0028DF  00001
+BSS                   005B4E  005EF6  0003A9  00001
+BUFS                  005F00  0079FF  001B00  00001
+
+
+Exports list by name:
+---------------------
+
+
+
+Exports list by value:
+----------------------
+
+
+
+Imports list:
+-------------
+
