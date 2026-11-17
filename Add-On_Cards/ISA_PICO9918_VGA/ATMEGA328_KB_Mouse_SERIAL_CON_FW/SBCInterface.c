@@ -10,6 +10,10 @@
 // the ANSI interpreter) has been removed - the PICO9918 is the display now.
 //
 // Version 2: adds a PS/2 mouse on PC4 (clock) and PC0 (data).
+// Version 2.1: host -> device bytes (the mouse's reset and enable, the
+//   keyboard's LED command) are clocked out on the falling edges, as the
+//   PS/2 standard says; v2.0 was one clock edge off, so the mouse was never
+//   enabled and the keyboard LEDs didn't change.
 //
 // What it does
 // ------------
@@ -496,8 +500,14 @@ static void ps2Edge(ps2dev_t *d, uint8_t pinc)
 
 	if (d->writeActive)
 	{
-		// Host -> device: change data on the rising (low-to-high) edges
-		if ((pinc & d->clkMask) == 0) return;
+		// Host -> device: the device makes the clock; the host puts each bit
+		// out after a falling (high-to-low) edge and the device reads it on
+		// the rising edge.  Rising edges are ignored here - including the
+		// one made when ps2StartWrite releases the clock, which must not be
+		// counted (v2.0 counted it, so every command ended one edge early and
+		// the device's $FA acknowledge was misread: the mouse never got past
+		// "enable reporting").
+		if (pinc & d->clkMask) return;
 		d->bitCount++;
 		if (d->bitCount <= 8)
 		{
@@ -522,9 +532,9 @@ static void ps2Edge(ps2dev_t *d, uint8_t pinc)
 		}
 		else
 		{
-			d->writeActive = 0;                 // 11: device ack bit
-			d->bitCount = 0;
-			d->shift = 0;
+			d->writeActive = 0;                 // 11: the device's ack bit
+			d->bitCount = 0;                    // (its rising edge is then
+			d->shift = 0;                       //  ignored by the receiver)
 		}
 		return;
 	}
