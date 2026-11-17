@@ -81,13 +81,12 @@ WR_N = RW;
    Block A - on-board RAM and ROM (no memory card). RAM /CE is gated with
    CLK because RAM /WE is the unclocked /WR: the write ends when CLK falls.
    Needs a RAM of 70 ns or faster at 4 MHz. */
-OPT_RAM_EN =  !A15 & CLK_IN & (!A14 # !A13 # !A12 # !A11 # !A10 # !A9 # !A8); /* $0000-$7EFF */
-OPT_ROM_EN = A15;                     /* $8000-$FFFF */
+ /* OPT_RAM_EN =  !A15 & CLK_IN & (!A14 # !A13 # !A12 # !A11 # !A10 # !A9 # !A8); /* $0000-$7EFF */
+ /* OPT_ROM_EN = A15; /* $8000-$FFFF */
 
-/* Block B - memory card supplies everything:
+/* Block B - memory card supplies everything: */
 OPT_RAM_EN = 'b'0;
 OPT_ROM_EN = 'b'0;
-*/
 
 /* clock stretcher next-state: FF1 stays high while RDYS is low */
 CLK_D = !(CLK_IN & RDYS);
