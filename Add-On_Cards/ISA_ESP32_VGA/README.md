@@ -1,11 +1,15 @@
 <h2>AY-3-8910 sound card</h2>
 
-<p>This a new card that hasn't been built or tested yet. It is based on the FABGL ESP32 library here: https://github.com/fdivitto/fabgl. That is an older library and that theoretically could provide VGA video as well as KB, mouse and sound. The firmware is here is an AI generated first draft of an 8-bit parallel interface to the ESP32/FABGL library which isn't the way that it seems like most people used that library. It could be fun to use and expand on this system. It definitely seems like it could be used to offload a fair amount processing from the 6502 in terms of generating graphics and UI interaction. The downside is that it is pretty slow. According to the AI analysis, even at a 2MHz CPU speed this card will require using the CPU /WAIT signal. Not sure how/if this will work with the 8085 or Z80 cpu cards. We will see how it goes.</p>
+<p>This a new card that hasn't been tested yet. It is loosely based on the FABGL ESP32 library here: https://github.com/fdivitto/fabgl. That is an older library and that theoretically could provide VGA video as well as KB, mouse and sound. The firmware is here is an AI generated first draft of an 8-bit parallel interface to the ESP32/FABGL library which isn't the way that it seems like most people used that library. It could be fun to use and expand on this system. It definitely seems like it could be used to offload a fair amount processing from the 6502 in terms of generating graphics and UI interaction. The downside is that it is pretty slow. According to the AI analysis, even at a 2MHz CPU speed this card will require using the CPU /WAIT signal. Not sure how/if this will work with the 8085 or Z80 cpu cards. We will see how it goes.</p>
 
 <h2>Features:</h2>
 <li>Display: 640×480, 64 colours, with your FabGL-style 2-resistor ladders. It has an 80×30 text layer with a redefinable font (usable for tiles), a 320×240 bitmap with drawing commands and scrolling, and 16 sprites plus a mouse pointer.</li>
 <li>Input: PS/2 keyboard and mouse, plus USB keyboards and mice on the S3’s own USB port (hubs and wireless combo receivers work).</li>
 <li>Sound: a 4-voice synthesizer.</li>
+
+<h2>Known Issues:</h2>
+<li>The footprints for the resistors on the board are too small, resistors have to be installed at an angle</li>
+<li>The footprint for the double mini-din KB/mouse connector is slightly off. Two of the shield tabs have to be snipped off to make it fit</li>
 
 <h2>Resources</h2>
 <table><thead><tr><th>Address</th><th>Function</th></tr></thead>
