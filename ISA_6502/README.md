@@ -64,7 +64,7 @@
 
 <h1> 6502 CPU rev2 card</h1>
 
-<p>This is the new card that has been ordered, but not built or tested yet. New features/changes:
+<p>New card, in the process of being tested. Initial tests show it working with on-board memory or external memory card, Serial Rev3, KB_MONITOR_TERM display card, Advanced_IO, PICO9918 display card, and AY-3-8910 Sound card. So far testing as been done at 2MHz and 4MHz (4MHz and 8MHz oscillators). New features/changes:
 <li> It should be compatible with all the existing add-on cards, at least at the current 2MHz speed. It is unknown what will happen with a faster CPU card.</li>
 <li> New bus signals so add-on cards can stop the CPU (/wait) or stretch the clock (/stretch) if necessary. This change also requires a the Western Digital W65C02 version of the 6502.</li>
 <li> The /DMA signal (on the /DRQ2 bus pin) should also work to stop and isolate the bus, but until a make a card that actually uses DMA, its hard know if there are issues or not.
