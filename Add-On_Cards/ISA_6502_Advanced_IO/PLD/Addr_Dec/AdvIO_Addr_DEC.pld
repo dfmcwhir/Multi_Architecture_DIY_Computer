@@ -1,0 +1,48 @@
+Name       AdvIO_Addr_DEC;
+Date        2026-11-13;
+Revision    1;
+Designer    dfmcwhir;
+Company     ;
+Assembly    ;
+Location    ;
+Device      g16v8;
+PartNo	;
+
+
+
+
+/** Inputs **/
+pin 1  = clk;
+pin 2 = a1 ;
+pin 3  = a2 ;
+pin 4  = a3 ;
+pin 5  = a4 ;
+pin 6  = a5 ;
+pin 7  = a6 ;
+pin 8 = a7;
+pin 9 = MEMw;
+pin 11 = IOen;
+pin 18 = int ;
+
+
+/** Outputs **/
+pin 12 = !SPICS2;
+pin 13 = !act ;
+pin 14 = d0;
+pin 15 = !CHw;
+pin 16 = !CHr;
+pin 17 = !USB;
+
+
+/** Declarations and Intermediate Variable Definitions  **/
+
+
+/** Logic Equations **/
+
+CHw = !MEMw & clk;
+CHr = MEMw & clk; /* this matches the !IOr that the previous design used with the CH376 */
+SPICS2 = !a7 & !a6 & a5 & !a4 & a3 & !a2 & !IOen; /* 7F28-7F2B = SPI CS2 */
+USB = !a7 & !a6 & a5 & !a4 & !a3 & !a2 & !a1 & !IOen; /* 7F20-7F21 = USB */
+act = !a7 & !a6 & a5 & !a4 & !a3 & !a2 & !a1 & !IOen; /* 7F20-7F21 = ACT (buffer enable) Orig design decoder, more addresses so that it could read output the int status on D0 when usb base + 2-3 was read from */
+/**d0  = int; Not used on this design right now**/
+/**d0.oe = a7 # a6 # !a5 # a4 # !a1 # ior; **/

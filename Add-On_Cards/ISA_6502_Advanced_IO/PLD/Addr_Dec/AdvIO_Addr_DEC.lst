@@ -1,0 +1,62 @@
+LISTING FOR LOGIC DESCRIPTION FILE: AdvIO_Addr_DEC.pld               Page 1
+
+CUPL(WM): Universal Compiler for Programmable Logic
+Version 5.0a Serial# MW-10400000
+Copyright (c) 1983, 1998 Logical Devices, Inc.
+Created Sat Nov 14 01:25:01 2026
+
+  1:Name       AdvIO_Addr_DEC;
+  2:Date        2026-11-13;
+  3:Revision    1;
+  4:Designer    dfmcwhir;
+  5:Company     ;
+  6:Assembly    ;
+  7:Location    ;
+  8:Device      g16v8;
+  9:PartNo  ;
+ 10:
+ 11:
+ 12:
+ 13:
+ 14:/** Inputs **/
+ 15:pin 1  = clk;
+ 16:pin 2 = a1 ;
+ 17:pin 3  = a2 ;
+ 18:pin 4  = a3 ;
+ 19:pin 5  = a4 ;
+ 20:pin 6  = a5 ;
+ 21:pin 7  = a6 ;
+ 22:pin 8 = a7;
+ 23:pin 9 = MEMw;
+ 24:pin 11 = IOen;
+ 25:pin 18 = int ;
+ 26:
+ 27:
+ 28:/** Outputs **/
+ 29:pin 12 = !SPICS2;
+ 30:pin 13 = !act ;
+ 31:pin 14 = d0;
+ 32:pin 15 = !CHw;
+ 33:pin 16 = !CHr;
+ 34:pin 17 = !USB;
+ 35:
+ 36:
+ 37:/** Declarations and Intermediate Variable Definitions  **/
+ 38:
+ 39:
+ 40:/** Logic Equations **/
+ 41:
+ 42:CHw = !MEMw & clk;
+ 43:CHr = MEMw & clk; /* this matches the !IOr that the previous design used with the CH376 */
+ 44:SPICS2 = !a7 & !a6 & a5 & !a4 & a3 & !a2 & !IOen; /* 7F28-7F2B = SPI CS2 */
+ 45:USB = !a7 & !a6 & a5 & !a4 & !a3 & !a2 & !a1 & !IOen; /* 7F20-7F21 = USB */
+ 46:act = !a7 & !a6 & a5 & !a4 & !a3 & !a2 & !a1 & !IOen; /* 7F20-7F21 = ACT (buffer enable) Orig design decoder, more addresses so that it could read output the int status on D0 when usb base + 2-3 was read from */
+ 47:/**d0  = int; Not used on this design right now**/
+ 48:/**d0.oe = a7 # a6 # !a5 # a4 # !a1 # ior; **/
+ 49:
+ 50:
+
+
+
+Jedec Fuse Checksum       (191e)
+Jedec Transmit Checksum   (89f4)

@@ -1,0 +1,30 @@
+# Berkeley PLA format generated using
+#
+# CUPL(WM)        5.0a Serial# MW-10400000
+# Device          g16v8s  Library DLIB-h-40-9
+# Created         Sat Nov 14 01:25:01 2026
+# Name            AdvIO_Addr_DEC
+# Partno          
+# Revision        1
+# Date            2026-11-13
+# Designer        dfmcwhir
+# Company         
+# Assembly        
+# Location        
+#
+# Inputs  !CHr !CHw IOen MEMw 
+#         !SPICS2 !USB a1 a2 
+#         a3 a4 a5 a6 
+#         a7 !act clk d0 
+#         int 
+# Outputs !CHr !CHw !SPICS2 !USB 
+#         !act 
+.i 17
+.o 5
+.p 5
+---1----------1-- 1~~~~
+---0----------1-- ~1~~~
+--0----010100---- ~~1~~
+--0---0000100---- ~~~1~
+--0---0000100---- ~~~~1
+.end

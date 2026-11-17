@@ -1,0 +1,40 @@
+%SIGNAL
+PIN  16 = !CHr 
+PIN  15 = !CHw 
+PIN  11 =  IOen 
+PIN   9 =  MEMw 
+PIN  12 = !SPICS2 
+PIN  17 = !USB 
+PIN   2 =  a1 
+PIN   3 =  a2 
+PIN   4 =  a3 
+PIN   5 =  a4 
+PIN   6 =  a5 
+PIN   7 =  a6 
+PIN   8 =  a7 
+PIN  13 = !act 
+PIN   1 =  clk 
+PIN  14 =  d0 
+PIN  18 =  int 
+%END
+
+%FIELD
+%END
+
+%EQUATION
+CHr =>
+    MEMw & clk
+
+CHw =>
+    !MEMw & clk
+
+SPICS2 =>
+    !IOen & !a2 & a3 & !a4 & a5 & !a6 & !a7
+
+USB =>
+    !IOen & !a1 & !a2 & !a3 & !a4 & a5 & !a6 & !a7
+
+act =>
+    !IOen & !a1 & !a2 & !a3 & !a4 & a5 & !a6 & !a7
+
+%END
