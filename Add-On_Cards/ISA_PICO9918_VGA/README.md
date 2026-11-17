@@ -1,6 +1,6 @@
 <h2>ISA_PICO9918_VGA</h2>
 
-<p>This a new card that hasn't been built or tested yet. It is based on the around the PICO9918 PRO 2.0 chip (https://www.arcadeshopper.com/wp/store/#!/Pico9918-PRO-v2-0-VDP-VGA/p/825096573 and https://github.com/visrealm/pico9918 ) which is a pin compatible replacement for a TMS9918 VDP chip used in old computers emulated in a PiPico with VGA output. Because I planned for this card to replace my current kb and display adapter, I added an atmega328 based keyboard and mouse interface to this card also. I have since put a keyboard/mouse interface on to my rev3 serial card, which will free up space on this card later. So in the next version of this card, I want to include the rest of the circuit that would be required to use a real TMS9918 chip with a composite video output or use the PICO9918 with vga output. </p>
+<p>This a new card that in the process of being tested.. It is based on the around the PICO9918 PRO 2.0 chip (https://www.arcadeshopper.com/wp/store/#!/Pico9918-PRO-v2-0-VDP-VGA/p/825096573 and https://github.com/visrealm/pico9918 ) which is a pin compatible replacement for a TMS9918 VDP chip used in old computers emulated in a PiPico with VGA output. Because I planned for this card to replace my current kb and display adapter, I added an atmega328 based keyboard and mouse interface to this card also. I have since put a keyboard/mouse interface on to my rev3 serial card, which will free up space on this card later. So in the next version of this card, I want to include the rest of the circuit that would be required to use a real TMS9918 chip with a composite video output or use the PICO9918 with vga output. </p>
 
 <h2>Features:</h2>
 <li>Display: 640x480 @ 60 Hz progressive.</li>
@@ -16,3 +16,8 @@
 </table>
 
 <p>The display and kb circuits each have a jumper to set their interrupt to either 5 or 6, so the display can be set to one IRQ and the kb/mouse can be set to the other.</p>
+
+<h2>Testing Status:</h2>
+<li>The PICO9918 portion of the card has been tested on with the ISA_6502_CPU Rev2 card. It hasn't been tested with the other CPU cards yet.</li>
+<li>The KB/Mouse/Serial console portion of the board hasn't been tested yet</li>
+<li>All testing has been done without a using an IRQ for the display, only in polling mode</li>
