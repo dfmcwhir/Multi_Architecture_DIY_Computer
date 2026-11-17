@@ -1,0 +1,46 @@
+Modules list:
+-------------
+main.o:
+    CODE              Offs=000000  Size=00297A  Align=00001  Fill=0000
+    ZEROPAGE          Offs=000000  Size=00000C  Align=00001  Fill=0000
+    BIOSVARS          Offs=000000  Size=000075  Align=00001  Fill=0000
+    BIOS              Offs=000000  Size=003BC5  Align=00001  Fill=0000
+    RESETVEC          Offs=000000  Size=000006  Align=00001  Fill=0000
+    DRVVARS           Offs=000000  Size=00027A  Align=00001  Fill=0000
+    INPUT_BUFFER      Offs=000000  Size=000100  Align=00001  Fill=0000
+    CHVARS            Offs=000000  Size=000078  Align=00001  Fill=0000
+    JUMPTAB           Offs=000000  Size=000066  Align=00001  Fill=0000
+    SYSBYTE           Offs=000000  Size=000001  Align=00001  Fill=0000
+    WOZMON            Offs=000000  Size=0000EF  Align=00001  Fill=0000
+
+
+Segment list:
+-------------
+Name                   Start     End    Size  Align
+----------------------------------------------------
+ZEROPAGE              0000E2  0000ED  00000C  00001
+CHVARS                000280  0002F7  000078  00001
+BIOSVARS              000380  0003F4  000075  00001
+INPUT_BUFFER          000400  0004FF  000100  00001
+DRVVARS               000500  000779  00027A  00001
+CODE                  008000  00A979  00297A  00001
+BIOS                  00A97A  00E53E  003BC5  00001
+JUMPTAB               00FE00  00FE65  000066  00001
+SYSBYTE               00FEFF  00FEFF  000001  00001
+WOZMON                00FF00  00FFEE  0000EF  00001
+RESETVEC              00FFFA  00FFFF  000006  00001
+
+
+Exports list by name:
+---------------------
+
+
+
+Exports list by value:
+----------------------
+
+
+
+Imports list:
+-------------
+
