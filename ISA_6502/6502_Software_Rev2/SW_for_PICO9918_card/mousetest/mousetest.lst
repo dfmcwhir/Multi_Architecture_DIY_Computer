@@ -1,0 +1,264 @@
+ca65 V2.19 - Git d20d99b
+Main file   : mousetest.s
+Current file: mousetest.s
+
+000000r 1               ; ============================================================================
+000000r 1               ; mousetest.s - MOUSETEST: what the ROM gets from the mouse (CPU Rev2)
+000000r 1               ;
+000000r 1               ;   build:  make.bat           run:  L MOUSETEST 0800   then   R
+000000r 1               ;
+000000r 1               ; Turns mouse reports on (SBC_MOUSEON) and prints every report SBC_MOUSE
+000000r 1               ; returns: the buttons and the movement, and the running totals.  Any key
+000000r 1               ; ends it (mouse reports off again, back to the boot menu).  It prints
+000000r 1               ; through the ROM's console, so it works on any display.
+000000r 1               ; ============================================================================
+000000r 1                       .setcpu "65C02"
+000000r 1                       .include "sbc_api.inc"
+000000r 2               ; sbc_api.inc - fixed ROM entry points of the SBC (see jumptable.s), and the
+000000r 2               ; CPU clock.  Use in your own ca65 programs:  .include "sbc_api.inc"
+000000r 2               ; (the games find it one folder up: their make.bat passes  -I ..  to ca65)
+000000r 2               SBC_CHRIN       = $FE00         ; carry set + A = char, carry clear = none waiting
+000000r 2               SBC_CHROUT      = $FE03         ; print A (A, X, Y preserved)
+000000r 2               SBC_MENU        = $FE06         ; boot menu
+000000r 2               SBC_COLD        = $FE09         ; BASIC cold start
+000000r 2               SBC_WARM        = $FE0C         ; BASIC warm start
+000000r 2               SBC_MONITOR     = $FE0F         ; monitor prompt (or JMP $FF00)
+000000r 2               SBC_PADSTATE    = $FE12         ; A = gamepad buttons held: bit0 A,1 B,2 Select,3 Start,4 Up,5 Down,6 Left,7 Right
+000000r 2               SBC_LOAD        = $FE15         ; load a file from the current device (U: or C:): A/Y = parameter block (.word addr, .word max, "NAME.EXT",0)
+000000r 2                                               ;   carry clear = loaded, X/Y = length; carry set = failed, A = error code
+000000r 2               SBC_CWD         = $FE18         ; A/Y = the monitor's current folder: 0-ended, "" (the top) or "/A/B"
+000000r 2                                               ;   (newer ROMs: check for a JMP ($4C) at $FE18 first)
+000000r 2               
+000000r 2               ; ---- CPU Rev2 ROMs (API version 2).  Check first:  LDA $FE1B / CMP #$4C,
+000000r 2               ;      then JSR SBC_SYSINFO and check Y >= 2.
+000000r 2               SBC_SYSINFO     = $FE1B         ; A = display type (DISP_...), X = device status, Y = API version
+000000r 2               SBC_SEROUT      = $FE1E         ; send A out of the serial console port (A, X, Y preserved)
+000000r 2               SBC_MOUSEON     = $FE21         ; A = 1 mouse reports on, 0 off (off at reset); C=1 = no mouse
+000000r 2               SBC_MOUSE       = $FE24         ; A = buttons (bit0 L, 1 R, 2 M), X/Y = signed movement since
+000000r 2                                               ;   the last call (right/down +); C=1 = a report arrived
+000000r 2               SBC_BANKSET     = $FE27         ; A = RAM bank 0-15 for $1000-$7EFF (X, Y kept).  Your code that
+000000r 2                                               ;   calls it must be in $0000-$0FFF, or it switches itself out!
+000000r 2               SBC_BANKGET     = $FE2A         ; A = bank selected, X = number of banks fitted
+000000r 2               SBC_TICKS       = $FE2D         ; A/X/Y = 60 Hz counter, low/middle/high
+000000r 2               SBC_ACIAIN      = $FE30         ; serial card 6551: C=1 + A = byte, C=0 none
+000000r 2               SBC_ACIAOUT     = $FE33         ; serial card 6551: send A (A, X, Y preserved)
+000000r 2               SBC_VSYNC       = $FE36         ; C=1 if a frame ended since the last call (PICO9918 / ESP32_VGA),
+000000r 2                                               ;   A = the VDP status / ESP32 STATUS
+000000r 2               SBC_CONRESET    = $FE39         ; display back to the text console, cleared (call it when
+000000r 2                                               ;   your game exits after changing the display mode)
+000000r 2               SBC_SNDNOTE     = $FE3C         ; A/Y -> 5 bytes: voice (AY 0-2, ESP32 0-3), note (0-95, 36 = C4),
+000000r 2                                               ;   volume (0-15; AY 16 = envelope), time (16 bit, 1/60 s,
+000000r 2                                               ;   0 = hold).  Doesn't wait.  C=1 = bad values
+000000r 2               SBC_SNDQUIET    = $FE3F         ; all sound off
+000000r 2               SBC_SNDBUSY     = $FE42         ; A = voice: C=1 while its timed note is still playing
+000000r 2               SBC_SAY         = $FE45         ; A/Y -> SPO256 allophones (0-63) ended by $FF; queued
+000000r 2               SBC_SAYBUSY     = $FE48         ; C=1 while the SPO256 is speaking
+000000r 2               SBC_AYREAD      = $FE4B         ; X = AY register (14/15 = I/O ports A/B) -> A
+000000r 2               SBC_AYWRITE     = $FE4E         ; AY register X = A (register 7 bits 6/7 = ports A/B output)
+000000r 2               SBC_TIME        = $FE51         ; A/Y -> 18 byte buffer <- "mm/dd/yy hh:mm:ss",0 (CF card's DS1302);
+000000r 2                                               ;   C=1 = no clock
+000000r 2               SBC_SETTIME     = $FE54         ; A/Y -> 14 characters "dwyymmddHHMMSS" (dw 01 = Sunday)
+000000r 2               SBC_DISPTYPE    = $FEFF         ; a byte: the display type (DISP_...)
+000000r 2               
+000000r 2               ; SBC_SYSINFO display types
+000000r 2               DISP_NONE       = 0
+000000r 2               DISP_TERM       = 1             ; KB_MONITOR_TERM (PIC32 terminal)
+000000r 2               DISP_PICO       = 2             ; PICO9918
+000000r 2               DISP_ESP32      = 3             ; ESP32_VGA
+000000r 2               
+000000r 2               ; SBC_SYSINFO device status bits (X)
+000000r 2               DEV_VIA         = $01
+000000r 2               DEV_ACIA        = $02
+000000r 2               DEV_DISPLAY     = $04
+000000r 2               DEV_AVRKBD      = $08
+000000r 2               
+000000r 2               ; Key codes from the AVR keyboard interface (Serial Rev3 / PICO9918 card)
+000000r 2               KEY_UP          = $05           ; ^E  (WordStar)
+000000r 2               KEY_DOWN        = $18           ; ^X
+000000r 2               KEY_LEFT        = $10           ; ^P
+000000r 2               KEY_RIGHT       = $04           ; ^D
+000000r 2               KEY_ESC         = $03           ; Esc sends ^C
+000000r 2               KEY_F1          = 129           ; F1-F12 = 129-140, shifted 141-152
+000000r 2               
+000000r 2               ; First RAM address for loaded programs (CPU Rev2 ROM)
+000000r 2               SBC_USER_RAM    = $0800
+000000r 2               
+000000r 2               ; The CPU clock in MHz (whole numbers, 1 to 8).  Programs size their delay
+000000r 2               ; loops from it, so a millisecond stays a millisecond.  To build for another
+000000r 2               ; clock, change it here or give it on the command line:  make.bat 1
+000000r 2               .ifndef CLOCK_MHZ
+000000r 2               CLOCK_MHZ       = 2
+000000r 2               .endif
+000000r 2               
+000000r 1               
+000000r 1                       .segment "CODE"
+000000r 1  4C rr rr             jmp     start
+000003r 1               
+000003r 1  20 39 FE     start:  jsr     SBC_CONRESET
+000006r 1  A9 rr                lda     #<hello
+000008r 1  A0 rr                ldy     #>hello
+00000Ar 1  20 rr rr             jsr     puts
+00000Dr 1  AD 21 FE             lda     SBC_MOUSEON     ; a ROM with the mouse calls?
+000010r 1  C9 4C                cmp     #$4C
+000012r 1  F0 0A                beq     @api
+000014r 1  A9 rr                lda     #<noapi
+000016r 1  A0 rr                ldy     #>noapi
+000018r 1  20 rr rr             jsr     puts
+00001Br 1  4C rr rr             jmp     wait_end
+00001Er 1  A9 01        @api:   lda     #1
+000020r 1  20 21 FE             jsr     SBC_MOUSEON
+000023r 1  90 0A                bcc     @on
+000025r 1  A9 rr                lda     #<nomouse
+000027r 1  A0 rr                ldy     #>nomouse
+000029r 1  20 rr rr             jsr     puts
+00002Cr 1  4C rr rr             jmp     wait_end
+00002Fr 1  A9 rr        @on:    lda     #<onmsg
+000031r 1  A0 rr                ldy     #>onmsg
+000033r 1  20 rr rr             jsr     puts
+000036r 1  A9 00                lda     #0
+000038r 1  8D rr rr             sta     count
+00003Br 1  8D rr rr             sta     count+1
+00003Er 1  8D rr rr             sta     tx
+000041r 1  8D rr rr             sta     tx+1
+000044r 1  8D rr rr             sta     ty
+000047r 1  8D rr rr             sta     ty+1
+00004Ar 1  20 00 FE     @loop:  jsr     SBC_CHRIN       ; a key ends it
+00004Dr 1  90 03                bcc     :+
+00004Fr 1  4C rr rr             jmp     @end
+000052r 1  20 24 FE     :       jsr     SBC_MOUSE
+000055r 1  90 F3                bcc     @loop
+000057r 1  8D rr rr             sta     btn
+00005Ar 1  8E rr rr             stx     dx
+00005Dr 1  8C rr rr             sty     dy
+000060r 1  EE rr rr             inc     count
+000063r 1  D0 03                bne     :+
+000065r 1  EE rr rr             inc     count+1
+000068r 1  AD rr rr     :       lda     dx              ; totals (16 bit, signed)
+00006Br 1  20 rr rr             jsr     sx16
+00006Er 1  18                   clc
+00006Fr 1  6D rr rr             adc     tx
+000072r 1  8D rr rr             sta     tx
+000075r 1  8A                   txa
+000076r 1  6D rr rr             adc     tx+1
+000079r 1  8D rr rr             sta     tx+1
+00007Cr 1  AD rr rr             lda     dy
+00007Fr 1  20 rr rr             jsr     sx16
+000082r 1  18                   clc
+000083r 1  6D rr rr             adc     ty
+000086r 1  8D rr rr             sta     ty
+000089r 1  8A                   txa
+00008Ar 1  6D rr rr             adc     ty+1
+00008Dr 1  8D rr rr             sta     ty+1
+000090r 1  A9 rr                lda     #<r1            ; "#nnnn B b X +nnn Y +nnn  TOTAL x y"
+000092r 1  A0 rr                ldy     #>r1
+000094r 1  20 rr rr             jsr     puts
+000097r 1  AD rr rr             lda     count+1
+00009Ar 1  20 rr rr             jsr     hex2
+00009Dr 1  AD rr rr             lda     count
+0000A0r 1  20 rr rr             jsr     hex2
+0000A3r 1  A9 rr                lda     #<r2
+0000A5r 1  A0 rr                ldy     #>r2
+0000A7r 1  20 rr rr             jsr     puts
+0000AAr 1  AD rr rr             lda     btn
+0000ADr 1  20 rr rr             jsr     hex2
+0000B0r 1  A9 rr                lda     #<r3
+0000B2r 1  A0 rr                ldy     #>r3
+0000B4r 1  20 rr rr             jsr     puts
+0000B7r 1  AD rr rr             lda     dx
+0000BAr 1  20 rr rr             jsr     hex2
+0000BDr 1  A9 rr                lda     #<r4
+0000BFr 1  A0 rr                ldy     #>r4
+0000C1r 1  20 rr rr             jsr     puts
+0000C4r 1  AD rr rr             lda     dy
+0000C7r 1  20 rr rr             jsr     hex2
+0000CAr 1  A9 rr                lda     #<r5
+0000CCr 1  A0 rr                ldy     #>r5
+0000CEr 1  20 rr rr             jsr     puts
+0000D1r 1  AD rr rr             lda     tx+1
+0000D4r 1  20 rr rr             jsr     hex2
+0000D7r 1  AD rr rr             lda     tx
+0000DAr 1  20 rr rr             jsr     hex2
+0000DDr 1  A9 20                lda     #' '
+0000DFr 1  20 03 FE             jsr     SBC_CHROUT
+0000E2r 1  AD rr rr             lda     ty+1
+0000E5r 1  20 rr rr             jsr     hex2
+0000E8r 1  AD rr rr             lda     ty
+0000EBr 1  20 rr rr             jsr     hex2
+0000EEr 1  A9 0D                lda     #13
+0000F0r 1  20 03 FE             jsr     SBC_CHROUT
+0000F3r 1  A9 0A                lda     #10
+0000F5r 1  20 03 FE             jsr     SBC_CHROUT
+0000F8r 1  4C rr rr             jmp     @loop
+0000FBr 1  A9 00        @end:   lda     #0
+0000FDr 1  20 21 FE             jsr     SBC_MOUSEON     ; reports off
+000100r 1  4C 06 FE             jmp     SBC_MENU
+000103r 1               
+000103r 1               wait_end:
+000103r 1  20 00 FE             jsr     SBC_CHRIN
+000106r 1  90 FB                bcc     wait_end
+000108r 1  4C 06 FE             jmp     SBC_MENU
+00010Br 1               
+00010Br 1               ; A -> X:A sign-extended
+00010Br 1  A2 00        sx16:   ldx     #0
+00010Dr 1  C9 80                cmp     #$80
+00010Fr 1  90 01                bcc     :+
+000111r 1  CA                   dex
+000112r 1  60           :       rts
+000113r 1               
+000113r 1  48           hex2:   pha
+000114r 1  4A                   lsr
+000115r 1  4A                   lsr
+000116r 1  4A                   lsr
+000117r 1  4A                   lsr
+000118r 1  20 rr rr             jsr     @d
+00011Br 1  68                   pla
+00011Cr 1  29 0F                and     #15
+00011Er 1  C9 0A        @d:     cmp     #10
+000120r 1  90 02                bcc     :+
+000122r 1  69 06                adc     #6
+000124r 1  69 30        :       adc     #'0'
+000126r 1  4C 03 FE             jmp     SBC_CHROUT
+000129r 1               
+000129r 1  8D rr rr     puts:   sta     @l+1
+00012Cr 1  8C rr rr             sty     @l+2
+00012Fr 1  A2 00                ldx     #0
+000131r 1  BD FF FF     @l:     lda     $FFFF,x
+000134r 1  F0 06                beq     @r
+000136r 1  20 03 FE             jsr     SBC_CHROUT
+000139r 1  E8                   inx
+00013Ar 1  D0 F5                bne     @l
+00013Cr 1  60           @r:     rts
+00013Dr 1               
+00013Dr 1                       .segment "RODATA"
+000000r 1  4D 4F 55 53  hello:  .byte   "MOUSE TEST - ANY KEY ENDS", 13, 10, 0
+000004r 1  45 20 54 45  
+000008r 1  53 54 20 2D  
+00001Cr 1  54 48 49 53  noapi:  .byte   "THIS ROM HAS NO MOUSE CALLS", 13, 10, 0
+000020r 1  20 52 4F 4D  
+000024r 1  20 48 41 53  
+00003Ar 1  53 42 43 5F  nomouse:.byte   "SBC_MOUSEON: NO MOUSE INTERFACE", 13, 10
+00003Er 1  4D 4F 55 53  
+000042r 1  45 4F 4E 3A  
+00005Br 1  28 4E 4F 20          .byte   "(NO AVR, OR MOUSE_SRC = NONE)", 13, 10, 0
+00005Fr 1  41 56 52 2C  
+000063r 1  20 4F 52 20  
+00007Br 1  4D 4F 55 53  onmsg:  .byte   "MOUSE REPORTS ON. MOVE IT,", 13, 10
+00007Fr 1  45 20 52 45  
+000083r 1  50 4F 52 54  
+000097r 1  50 52 45 53          .byte   "PRESS ITS BUTTONS...", 13, 10, 0
+00009Br 1  53 20 49 54  
+00009Fr 1  53 20 42 55  
+0000AEr 1  23 00        r1:     .byte   "#", 0
+0000B0r 1  20 42 00     r2:     .byte   " B", 0
+0000B3r 1  20 58 00     r3:     .byte   " X", 0
+0000B6r 1  20 59 00     r4:     .byte   " Y", 0
+0000B9r 1  20 54 00     r5:     .byte   " T", 0
+0000BCr 1               
+0000BCr 1                       .segment "BSS"
+000000r 1  xx xx        count:  .res    2
+000002r 1  xx xx        tx:     .res    2
+000004r 1  xx xx        ty:     .res    2
+000006r 1  xx           btn:    .res    1
+000007r 1  xx           dx:     .res    1
+000008r 1  xx           dy:     .res    1
+000008r 1               

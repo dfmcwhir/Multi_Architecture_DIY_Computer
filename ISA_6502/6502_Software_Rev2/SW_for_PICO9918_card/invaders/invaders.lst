@@ -1,0 +1,3541 @@
+ca65 V2.19 - Git d20d99b
+Main file   : invaders.s
+Current file: invaders.s
+
+000000r 1               ; ============================================================================
+000000r 1               ; invaders.s - a Space Invaders style game for the 6502 SBC, CPU Rev2,
+000000r 1               ;              on the PICO9918 card (TMS9918A Graphics I mode and sprites)
+000000r 1               ;
+000000r 1               ;   build:  make.bat  (ca65 -I .. invaders.s, ld65 -C invaders.cfg)
+000000r 1               ;   run:    L INVADERS 0800    then   R
+000000r 1               ;
+000000r 1               ; Header (patchable from the monitor):
+000000r 1               ;   $0800  JMP start
+000000r 1               ;   $0803  speed      frames per game tick: 1 = full speed (60 a second),
+000000r 1               ;                     2 = half speed ...
+000000r 1               ;   $0804  controls   at start: 0 keyboard, 1 gamepad (G on the title
+000000r 1               ;                     screen switches; A or Start on the pad picks the pad)
+000000r 1               ;   $0805  sound      at start: 0 on, 1 off (M switches)
+000000r 1               ;
+000000r 1               ; Sound: the AY-3-8910 card, through ../ay/sfx.s (timed by the VIA's timer 2).
+000000r 1               ;
+000000r 1               ; Keys:  A / D, , / . or the arrow keys  move (S or down: stop)
+000000r 1               ;        SPACE or W                     fire
+000000r 1               ;        P pause, M sound on / off, Q quit (back to the boot menu)
+000000r 1               ; Gamepad: left / right move, A or B fire, Start pause
+000000r 1               ;
+000000r 1               ; The screen (256 x 192, 32 x 24 cells of 8 x 8):
+000000r 1               ;   row 0      the status line (text)
+000000r 1               ;   y 12       the saucer (a sprite)
+000000r 1               ;   rows 3-    the invaders: name table cells.  Each invader has a 24 pixel
+000000r 1               ;              cell (3 patterns); the patterns come in 4 positions, 0, 2,
+000000r 1               ;              4 and 6 pixels to the right, so a row moves 2 pixels at a
+000000r 1               ;              time and is redrawn with one line of names.
+000000r 1               ;   rows 18-19 the shields: 4 x 6 patterns of their own, worn away pixel by
+000000r 1               ;              pixel (the game keeps a copy of each in RAM)
+000000r 1               ;   y 168      the cannon (a sprite);  y 180  the ground
+000000r 1               ; Sprites: 0 cannon, 1 shot, 2-4 bombs, 5 saucer, 6 explosion.
+000000r 1               ;
+000000r 1               ; Timing: one game tick per frame (the VDP's frame flag, polled).
+000000r 1               ; No zero page is used, so EhBASIC's and the BIOS's zero page are untouched.
+000000r 1               ; ============================================================================
+000000r 1               
+000000r 1                       .setcpu "6502"
+000000r 1               
+000000r 1                       .include "sbc_api.inc"  ; fixed ROM entry points ($FE00 table)
+000000r 2               ; sbc_api.inc - fixed ROM entry points of the SBC (see jumptable.s), and the
+000000r 2               ; CPU clock.  Use in your own ca65 programs:  .include "sbc_api.inc"
+000000r 2               ; (the games find it one folder up: their make.bat passes  -I ..  to ca65)
+000000r 2               SBC_CHRIN       = $FE00         ; carry set + A = char, carry clear = none waiting
+000000r 2               SBC_CHROUT      = $FE03         ; print A (A, X, Y preserved)
+000000r 2               SBC_MENU        = $FE06         ; boot menu
+000000r 2               SBC_COLD        = $FE09         ; BASIC cold start
+000000r 2               SBC_WARM        = $FE0C         ; BASIC warm start
+000000r 2               SBC_MONITOR     = $FE0F         ; monitor prompt (or JMP $FF00)
+000000r 2               SBC_PADSTATE    = $FE12         ; A = gamepad buttons held: bit0 A,1 B,2 Select,3 Start,4 Up,5 Down,6 Left,7 Right
+000000r 2               SBC_LOAD        = $FE15         ; load a file from the current device (U: or C:): A/Y = parameter block (.word addr, .word max, "NAME.EXT",0)
+000000r 2                                               ;   carry clear = loaded, X/Y = length; carry set = failed, A = error code
+000000r 2               SBC_CWD         = $FE18         ; A/Y = the monitor's current folder: 0-ended, "" (the top) or "/A/B"
+000000r 2                                               ;   (newer ROMs: check for a JMP ($4C) at $FE18 first)
+000000r 2               
+000000r 2               ; ---- CPU Rev2 ROMs (API version 2).  Check first:  LDA $FE1B / CMP #$4C,
+000000r 2               ;      then JSR SBC_SYSINFO and check Y >= 2.
+000000r 2               SBC_SYSINFO     = $FE1B         ; A = display type (DISP_...), X = device status, Y = API version
+000000r 2               SBC_SEROUT      = $FE1E         ; send A out of the serial console port (A, X, Y preserved)
+000000r 2               SBC_MOUSEON     = $FE21         ; A = 1 mouse reports on, 0 off (off at reset); C=1 = no mouse
+000000r 2               SBC_MOUSE       = $FE24         ; A = buttons (bit0 L, 1 R, 2 M), X/Y = signed movement since
+000000r 2                                               ;   the last call (right/down +); C=1 = a report arrived
+000000r 2               SBC_BANKSET     = $FE27         ; A = RAM bank 0-15 for $1000-$7EFF (X, Y kept).  Your code that
+000000r 2                                               ;   calls it must be in $0000-$0FFF, or it switches itself out!
+000000r 2               SBC_BANKGET     = $FE2A         ; A = bank selected, X = number of banks fitted
+000000r 2               SBC_TICKS       = $FE2D         ; A/X/Y = 60 Hz counter, low/middle/high
+000000r 2               SBC_ACIAIN      = $FE30         ; serial card 6551: C=1 + A = byte, C=0 none
+000000r 2               SBC_ACIAOUT     = $FE33         ; serial card 6551: send A (A, X, Y preserved)
+000000r 2               SBC_VSYNC       = $FE36         ; C=1 if a frame ended since the last call (PICO9918 / ESP32_VGA),
+000000r 2                                               ;   A = the VDP status / ESP32 STATUS
+000000r 2               SBC_CONRESET    = $FE39         ; display back to the text console, cleared (call it when
+000000r 2                                               ;   your game exits after changing the display mode)
+000000r 2               SBC_SNDNOTE     = $FE3C         ; A/Y -> 5 bytes: voice (AY 0-2, ESP32 0-3), note (0-95, 36 = C4),
+000000r 2                                               ;   volume (0-15; AY 16 = envelope), time (16 bit, 1/60 s,
+000000r 2                                               ;   0 = hold).  Doesn't wait.  C=1 = bad values
+000000r 2               SBC_SNDQUIET    = $FE3F         ; all sound off
+000000r 2               SBC_SNDBUSY     = $FE42         ; A = voice: C=1 while its timed note is still playing
+000000r 2               SBC_SAY         = $FE45         ; A/Y -> SPO256 allophones (0-63) ended by $FF; queued
+000000r 2               SBC_SAYBUSY     = $FE48         ; C=1 while the SPO256 is speaking
+000000r 2               SBC_AYREAD      = $FE4B         ; X = AY register (14/15 = I/O ports A/B) -> A
+000000r 2               SBC_AYWRITE     = $FE4E         ; AY register X = A (register 7 bits 6/7 = ports A/B output)
+000000r 2               SBC_TIME        = $FE51         ; A/Y -> 18 byte buffer <- "mm/dd/yy hh:mm:ss",0 (CF card's DS1302);
+000000r 2                                               ;   C=1 = no clock
+000000r 2               SBC_SETTIME     = $FE54         ; A/Y -> 14 characters "dwyymmddHHMMSS" (dw 01 = Sunday)
+000000r 2               SBC_DISPTYPE    = $FEFF         ; a byte: the display type (DISP_...)
+000000r 2               
+000000r 2               ; SBC_SYSINFO display types
+000000r 2               DISP_NONE       = 0
+000000r 2               DISP_TERM       = 1             ; KB_MONITOR_TERM (PIC32 terminal)
+000000r 2               DISP_PICO       = 2             ; PICO9918
+000000r 2               DISP_ESP32      = 3             ; ESP32_VGA
+000000r 2               
+000000r 2               ; SBC_SYSINFO device status bits (X)
+000000r 2               DEV_VIA         = $01
+000000r 2               DEV_ACIA        = $02
+000000r 2               DEV_DISPLAY     = $04
+000000r 2               DEV_AVRKBD      = $08
+000000r 2               
+000000r 2               ; Key codes from the AVR keyboard interface (Serial Rev3 / PICO9918 card)
+000000r 2               KEY_UP          = $05           ; ^E  (WordStar)
+000000r 2               KEY_DOWN        = $18           ; ^X
+000000r 2               KEY_LEFT        = $10           ; ^P
+000000r 2               KEY_RIGHT       = $04           ; ^D
+000000r 2               KEY_ESC         = $03           ; Esc sends ^C
+000000r 2               KEY_F1          = 129           ; F1-F12 = 129-140, shifted 141-152
+000000r 2               
+000000r 2               ; First RAM address for loaded programs (CPU Rev2 ROM)
+000000r 2               SBC_USER_RAM    = $0800
+000000r 2               
+000000r 2               ; The CPU clock in MHz (whole numbers, 1 to 8).  Programs size their delay
+000000r 2               ; loops from it, so a millisecond stays a millisecond.  To build for another
+000000r 2               ; clock, change it here or give it on the command line:  make.bat 1
+000000r 2               .ifndef CLOCK_MHZ
+000000r 2               CLOCK_MHZ       = 2
+000000r 2               .endif
+000000r 2               
+000000r 1               
+000000r 1               ; ---- VRAM layout (Graphics I) -----------------------------------------------
+000000r 1               V_PAT           = $0000         ; patterns
+000000r 1               V_NAME          = $1800         ; names (32 x 24)
+000000r 1               V_SATTR         = $1B00         ; sprite attributes
+000000r 1               V_COLOUR        = $2000         ; colours (32 groups of 8 patterns)
+000000r 1               V_SPAT          = $3800         ; sprite patterns
+000000r 1               VDP_NAME        = V_NAME
+000000r 1               
+000000r 1               ; patterns
+000000r 1               P_BLANK         = $00
+000000r 1               P_SHIELD        = $60           ; 4 x 6
+000000r 1               P_GROUND        = $78
+000000r 1               P_LIFE          = $79           ; 2 side by side
+000000r 1               P_INV           = $80           ; kind * 24 + frame * 12 + position * 3
+000000r 1               ; sprite patterns (16 x 16: 4 each)
+000000r 1               SP_CANNON       = 0
+000000r 1               SP_SHOT         = 4
+000000r 1               SP_BOMB         = 8             ; and 12
+000000r 1               SP_SAUCER       = 16
+000000r 1               SP_EXPL         = 20
+000000r 1               SP_PEXPL        = 24            ; and 28
+000000r 1               ; sprite slots
+000000r 1               S_CANNON        = 0
+000000r 1               S_SHOT          = 1
+000000r 1               S_BOMB          = 2             ; 2-4
+000000r 1               S_SAUCER        = 5
+000000r 1               S_EXPL          = 6
+000000r 1               NSPR            = 7
+000000r 1               HIDE_Y          = $C0           ; a sprite's Y that puts it below the screen
+000000r 1               ; colours
+000000r 1               C_CANNON        = 3             ; light green
+000000r 1               C_SHOT          = 15            ; white
+000000r 1               C_BOMB          = 15
+000000r 1               C_SAUCER        = 8             ; red
+000000r 1               C_EXPL          = 15
+000000r 1               
+000000r 1               ; ---- the layout ----------------------------------------------------------
+000000r 1               NROWS           = 5
+000000r 1               NCOLS           = 8
+000000r 1               CELL            = 24            ; pixels from one invader to the next
+000000r 1               FORM_C          = 3             ; starting cell column of the formation
+000000r 1               FORM_TOP        = 3             ; starting cell row of the top invader row
+000000r 1               SHIELD_ROW      = 18
+000000r 1               SHIELD_Y        = SHIELD_ROW*8
+000000r 1               PLAYER_Y        = 168
+000000r 1               PLAYER_ROW      = PLAYER_Y/8    ; 21
+000000r 1               GROUND_ROW      = 22
+000000r 1               GROUND_Y        = GROUND_ROW*8+4
+000000r 1               UFO_Y           = 12
+000000r 1               PX_MIN          = 4             ; the cannon sprite's x range
+000000r 1               PX_MAX          = 238
+000000r 1               PX_START        = 120
+000000r 1               EDGE_L          = 4             ; the formation turns at these pixels
+000000r 1               EDGE_R          = 251
+000000r 1               KEY_HOLD        = 7             ; frames a direction key keeps moving (the
+000000r 1                                               ; keyboard's auto-repeat comes every ~5)
+000000r 1               
+000000r 1               ; ============================================================================
+000000r 1                       .segment "CODE"
+000000r 1               
+000000r 1  4C rr rr             jmp     start
+000003r 1  01           speed:  .byte   1
+000004r 1  00           ctrl_def:.byte  0               ; controls at start: 0 keyboard, 1 gamepad
+000005r 1  00           mute_def:.byte  0               ; sound at start: 0 on, 1 off
+000006r 1  00 00                .byte   0, 0            ; spare
+000008r 1               
+000008r 1                       .include "ay/sfx.s"     ; sound effects on the AY-3-8910 card
+000008r 2               ; ============================================================================
+000008r 2               ; sfx.s - sound effects and music for games, on the AY-3-8910 card
+000008r 2               ;         ($7F22 register number, $7F23 data; 2 MHz chip clock)
+000008r 2               ;
+000008r 2               ; Include it in a game (it finds its note table one folder up, like
+000008r 2               ; sbc_api.inc:  ca65 -I ..):
+000008r 2               ;           .include "ay/sfx.s"
+000008r 2               ; and then
+000008r 2               ;   sfx_init    once at the start (silence, the timer)
+000008r 2               ;   sfx_poll    often: at least every 20 ms (the game loop, and the delay
+000008r 2               ;               loops).  It runs the sound 50 times a second, timed by the
+000008r 2               ;               VIA's timer 2 (polled: its interrupt stays off; timer 1 and
+000008r 2               ;               the gamepad aren't touched).  Keeps A, X, Y and the flags.
+000008r 2               ;   sfx_play    play script A on voice X (see below); it doesn't if that
+000008r 2               ;               voice is busy with a script of higher priority
+000008r 2               ;   sfx_stop    stop voice X
+000008r 2               ;   sfx_off     stop everything (and silence)
+000008r 2               ;   sfx_mute    0 = sound on, 1 = muted (the scripts still run, unheard)
+000008r 2               ;   sfx_hush    call before waiting without sfx_poll (a pause): silences the
+000008r 2               ;               card until the next tick
+000008r 2               ; With SFX_SND defined before the include, also:
+000008r 2               ;   sfx_snd     play script A on its own voice (sfx_prio's high 4 bits)
+000008r 2               ;   sfx_toggle  sound on / off (for the M key)
+000008r 2               ;
+000008r 2               ; The voices: 0-2 are the background (music, a saucer's hum ...) on the
+000008r 2               ; chip's channels A-C; 3-5 are the foreground on the same channels.  While
+000008r 2               ; a foreground voice plays, it is heard instead of the background voice of
+000008r 2               ; its channel, which carries on unheard and comes back when it stops.
+000008r 2               ;
+000008r 2               ; A game lists its scripts in sfx_scripts (.word address) and their
+000008r 2               ; priorities in sfx_prio (.byte, higher wins), indexed by script number.
+000008r 2               ;
+000008r 2               ; A script is bytes, run 50 times a second until it waits:
+000008r 2               ;   $80-$FF         wait 1-128 ticks (1/50 s each): $80 + ticks - 1
+000008r 2               ;   $20-$7F         note 0-95 (C1 .. B8, A4 = 45): $20 + note; the
+000008r 2               ;                   volume goes back to the VOL level, the decay restarts;
+000008r 2               ;                   then it waits LEN ticks (if LEN isn't 0)
+000008r 2               ;   SX_END          (0) the end: the voice stops
+000008r 2               ;   SX_PER  lo, hi  tone period (12 bits): 2 MHz / (16 x period) Hz
+000008r 2               ;   SX_VOL  v       volume 0-15 (also the level each note starts at)
+000008r 2               ;   SX_NOISE n      noise period 0-31 (for the whole chip)
+000008r 2               ;   SX_MIX  m       bit 0 tone on, bit 1 noise on
+000008r 2               ;   SX_SWEEP lo, hi add this (signed) to the period every tick (0 = off)
+000008r 2               ;   SX_DECAY d      the volume drops by 1 every d ticks (0 = holds)
+000008r 2               ;   SX_LOOP c       the start of a part to play c times (0 = for ever)
+000008r 2               ;   SX_NEXT         the end of that part
+000008r 2               ;   SX_JUMP lo, hi  go on at another script (for music that repeats)
+000008r 2               ;   SX_REST         volume 0 until the next note (and wait LEN ticks)
+000008r 2               ;   SX_LEN t        notes and rests wait t ticks each from now on (music:
+000008r 2               ;                   a byte a note); 0 (the start) = they don't wait
+000008r 2               ; ============================================================================
+000008r 2               
+000008r 2               ; ---- variables (123 bytes): in the BSS, or at SFX_VARS if the game sets it
+000008r 2               ;      (SMB puts them at $0100, the bottom of the stack page) ----------------
+000008r 2               .ifdef SFX_VARS
+000008r 2               sfx_vars        = SFX_VARS
+000008r 2               sfx_lo          = sfx_vars
+000008r 2               sfx_hi          = sfx_lo + 6
+000008r 2               sfx_wait        = sfx_hi + 6
+000008r 2               sfx_perl        = sfx_wait + 6
+000008r 2               sfx_perh        = sfx_perl + 6
+000008r 2               sfx_swl         = sfx_perh + 6
+000008r 2               sfx_swh         = sfx_swl + 6
+000008r 2               sfx_vol         = sfx_swh + 6
+000008r 2               sfx_base        = sfx_vol + 6
+000008r 2               sfx_dec         = sfx_base + 6
+000008r 2               sfx_decc        = sfx_dec + 6
+000008r 2               sfx_mix         = sfx_decc + 6
+000008r 2               sfx_noise       = sfx_mix + 6
+000008r 2               sfx_lpl         = sfx_noise + 6
+000008r 2               sfx_lph         = sfx_lpl + 6
+000008r 2               sfx_lcnt        = sfx_lph + 6
+000008r 2               sfx_vprio       = sfx_lcnt + 6
+000008r 2               sfx_len         = sfx_vprio + 6
+000008r 2               sfx_runs        = sfx_len + 6
+000008r 2               sfx_mixer       = sfx_runs + 1
+000008r 2               sfx_chan        = sfx_mixer + 1
+000008r 2               sfx_guard       = sfx_chan + 1
+000008r 2               sfx_mute        = sfx_guard + 2
+000008r 2               sfx_sa          = sfx_mute + 1
+000008r 2               sfx_sx          = sfx_sa + 1
+000008r 2               sfx_sy          = sfx_sx + 1
+000008r 2               sfx_vars_end    = sfx_sy + 1
+000008r 2               .else
+000008r 2                       .segment "BSS"
+000000r 2               sfx_vars:
+000000r 2  xx xx xx xx  sfx_lo:     .res 6              ; script pointer (high byte 0: voice off)
+000004r 2  xx xx        
+000006r 2  xx xx xx xx  sfx_hi:     .res 6
+00000Ar 2  xx xx        
+00000Cr 2  xx xx xx xx  sfx_wait:   .res 6
+000010r 2  xx xx        
+000012r 2  xx xx xx xx  sfx_perl:   .res 6              ; tone period
+000016r 2  xx xx        
+000018r 2  xx xx xx xx  sfx_perh:   .res 6
+00001Cr 2  xx xx        
+00001Er 2  xx xx xx xx  sfx_swl:    .res 6              ; sweep
+000022r 2  xx xx        
+000024r 2  xx xx xx xx  sfx_swh:    .res 6
+000028r 2  xx xx        
+00002Ar 2  xx xx xx xx  sfx_vol:    .res 6
+00002Er 2  xx xx        
+000030r 2  xx xx xx xx  sfx_base:   .res 6              ; the volume notes start at
+000034r 2  xx xx        
+000036r 2  xx xx xx xx  sfx_dec:    .res 6              ; decay: ticks a step
+00003Ar 2  xx xx        
+00003Cr 2  xx xx xx xx  sfx_decc:   .res 6
+000040r 2  xx xx        
+000042r 2  xx xx xx xx  sfx_mix:    .res 6
+000046r 2  xx xx        
+000048r 2  xx xx xx xx  sfx_noise:  .res 6
+00004Cr 2  xx xx        
+00004Er 2  xx xx xx xx  sfx_lpl:    .res 6              ; loop start
+000052r 2  xx xx        
+000054r 2  xx xx xx xx  sfx_lph:    .res 6
+000058r 2  xx xx        
+00005Ar 2  xx xx xx xx  sfx_lcnt:   .res 6
+00005Er 2  xx xx        
+000060r 2  xx xx xx xx  sfx_vprio:  .res 6
+000064r 2  xx xx        
+000066r 2  xx xx xx xx  sfx_len:    .res 6              ; LEN
+00006Ar 2  xx xx        
+00006Cr 2  xx           sfx_runs:   .res 1
+00006Dr 2  xx           sfx_mixer:  .res 1
+00006Er 2  xx           sfx_chan:   .res 1
+00006Fr 2  xx xx        sfx_guard:  .res 2
+000071r 2  xx           sfx_mute:   .res 1
+000072r 2  xx           sfx_sa:     .res 1              ; (sfx_snd)
+000073r 2  xx           sfx_sx:     .res 1
+000074r 2  xx           sfx_sy:     .res 1
+000075r 2               sfx_vars_end:
+000075r 2                       .segment "CODE"
+000008r 2               .endif
+000008r 2               
+000008r 2               SX_END          = 0
+000008r 2               SX_PER          = 1
+000008r 2               SX_VOL          = 2
+000008r 2               SX_NOISE        = 3
+000008r 2               SX_MIX          = 4
+000008r 2               SX_SWEEP        = 5
+000008r 2               SX_DECAY        = 6
+000008r 2               SX_LOOP         = 7
+000008r 2               SX_NEXT         = 8
+000008r 2               SX_JUMP         = 9
+000008r 2               SX_REST         = 10
+000008r 2               SX_LEN          = 11
+000008r 2               .define SX_WAIT(t)  ($80 + (t) - 1)
+000008r 2               .define SX_NOTE(n)  ($20 + (n))
+000008r 2               
+000008r 2               SFX_AY_ADDR     = $7F22
+000008r 2               SFX_AY_DATA     = $7F23
+000008r 2               SFX_T2CL        = $7F08
+000008r 2               SFX_T2CH        = $7F09
+000008r 2               SFX_ACR         = $7F0B
+000008r 2               SFX_IFR         = $7F0D
+000008r 2               SFX_IER         = $7F0E
+000008r 2               
+000008r 2               ; the timer counts a 50th of a second in SFX_RUNS runs of SFX_COUNT cycles
+000008r 2               ; (it holds 16 bits)
+000008r 2               SFX_CYCLES      = CLOCK_MHZ * 20000
+000008r 2               SFX_RUNS        = (SFX_CYCLES + 65535) / 65536
+000008r 2               SFX_COUNT       = SFX_CYCLES / SFX_RUNS - 2
+000008r 2               
+000008r 2               ; ---- the routines ------------------------------------------------------------------------
+000008r 2               sfx_init:
+000008r 2  A9 00                lda     #0
+00000Ar 2  A2 74                ldx     #sfx_vars_end - sfx_vars - 1
+00000Cr 2  9D rr rr     @c:     sta     sfx_vars,x
+00000Fr 2  CA                   dex
+000010r 2  10 FA                bpl     @c
+000012r 2  AD 0B 7F             lda     SFX_ACR         ; timer 2: one shot, its interrupt off
+000015r 2  29 DF                and     #$DF
+000017r 2  8D 0B 7F             sta     SFX_ACR
+00001Ar 2  A9 20                lda     #$20
+00001Cr 2  8D 0E 7F             sta     SFX_IER
+00001Fr 2  A9 02                lda     #SFX_RUNS
+000021r 2  8D rr rr             sta     sfx_runs
+000024r 2  A9 3E                lda     #<SFX_COUNT
+000026r 2  8D 08 7F             sta     SFX_T2CL
+000029r 2  A9 9C                lda     #>SFX_COUNT
+00002Br 2  8D 09 7F             sta     SFX_T2CH
+00002Er 2                       ; (on into sfx_off)
+00002Er 2               
+00002Er 2               ; stop every voice, silence
+00002Er 2               sfx_off:
+00002Er 2  48                   pha
+00002Fr 2  8A                   txa
+000030r 2  48                   pha
+000031r 2  A2 05                ldx     #5
+000033r 2  A9 00                lda     #0
+000035r 2  9D rr rr     @v:     sta     sfx_hi,x
+000038r 2  CA                   dex
+000039r 2  10 FA                bpl     @v
+00003Br 2  68                   pla
+00003Cr 2  AA                   tax
+00003Dr 2  68                   pla
+00003Er 2                       ; (on into sfx_hush)
+00003Er 2               
+00003Er 2               ; silence the card (until the next tick).  Keeps A, X, Y.
+00003Er 2               sfx_hush:
+00003Er 2  48                   pha
+00003Fr 2  8A                   txa
+000040r 2  48                   pha
+000041r 2  A9 07                lda     #7              ; mixer: all off
+000043r 2  8D 22 7F             sta     SFX_AY_ADDR
+000046r 2  A9 3F                lda     #$3F
+000048r 2  8D 23 7F             sta     SFX_AY_DATA
+00004Br 2  A2 08                ldx     #8              ; volumes 0
+00004Dr 2  A9 00                lda     #0
+00004Fr 2  8E 22 7F     @v:     stx     SFX_AY_ADDR
+000052r 2  8D 23 7F             sta     SFX_AY_DATA
+000055r 2  E8                   inx
+000056r 2  E0 0B                cpx     #11
+000058r 2  D0 F5                bne     @v
+00005Ar 2  68                   pla
+00005Br 2  AA                   tax
+00005Cr 2  68                   pla
+00005Dr 2  60                   rts
+00005Er 2               
+00005Er 2               ; stop voice X
+00005Er 2               sfx_stop:
+00005Er 2  48                   pha
+00005Fr 2  A9 00                lda     #0
+000061r 2  9D rr rr             sta     sfx_hi,x
+000064r 2  68                   pla
+000065r 2  60                   rts
+000066r 2               
+000066r 2               ; play script A on voice X (0-5); not if the voice is playing a script of
+000066r 2               ; higher priority.  Keeps X.
+000066r 2               sfx_play:
+000066r 2  A8                   tay
+000067r 2  BD rr rr             lda     sfx_hi,x
+00006Ar 2  F0 09                beq     @go
+00006Cr 2  B9 rr rr             lda     sfx_prio,y
+00006Fr 2  DD rr rr             cmp     sfx_vprio,x
+000072r 2  B0 01                bcs     @go
+000074r 2  60                   rts
+000075r 2  B9 rr rr     @go:    lda     sfx_prio,y
+000078r 2  9D rr rr             sta     sfx_vprio,x
+00007Br 2  98                   tya
+00007Cr 2  0A                   asl
+00007Dr 2  A8                   tay
+00007Er 2  B9 rr rr             lda     sfx_scripts,y
+000081r 2  9D rr rr             sta     sfx_lo,x
+000084r 2  B9 rr rr             lda     sfx_scripts+1,y
+000087r 2  9D rr rr             sta     sfx_hi,x
+00008Ar 2  A9 00                lda     #0
+00008Cr 2  9D rr rr             sta     sfx_wait,x
+00008Fr 2  9D rr rr             sta     sfx_swl,x
+000092r 2  9D rr rr             sta     sfx_swh,x
+000095r 2  9D rr rr             sta     sfx_dec,x
+000098r 2  9D rr rr             sta     sfx_perl,x
+00009Br 2  9D rr rr             sta     sfx_perh,x
+00009Er 2  9D rr rr             sta     sfx_len,x
+0000A1r 2  A9 0F                lda     #15
+0000A3r 2  9D rr rr             sta     sfx_base,x
+0000A6r 2  9D rr rr             sta     sfx_vol,x
+0000A9r 2  A9 01                lda     #1              ; tone on, noise off
+0000ABr 2  9D rr rr             sta     sfx_mix,x
+0000AEr 2  60                   rts
+0000AFr 2               
+0000AFr 2               ; run the sound if a tick has come.  Keeps A, X, Y and the flags (so it can
+0000AFr 2               ; go anywhere: in putc, in a loop ...)
+0000AFr 2               sfx_poll:
+0000AFr 2  08                   php
+0000B0r 2  48                   pha
+0000B1r 2  AD 0D 7F             lda     SFX_IFR
+0000B4r 2  29 20                and     #$20
+0000B6r 2  D0 03                bne     @t
+0000B8r 2  68                   pla
+0000B9r 2  28                   plp
+0000BAr 2  60                   rts
+0000BBr 2  8A           @t:     txa
+0000BCr 2  48                   pha
+0000BDr 2  98                   tya
+0000BEr 2  48                   pha
+0000BFr 2                       ; the timer has gone on counting down past 0 ($FFFF, $FFFE ...): how
+0000BFr 2                       ; late this call is.  The next run is that much shorter, so the beat
+0000BFr 2                       ; keeps time however long the game takes between calls.
+0000BFr 2  AE 09 7F     @rd:    ldx     SFX_T2CH
+0000C2r 2  AD 08 7F             lda     SFX_T2CL
+0000C5r 2  EC 09 7F             cpx     SFX_T2CH        ; (the high byte changed in between: again)
+0000C8r 2  D0 F5                bne     @rd
+0000CAr 2  38                   sec
+0000CBr 2  69 22                adc     #<(SFX_COUNT - SFX_FIX)
+0000CDr 2  A8                   tay
+0000CEr 2  8A                   txa
+0000CFr 2  69 9C                adc     #>(SFX_COUNT - SFX_FIX)
+0000D1r 2  B0 04                bcs     @set
+0000D3r 2  A0 64                ldy     #100            ; (more than a whole run late: soon)
+0000D5r 2  A9 00                lda     #0
+0000D7r 2  8C 08 7F     @set:   sty     SFX_T2CL
+0000DAr 2  8D 09 7F             sta     SFX_T2CH
+0000DDr 2  CE rr rr             dec     sfx_runs
+0000E0r 2  D0 08                bne     @r
+0000E2r 2  A9 02                lda     #SFX_RUNS
+0000E4r 2  8D rr rr             sta     sfx_runs
+0000E7r 2  20 rr rr             jsr     sfx_tick
+0000EAr 2  68           @r:     pla
+0000EBr 2  A8                   tay
+0000ECr 2  68                   pla
+0000EDr 2  AA                   tax
+0000EEr 2  68                   pla
+0000EFr 2  28                   plp
+0000F0r 2  60                   rts
+0000F1r 2               SFX_FIX = 28                    ; cycles from reading the timer to starting it
+0000F1r 2               
+0000F1r 2               .ifdef SFX_SND
+0000F1r 2               ; ---- (with SFX_SND defined) ---------------------------------------------------
+0000F1r 2               ; play script A on its own voice: the high 4 bits of its sfx_prio byte (the
+0000F1r 2               ; low 4 are its priority).  Keeps A, X and Y.
+0000F1r 2               sfx_snd:
+0000F1r 2                       sta     sfx_sa
+0000F1r 2                       stx     sfx_sx
+0000F1r 2                       sty     sfx_sy
+0000F1r 2                       tay
+0000F1r 2                       lda     sfx_prio,y
+0000F1r 2                       lsr
+0000F1r 2                       lsr
+0000F1r 2                       lsr
+0000F1r 2                       lsr
+0000F1r 2                       tax
+0000F1r 2                       tya
+0000F1r 2                       jsr     sfx_play
+0000F1r 2                       lda     sfx_sa
+0000F1r 2                       ldx     sfx_sx
+0000F1r 2                       ldy     sfx_sy
+0000F1r 2                       rts
+0000F1r 2               
+0000F1r 2               ; sound on / off (the M key).  Keeps X and Y.
+0000F1r 2               sfx_toggle:
+0000F1r 2                       lda     sfx_mute
+0000F1r 2                       eor     #1
+0000F1r 2                       sta     sfx_mute
+0000F1r 2                       jmp     sfx_hush
+0000F1r 2               .endif
+0000F1r 2               
+0000F1r 2               ; ---- a tick: every voice a step, then the card ---------------------------------------------
+0000F1r 2               sfx_tick:
+0000F1r 2  A2 05                ldx     #5
+0000F3r 2  BD rr rr     @v:     lda     sfx_hi,x
+0000F6r 2  F0 03                beq     @n
+0000F8r 2  20 rr rr             jsr     sfx_voice
+0000FBr 2  CA           @n:     dex
+0000FCr 2  10 F5                bpl     @v
+0000FEr 2                       ; the card: each channel hears its foreground voice if that plays,
+0000FEr 2                       ; else its background voice
+0000FEr 2  A9 3F                lda     #$3F
+000100r 2  8D rr rr             sta     sfx_mixer
+000103r 2  A2 02                ldx     #2
+000105r 2  8E rr rr     @ch:    stx     sfx_chan
+000108r 2  8A                   txa
+000109r 2  18                   clc
+00010Ar 2  69 03                adc     #3
+00010Cr 2  A8                   tay                     ; foreground voice
+00010Dr 2  B9 rr rr             lda     sfx_hi,y
+000110r 2  D0 0C                bne     @have
+000112r 2  AC rr rr             ldy     sfx_chan        ; background voice
+000115r 2  B9 rr rr             lda     sfx_hi,y
+000118r 2  D0 04                bne     @have
+00011Ar 2  A9 00                lda     #0              ; neither: silent
+00011Cr 2  F0 4E                beq     @vol
+00011Er 2  8A           @have:  txa                     ; the tone period
+00011Fr 2  0A                   asl
+000120r 2  8D 22 7F             sta     SFX_AY_ADDR
+000123r 2  B9 rr rr             lda     sfx_perl,y
+000126r 2  8D 23 7F             sta     SFX_AY_DATA
+000129r 2  8A                   txa
+00012Ar 2  0A                   asl
+00012Br 2  09 01                ora     #1
+00012Dr 2  8D 22 7F             sta     SFX_AY_ADDR
+000130r 2  B9 rr rr             lda     sfx_perh,y
+000133r 2  29 0F                and     #$0F
+000135r 2  8D 23 7F             sta     SFX_AY_DATA
+000138r 2  B9 rr rr             lda     sfx_mix,y       ; the mixer bits (0 = on)
+00013Br 2  4A                   lsr
+00013Cr 2  90 09                bcc     @nt
+00013Er 2  BD rr rr             lda     sfx_tone_on,x
+000141r 2  2D rr rr             and     sfx_mixer
+000144r 2  8D rr rr             sta     sfx_mixer
+000147r 2  B9 rr rr     @nt:    lda     sfx_mix,y
+00014Ar 2  29 02                and     #2
+00014Cr 2  F0 14                beq     @nn
+00014Er 2  BD rr rr             lda     sfx_noise_on,x
+000151r 2  2D rr rr             and     sfx_mixer
+000154r 2  8D rr rr             sta     sfx_mixer
+000157r 2  A9 06                lda     #6
+000159r 2  8D 22 7F             sta     SFX_AY_ADDR
+00015Cr 2  B9 rr rr             lda     sfx_noise,y
+00015Fr 2  8D 23 7F             sta     SFX_AY_DATA
+000162r 2  B9 rr rr     @nn:    lda     sfx_vol,y
+000165r 2  AC rr rr             ldy     sfx_mute
+000168r 2  F0 02                beq     @vol
+00016Ar 2  A9 00                lda     #0
+00016Cr 2  AC rr rr     @vol:   ldy     sfx_chan
+00016Fr 2  AA                   tax
+000170r 2  98                   tya
+000171r 2  18                   clc
+000172r 2  69 08                adc     #8
+000174r 2  8D 22 7F             sta     SFX_AY_ADDR
+000177r 2  8E 23 7F             stx     SFX_AY_DATA
+00017Ar 2  AE rr rr             ldx     sfx_chan
+00017Dr 2  CA                   dex
+00017Er 2  10 85                bpl     @ch
+000180r 2  A9 07                lda     #7
+000182r 2  8D 22 7F             sta     SFX_AY_ADDR
+000185r 2  AD rr rr             lda     sfx_mixer
+000188r 2  8D 23 7F             sta     SFX_AY_DATA
+00018Br 2  60                   rts
+00018Cr 2  3E 3D 3B     sfx_tone_on:    .byte   $3E, $3D, $3B
+00018Fr 2  37 2F 1F     sfx_noise_on:   .byte   $37, $2F, $1F
+000192r 2               
+000192r 2               ; one voice (X): the sweep and the decay, then the script when its wait
+000192r 2               ; is over
+000192r 2               sfx_voice:
+000192r 2  BD rr rr             lda     sfx_swl,x       ; the sweep
+000195r 2  1D rr rr             ora     sfx_swh,x
+000198r 2  F0 13                beq     @ns
+00019Ar 2  BD rr rr             lda     sfx_perl,x
+00019Dr 2  18                   clc
+00019Er 2  7D rr rr             adc     sfx_swl,x
+0001A1r 2  9D rr rr             sta     sfx_perl,x
+0001A4r 2  BD rr rr             lda     sfx_perh,x
+0001A7r 2  7D rr rr             adc     sfx_swh,x
+0001AAr 2  9D rr rr             sta     sfx_perh,x
+0001ADr 2  BD rr rr     @ns:    lda     sfx_dec,x       ; the decay
+0001B0r 2  F0 10                beq     @nd
+0001B2r 2  DE rr rr             dec     sfx_decc,x
+0001B5r 2  D0 0B                bne     @nd
+0001B7r 2  9D rr rr             sta     sfx_decc,x
+0001BAr 2  BD rr rr             lda     sfx_vol,x
+0001BDr 2  F0 03                beq     @nd
+0001BFr 2  DE rr rr             dec     sfx_vol,x
+0001C2r 2  BD rr rr     @nd:    lda     sfx_wait,x
+0001C5r 2  F0 06                beq     @run
+0001C7r 2  DE rr rr             dec     sfx_wait,x
+0001CAr 2  F0 01                beq     @run
+0001CCr 2  60                   rts
+0001CDr 2  A9 28        @run:   lda     #40             ; (at most 40 commands a tick: a script that
+0001CFr 2  8D rr rr             sta     sfx_guard       ;  never waits can't hang the game)
+0001D2r 2  CE rr rr     @cmd:   dec     sfx_guard
+0001D5r 2  F0 76                beq     @stop
+0001D7r 2  20 rr rr             jsr     sfx_byte
+0001DAr 2  C9 80                cmp     #$80
+0001DCr 2  90 09                bcc     @nw
+0001DEr 2  29 7F                and     #$7F            ; wait
+0001E0r 2  9D rr rr             sta     sfx_wait,x
+0001E3r 2  FE rr rr             inc     sfx_wait,x
+0001E6r 2  60                   rts
+0001E7r 2  C9 20        @nw:    cmp     #$20
+0001E9r 2  90 54                bcc     @op
+0001EBr 2  38                   sec                     ; a note
+0001ECr 2  E9 20                sbc     #$20
+0001EEr 2  C9 60                cmp     #96
+0001F0r 2  90 02                bcc     @nt
+0001F2r 2  A9 5F                lda     #95
+0001F4r 2  A0 00        @nt:    ldy     #0              ; octave Y, note A in it
+0001F6r 2  C9 0C        @oc:    cmp     #12
+0001F8r 2  90 05                bcc     @ok
+0001FAr 2  E9 0C                sbc     #12
+0001FCr 2  C8                   iny
+0001FDr 2  D0 F7                bne     @oc
+0001FFr 2  8C rr rr     @ok:    sty     sfx_guard+1     ; (as a count)
+000202r 2  A8                   tay
+000203r 2  B9 rr rr             lda     sfx_c1_lo,y     ; the period in octave 1, halved for each
+000206r 2  9D rr rr             sta     sfx_perl,x      ; octave up
+000209r 2  B9 rr rr             lda     sfx_c1_hi,y
+00020Cr 2  AC rr rr             ldy     sfx_guard+1
+00020Fr 2  F0 16                beq     @p
+000211r 2  4A           @sh:    lsr
+000212r 2  7E rr rr             ror     sfx_perl,x
+000215r 2  88                   dey
+000216r 2  D0 F9                bne     @sh
+000218r 2  9D rr rr             sta     sfx_perh,x      ; (rounded: the last bit out was a half)
+00021Br 2  90 0D                bcc     @r0
+00021Dr 2  FE rr rr             inc     sfx_perl,x
+000220r 2  D0 08                bne     @r0
+000222r 2  FE rr rr             inc     sfx_perh,x
+000225r 2  D0 03                bne     @r0
+000227r 2  9D rr rr     @p:     sta     sfx_perh,x
+00022Ar 2               @r0:
+00022Ar 2  BD rr rr             lda     sfx_base,x
+00022Dr 2  9D rr rr             sta     sfx_vol,x
+000230r 2  BD rr rr             lda     sfx_dec,x
+000233r 2  9D rr rr             sta     sfx_decc,x
+000236r 2  BD rr rr     @len:   lda     sfx_len,x       ; (LEN: wait that long)
+000239r 2  F0 97                beq     @cmd
+00023Br 2  9D rr rr             sta     sfx_wait,x
+00023Er 2  60                   rts
+00023Fr 2  C9 0C        @op:    cmp     #12
+000241r 2  B0 0A                bcs     @stop
+000243r 2  A8                   tay
+000244r 2  B9 rr rr             lda     @hi,y
+000247r 2  48                   pha
+000248r 2  B9 rr rr             lda     @lo,y
+00024Br 2  48                   pha
+00024Cr 2  60                   rts                     ; (to the command, which goes back to @cmd)
+00024Dr 2  A9 00        @stop:  lda     #0
+00024Fr 2  9D rr rr             sta     sfx_hi,x
+000252r 2  9D rr rr             sta     sfx_vol,x
+000255r 2  60                   rts
+000256r 2  rr rr rr rr  @lo:    .lobytes  @stop-1, @per-1, @vl-1, @noi-1, @mix-1, @sw-1, @dc-1, @lp-1, @nx-1, @jp-1, @rest-1, @ln-1
+00025Ar 2  rr rr rr rr  
+00025Er 2  rr rr rr rr  
+000262r 2  rr rr rr rr  @hi:    .hibytes  @stop-1, @per-1, @vl-1, @noi-1, @mix-1, @sw-1, @dc-1, @lp-1, @nx-1, @jp-1, @rest-1, @ln-1
+000266r 2  rr rr rr rr  
+00026Ar 2  rr rr rr rr  
+00026Er 2  20 rr rr     @per:   jsr     sfx_byte
+000271r 2  9D rr rr             sta     sfx_perl,x
+000274r 2  20 rr rr             jsr     sfx_byte
+000277r 2  9D rr rr             sta     sfx_perh,x
+00027Ar 2  4C rr rr             jmp     @cmd
+00027Dr 2  20 rr rr     @vl:    jsr     sfx_byte
+000280r 2  9D rr rr             sta     sfx_base,x
+000283r 2  9D rr rr             sta     sfx_vol,x
+000286r 2  BD rr rr             lda     sfx_dec,x
+000289r 2  9D rr rr             sta     sfx_decc,x
+00028Cr 2  4C rr rr             jmp     @cmd
+00028Fr 2  20 rr rr     @noi:   jsr     sfx_byte
+000292r 2  9D rr rr             sta     sfx_noise,x
+000295r 2  4C rr rr             jmp     @cmd
+000298r 2  20 rr rr     @mix:   jsr     sfx_byte
+00029Br 2  9D rr rr             sta     sfx_mix,x
+00029Er 2  4C rr rr             jmp     @cmd
+0002A1r 2  20 rr rr     @sw:    jsr     sfx_byte
+0002A4r 2  9D rr rr             sta     sfx_swl,x
+0002A7r 2  20 rr rr             jsr     sfx_byte
+0002AAr 2  9D rr rr             sta     sfx_swh,x
+0002ADr 2  4C rr rr             jmp     @cmd
+0002B0r 2  20 rr rr     @dc:    jsr     sfx_byte
+0002B3r 2  9D rr rr             sta     sfx_dec,x
+0002B6r 2  9D rr rr             sta     sfx_decc,x
+0002B9r 2  4C rr rr             jmp     @cmd
+0002BCr 2  20 rr rr     @lp:    jsr     sfx_byte
+0002BFr 2  9D rr rr             sta     sfx_lcnt,x
+0002C2r 2  BD rr rr             lda     sfx_lo,x
+0002C5r 2  9D rr rr             sta     sfx_lpl,x
+0002C8r 2  BD rr rr             lda     sfx_hi,x
+0002CBr 2  9D rr rr             sta     sfx_lph,x
+0002CEr 2  4C rr rr             jmp     @cmd
+0002D1r 2  BD rr rr     @nx:    lda     sfx_lcnt,x
+0002D4r 2  F0 05                beq     @back           ; (0: for ever)
+0002D6r 2  DE rr rr             dec     sfx_lcnt,x
+0002D9r 2  F0 0C                beq     @go
+0002DBr 2  BD rr rr     @back:  lda     sfx_lpl,x
+0002DEr 2  9D rr rr             sta     sfx_lo,x
+0002E1r 2  BD rr rr             lda     sfx_lph,x
+0002E4r 2  9D rr rr             sta     sfx_hi,x
+0002E7r 2  4C rr rr     @go:    jmp     @cmd
+0002EAr 2  20 rr rr     @jp:    jsr     sfx_byte
+0002EDr 2  48                   pha
+0002EEr 2  20 rr rr             jsr     sfx_byte
+0002F1r 2  9D rr rr             sta     sfx_hi,x
+0002F4r 2  68                   pla
+0002F5r 2  9D rr rr             sta     sfx_lo,x
+0002F8r 2  4C rr rr             jmp     @cmd
+0002FBr 2  A9 00        @rest:  lda     #0
+0002FDr 2  9D rr rr             sta     sfx_vol,x
+000300r 2  4C rr rr             jmp     @len
+000303r 2  20 rr rr     @ln:    jsr     sfx_byte
+000306r 2  9D rr rr             sta     sfx_len,x
+000309r 2  4C rr rr             jmp     @cmd
+00030Cr 2               
+00030Cr 2               ; the next byte of voice X's script
+00030Cr 2               sfx_byte:
+00030Cr 2  BD rr rr             lda     sfx_lo,x
+00030Fr 2  8D rr rr             sta     @ld+1
+000312r 2  BD rr rr             lda     sfx_hi,x
+000315r 2  8D rr rr             sta     @ld+2
+000318r 2  AD FF FF     @ld:    lda     $FFFF
+00031Br 2  FE rr rr             inc     sfx_lo,x
+00031Er 2  D0 03                bne     @r
+000320r 2  FE rr rr             inc     sfx_hi,x
+000323r 2  60           @r:     rts
+000324r 2               
+000324r 2               ; the tone periods of C1 .. B1 for the 2 MHz chip clock: 2 MHz / (16 x
+000324r 2               ; frequency); each octave up is half (to within a third of a percent)
+000324r 2  EE 18 4D 8E  sfx_c1_lo:  .lobytes 3822, 3608, 3405, 3214, 3034, 2863, 2703, 2551, 2408, 2273, 2145, 2025
+000328r 2  DA 2F 8F F7  
+00032Cr 2  68 E1 61 E9  
+000330r 2  0E 0E 0D 0C  sfx_c1_hi:  .hibytes 3822, 3608, 3405, 3214, 3034, 2863, 2703, 2551, 2408, 2273, 2145, 2025
+000334r 2  0B 0B 0A 09  
+000338r 2  09 08 08 07  
+00033Cr 2               
+00033Cr 2               
+00033Cr 1                       .include "lib/vdp.s"    ; the PICO9918 routines
+00033Cr 2               ; ============================================================================
+00033Cr 2               ; vdp.s - PICO9918 / TMS9918A routines shared by the SBC games (CPU Rev2)
+00033Cr 2               ;
+00033Cr 2               ; Include it after setting VDP_NAME (the name table's VRAM address):
+00033Cr 2               ;           VDP_NAME = $1800
+00033Cr 2               ;           .include "lib/vdp.s"
+00033Cr 2               ; No zero page is used: the copy routines patch their own addresses.
+00033Cr 2               ;
+00033Cr 2               ;   vdp_setup   A/Y -> 8 bytes: R0-R7.  Puts a PICO9918 (F18A mode) back to
+00033Cr 2               ;               plain TMS9918A behaviour first (24 rows, all 32 sprites),
+00033Cr 2               ;               clears the 16K of VRAM, then loads R0-R7.  Interrupts from
+00033Cr 2               ;               the VDP should be off in R1 (bit 5): the games poll.
+00033Cr 2               ;   vdp_reg     register X = A
+00033Cr 2               ;   vdp_waddr   VRAM write address = A (low) / Y (high)
+00033Cr 2               ;   vdp_fill    write A to VRAM vdp_n (16 bit) times, from the address set
+00033Cr 2               ;   vdp_copy    copy vdp_n bytes from RAM vdp_src to VRAM (from the address set)
+00033Cr 2               ;   vdp_at      write address = the name table cell at column X, row Y
+00033Cr 2               ;   vdp_puts    write the 0-ended string at A/Y from there (names = ASCII)
+00033Cr 2               ;   vdp_bcd     write A as two digits
+00033Cr 2               ;   vdp_frame   wait for the next frame (60 a second), calling frame_idle
+00033Cr 2               ;               (the game's: sound, random numbers) while it waits
+00033Cr 2               ;
+00033Cr 2               ; The VDP's ports: data $7F1C, control/status $7F1D.  Reading the status
+00033Cr 2               ; clears the frame flag, so nothing else should read it while a game runs
+00033Cr 2               ; (the ROM doesn't, with PICO_IRQ = 0 in its config.inc, the default).
+00033Cr 2               ; ============================================================================
+00033Cr 2               
+00033Cr 2               VDP_DATA        = $7F1C
+00033Cr 2               VDP_CTRL        = $7F1D
+00033Cr 2               
+00033Cr 2               ; register X = A.  Keeps A, X, Y.
+00033Cr 2               vdp_reg:
+00033Cr 2  8D 1D 7F             sta     VDP_CTRL
+00033Fr 2  48                   pha
+000340r 2  8A                   txa
+000341r 2  09 80                ora     #$80
+000343r 2  8D 1D 7F             sta     VDP_CTRL
+000346r 2  68                   pla
+000347r 2  60                   rts
+000348r 2               
+000348r 2               ; VRAM write address = A (low) / Y (high).  Keeps A, X, Y.
+000348r 2               vdp_waddr:
+000348r 2  8D 1D 7F             sta     VDP_CTRL
+00034Br 2  48                   pha
+00034Cr 2  98                   tya
+00034Dr 2  29 3F                and     #$3F
+00034Fr 2  09 40                ora     #$40
+000351r 2  8D 1D 7F             sta     VDP_CTRL
+000354r 2  68                   pla
+000355r 2  60                   rts
+000356r 2               
+000356r 2               ; write A, vdp_n times.  Keeps A.
+000356r 2               vdp_fill:
+000356r 2  AE rr rr             ldx     vdp_n           ; the odd bytes first
+000359r 2  F0 06                beq     @pg
+00035Br 2  8D 1C 7F     @lo:    sta     VDP_DATA
+00035Er 2  CA                   dex
+00035Fr 2  D0 FA                bne     @lo
+000361r 2  AC rr rr     @pg:    ldy     vdp_n+1         ; then whole pages
+000364r 2  F0 0B                beq     @done
+000366r 2  A2 00        @p:     ldx     #0
+000368r 2  8D 1C 7F     @pp:    sta     VDP_DATA
+00036Br 2  CA                   dex
+00036Cr 2  D0 FA                bne     @pp
+00036Er 2  88                   dey
+00036Fr 2  D0 F5                bne     @p
+000371r 2  60           @done:  rts
+000372r 2               
+000372r 2               ; copy vdp_n bytes from vdp_src to VRAM
+000372r 2               vdp_copy:
+000372r 2  AD rr rr             lda     vdp_src
+000375r 2  8D rr rr             sta     @rd+1
+000378r 2  AD rr rr             lda     vdp_src+1
+00037Br 2  8D rr rr             sta     @rd+2
+00037Er 2  AD rr rr             lda     vdp_n
+000381r 2  8D rr rr             sta     vdp_t
+000384r 2  AD rr rr             lda     vdp_n+1
+000387r 2  8D rr rr             sta     vdp_t+1
+00038Ar 2  AD rr rr     @l:     lda     vdp_t
+00038Dr 2  0D rr rr             ora     vdp_t+1
+000390r 2  F0 1C                beq     @done
+000392r 2  AD FF FF     @rd:    lda     $FFFF
+000395r 2  8D 1C 7F             sta     VDP_DATA
+000398r 2  EE rr rr             inc     @rd+1
+00039Br 2  D0 03                bne     :+
+00039Dr 2  EE rr rr             inc     @rd+2
+0003A0r 2  AD rr rr     :       lda     vdp_t
+0003A3r 2  D0 03                bne     :+
+0003A5r 2  CE rr rr             dec     vdp_t+1
+0003A8r 2  CE rr rr     :       dec     vdp_t
+0003ABr 2  4C rr rr             jmp     @l
+0003AEr 2  60           @done:  rts
+0003AFr 2               
+0003AFr 2               ; A/Y -> 8 register values.  Clears VRAM.
+0003AFr 2               vdp_setup:
+0003AFr 2  8D rr rr             sta     @rr+1
+0003B2r 2  8C rr rr             sty     @rr+2
+0003B5r 2  AD 1D 7F             lda     VDP_CTRL        ; (resets the register write latch)
+0003B8r 2  A9 80                lda     #$80            ; R1 = $80: display off while we work
+0003BAr 2  A2 01                ldx     #1
+0003BCr 2  20 rr rr             jsr     vdp_reg
+0003BFr 2  A9 1C                lda     #$1C            ; F18A unlock (a PICO9918): $1C twice to VR57
+0003C1r 2  A2 39                ldx     #57
+0003C3r 2  20 rr rr             jsr     vdp_reg
+0003C6r 2  20 rr rr             jsr     vdp_reg
+0003C9r 2  A9 00                lda     #0              ; VR49: 24 rows, no 80 columns
+0003CBr 2  A2 31                ldx     #49
+0003CDr 2  20 rr rr             jsr     vdp_reg
+0003D0r 2  A2 32                ldx     #50             ; VR50: plain TMS9918A behaviour
+0003D2r 2  20 rr rr             jsr     vdp_reg
+0003D5r 2  A9 20                lda     #32             ; VR51: all 32 sprites
+0003D7r 2  A2 33                ldx     #51
+0003D9r 2  20 rr rr             jsr     vdp_reg
+0003DCr 2                       ; (on a real TMS9918A those writes land in R1-R3: all set below)
+0003DCr 2  A9 80                lda     #$80            ; R1 again: display off
+0003DEr 2  A2 01                ldx     #1
+0003E0r 2  20 rr rr             jsr     vdp_reg
+0003E3r 2  A9 00                lda     #0              ; clear the 16K
+0003E5r 2  A8                   tay
+0003E6r 2  20 rr rr             jsr     vdp_waddr
+0003E9r 2  A9 00                lda     #$00
+0003EBr 2  8D rr rr             sta     vdp_n
+0003EEr 2  A9 40                lda     #$40
+0003F0r 2  8D rr rr             sta     vdp_n+1
+0003F3r 2  A9 00                lda     #0
+0003F5r 2  20 rr rr             jsr     vdp_fill
+0003F8r 2  A2 00                ldx     #0
+0003FAr 2  BD FF FF     @rr:    lda     $FFFF,x
+0003FDr 2  20 rr rr             jsr     vdp_reg
+000400r 2  E8                   inx
+000401r 2  E0 08                cpx     #8
+000403r 2  D0 F5                bne     @rr
+000405r 2  60                   rts
+000406r 2               
+000406r 2               ; write address = name table cell X (column), Y (row).  Keeps X and Y.
+000406r 2               vdp_at:
+000406r 2  8E rr rr             stx     vdp_t
+000409r 2  98                   tya
+00040Ar 2  4A                   lsr                     ; row * 32: high byte = row / 8
+00040Br 2  4A                   lsr
+00040Cr 2  4A                   lsr
+00040Dr 2  8D rr rr             sta     vdp_t+1
+000410r 2  98                   tya
+000411r 2  0A                   asl
+000412r 2  0A                   asl
+000413r 2  0A                   asl
+000414r 2  0A                   asl
+000415r 2  0A                   asl                     ; low byte = (row & 7) * 32
+000416r 2  18                   clc
+000417r 2  6D rr rr             adc     vdp_t
+00041Ar 2  18                   clc
+00041Br 2  69 00                adc     #<VDP_NAME
+00041Dr 2  8D 1D 7F             sta     VDP_CTRL
+000420r 2  AD rr rr             lda     vdp_t+1
+000423r 2  69 18                adc     #>VDP_NAME
+000425r 2  29 3F                and     #$3F
+000427r 2  09 40                ora     #$40
+000429r 2  8D 1D 7F             sta     VDP_CTRL
+00042Cr 2  60                   rts
+00042Dr 2               
+00042Dr 2               ; write the 0-ended string at A/Y.  Keeps X.
+00042Dr 2               vdp_puts:
+00042Dr 2  8D rr rr             sta     @rd+1
+000430r 2  8C rr rr             sty     @rd+2
+000433r 2  A0 00                ldy     #0
+000435r 2  B9 FF FF     @rd:    lda     $FFFF,y
+000438r 2  F0 06                beq     @done
+00043Ar 2  8D 1C 7F             sta     VDP_DATA
+00043Dr 2  C8                   iny
+00043Er 2  D0 F5                bne     @rd
+000440r 2  60           @done:  rts
+000441r 2               
+000441r 2               ; A as two BCD digits.  Keeps X, Y.
+000441r 2               vdp_bcd:
+000441r 2  48                   pha
+000442r 2  4A                   lsr
+000443r 2  4A                   lsr
+000444r 2  4A                   lsr
+000445r 2  4A                   lsr
+000446r 2  09 30                ora     #'0'
+000448r 2  8D 1C 7F             sta     VDP_DATA
+00044Br 2  68                   pla
+00044Cr 2  48                   pha
+00044Dr 2  29 0F                and     #$0F
+00044Fr 2  09 30                ora     #'0'
+000451r 2  8D 1C 7F             sta     VDP_DATA
+000454r 2  68                   pla
+000455r 2  60                   rts
+000456r 2               
+000456r 2               ; wait for the next frame
+000456r 2               vdp_frame:
+000456r 2  20 rr rr     @w:     jsr     frame_idle
+000459r 2  AD 1D 7F             lda     VDP_CTRL
+00045Cr 2  10 F8                bpl     @w
+00045Er 2  60                   rts
+00045Fr 2               
+00045Fr 2                       .segment "BSS"
+000075r 2  xx xx        vdp_n:          .res 2
+000077r 2  xx xx        vdp_src:        .res 2
+000079r 2  xx xx        vdp_t:          .res 2
+00007Br 2                       .segment "CODE"
+00045Fr 2               
+00045Fr 1               
+00045Fr 1               getc            = SBC_CHRIN     ; carry set = key in A
+00045Fr 1               
+00045Fr 1               ; called by vdp_frame while it waits
+00045Fr 1               frame_idle:
+00045Fr 1  20 rr rr             jsr     sfx_poll
+000462r 1  4C rr rr             jmp     rand
+000465r 1               
+000465r 1               ; 16 bit Galois LFSR.  Returns a random byte in A.  Preserves X and Y.
+000465r 1  AD rr rr     rand:   lda     rng+1
+000468r 1  4A                   lsr
+000469r 1  6E rr rr             ror     rng
+00046Cr 1  90 02                bcc     @n
+00046Er 1  49 B4                eor     #$B4
+000470r 1  8D rr rr     @n:     sta     rng+1
+000473r 1  4D rr rr             eor     rng
+000476r 1  60                   rts
+000477r 1               
+000477r 1               ; wait A frames (keys pressed meanwhile are dropped)
+000477r 1               wait_frames:
+000477r 1  8D rr rr             sta     wf_n
+00047Ar 1  20 rr rr     @l:     jsr     vdp_frame
+00047Dr 1  20 rr rr             jsr     put_sprites
+000480r 1  20 rr rr             jsr     flush_in
+000483r 1  CE rr rr             dec     wf_n
+000486r 1  D0 F2                bne     @l
+000488r 1  60                   rts
+000489r 1               
+000489r 1               ; ============================================================================
+000489r 1               ; gamepad and menu input (as in the other SBC games)
+000489r 1               ; ============================================================================
+000489r 1               PAD_A           = $01
+000489r 1               PAD_B           = $02
+000489r 1               PAD_SELECT      = $04
+000489r 1               PAD_START       = $08
+000489r 1               PAD_UP          = $10
+000489r 1               PAD_DOWN        = $20
+000489r 1               PAD_LEFT        = $40
+000489r 1               PAD_RIGHT       = $80
+000489r 1               PAD_GO          = $80           ; menu_key's answer for gamepad A or Start
+000489r 1               
+000489r 1               read_pad:
+000489r 1  20 12 FE             jsr     SBC_PADSTATE
+00048Cr 1  C9 FF                cmp     #$FF            ; every button "pressed" = no pad
+00048Er 1  D0 02                bne     @ok
+000490r 1  A9 00                lda     #0
+000492r 1  8D rr rr     @ok:    sta     pad
+000495r 1  AD rr rr             lda     padold
+000498r 1  49 FF                eor     #$FF
+00049Ar 1  2D rr rr             and     pad
+00049Dr 1  8D rr rr             sta     padnew
+0004A0r 1  AD rr rr             lda     pad
+0004A3r 1  8D rr rr             sta     padold
+0004A6r 1  60                   rts
+0004A7r 1               
+0004A7r 1               flush_in:
+0004A7r 1  20 00 FE             jsr     getc
+0004AAr 1  B0 FB                bcs     flush_in
+0004ACr 1  60                   rts
+0004ADr 1               
+0004ADr 1               ; carry set if A is a character the gamepad driver types (W A S D space)
+0004ADr 1               pad_typed:
+0004ADr 1  C9 20                cmp     #' '
+0004AFr 1  F0 12                beq     @y
+0004B1r 1  C9 57                cmp     #'W'
+0004B3r 1  F0 0E                beq     @y
+0004B5r 1  C9 41                cmp     #'A'
+0004B7r 1  F0 0A                beq     @y
+0004B9r 1  C9 53                cmp     #'S'
+0004BBr 1  F0 06                beq     @y
+0004BDr 1  C9 44                cmp     #'D'
+0004BFr 1  F0 02                beq     @y
+0004C1r 1  18                   clc
+0004C2r 1  60                   rts
+0004C3r 1  38           @y:     sec
+0004C4r 1  60                   rts
+0004C5r 1               
+0004C5r 1               ; wait for a menu choice: a key (letters in upper case) or PAD_GO
+0004C5r 1               menu_key:
+0004C5r 1  20 rr rr     @l:     jsr     vdp_frame
+0004C8r 1  20 rr rr             jsr     put_sprites
+0004CBr 1  20 rr rr             jsr     read_pad
+0004CEr 1  AD rr rr             lda     padnew
+0004D1r 1  29 09                and     #PAD_A | PAD_START
+0004D3r 1  D0 21                bne     @pad
+0004D5r 1  20 00 FE             jsr     getc
+0004D8r 1  90 EB                bcc     @l
+0004DAr 1  C9 20                cmp     #' '            ; a space typed by the pad's A button?
+0004DCr 1  D0 0D                bne     @up
+0004DEr 1  20 rr rr             jsr     read_pad
+0004E1r 1  AD rr rr             lda     pad
+0004E4r 1  29 01                and     #PAD_A
+0004E6r 1  D0 0E                bne     @pad
+0004E8r 1  A9 20                lda     #' '
+0004EAr 1  60                   rts
+0004EBr 1  C9 61        @up:    cmp     #'a'
+0004EDr 1  90 06                bcc     @r
+0004EFr 1  C9 7B                cmp     #'z'+1
+0004F1r 1  B0 02                bcs     @r
+0004F3r 1  29 DF                and     #$DF
+0004F5r 1  60           @r:     rts
+0004F6r 1  20 rr rr     @pad:   jsr     flush_in
+0004F9r 1  A9 80                lda     #PAD_GO
+0004FBr 1  60                   rts
+0004FCr 1               
+0004FCr 1               ; ============================================================================
+0004FCr 1               ; start
+0004FCr 1               ; ============================================================================
+0004FCr 1  D8           start:  cld
+0004FDr 1  A2 FF                ldx     #$FF
+0004FFr 1  9A                   txs
+000500r 1  A9 00                lda     #0              ; clear all variables
+000502r 1  AA                   tax
+000503r 1  9D rr rr     @clr:   sta     vars_start,x
+000506r 1  9D rr rr             sta     vars_start+$100,x
+000509r 1  E8                   inx
+00050Ar 1  D0 F7                bne     @clr
+00050Cr 1  A9 A5                lda     #$A5
+00050Er 1  8D rr rr             sta     rng
+000511r 1  AD rr rr             lda     ctrl_def
+000514r 1  8D rr rr             sta     ctrl
+000517r 1                       ; the PICO9918?  (CPU Rev2 ROM: a JMP at $FE1B, SBC_SYSINFO)
+000517r 1  AD 1B FE             lda     SBC_SYSINFO
+00051Ar 1  C9 4C                cmp     #$4C
+00051Cr 1  D0 07                bne     @nopico
+00051Er 1  20 1B FE             jsr     SBC_SYSINFO
+000521r 1  C9 02                cmp     #DISP_PICO
+000523r 1  F0 10                beq     @pico
+000525r 1               @nopico:
+000525r 1  A2 00                ldx     #0
+000527r 1  BD rr rr     @m:     lda     need_txt,x
+00052Ar 1  F0 06                beq     @bye
+00052Cr 1  20 03 FE             jsr     SBC_CHROUT
+00052Fr 1  E8                   inx
+000530r 1  D0 F5                bne     @m
+000532r 1  4C 06 FE     @bye:   jmp     SBC_MENU
+000535r 1  20 rr rr     @pico:  jsr     sfx_init
+000538r 1  AD rr rr             lda     mute_def
+00053Br 1  8D rr rr             sta     sfx_mute
+00053Er 1  20 rr rr             jsr     gfx_init
+000541r 1  A9 00                lda     #0
+000543r 1  8D rr rr             sta     hiscore
+000546r 1  8D rr rr             sta     hiscore+1
+000549r 1               
+000549r 1               ; ---- title screen ----------------------------------------------------------
+000549r 1  20 rr rr     title:  jsr     sfx_off
+00054Cr 1  20 rr rr             jsr     clear_names
+00054Fr 1  20 rr rr             jsr     hide_sprites
+000552r 1  A2 00                ldx     #0              ; the texts
+000554r 1  8E rr rr             stx     tmp
+000557r 1  AE rr rr     @t:     ldx     tmp
+00055Ar 1  BD rr rr             lda     title_txt,x
+00055Dr 1  F0 20                beq     @tdone
+00055Fr 1  48                   pha
+000560r 1  BC rr rr             ldy     title_txt+1,x
+000563r 1  68                   pla
+000564r 1  AA                   tax
+000565r 1  20 rr rr             jsr     vdp_at
+000568r 1  AE rr rr             ldx     tmp
+00056Br 1  BD rr rr             lda     title_txt+2,x
+00056Er 1  BC rr rr             ldy     title_txt+3,x
+000571r 1  20 rr rr             jsr     vdp_puts
+000574r 1  AD rr rr             lda     tmp
+000577r 1  18                   clc
+000578r 1  69 04                adc     #4
+00057Ar 1  8D rr rr             sta     tmp
+00057Dr 1  D0 D8                bne     @t
+00057Fr 1  A2 00        @tdone: ldx     #0              ; the invaders next to their points
+000581r 1  8E rr rr     @k:     stx     tmp
+000584r 1  8A                   txa
+000585r 1  0A                   asl
+000586r 1  18                   clc
+000587r 1  69 08                adc     #8
+000589r 1  A8                   tay                     ; rows 8, 10, 12
+00058Ar 1  A2 09                ldx     #9
+00058Cr 1  20 rr rr             jsr     vdp_at
+00058Fr 1  AE rr rr             ldx     tmp
+000592r 1  BD rr rr             lda     kind_pat,x
+000595r 1  8D 1C 7F             sta     VDP_DATA
+000598r 1  18                   clc
+000599r 1  69 01                adc     #1
+00059Br 1  8D 1C 7F             sta     VDP_DATA
+00059Er 1  69 01                adc     #1
+0005A0r 1  8D 1C 7F             sta     VDP_DATA
+0005A3r 1  AE rr rr             ldx     tmp
+0005A6r 1  E8                   inx
+0005A7r 1  E0 03                cpx     #3
+0005A9r 1  D0 D6                bne     @k
+0005ABr 1  A9 30                lda     #48             ; and the saucer (row 6)
+0005ADr 1  8D rr rr             sta     spr_tab+S_SAUCER*4
+0005B0r 1  A9 48                lda     #72
+0005B2r 1  8D rr rr             sta     spr_tab+S_SAUCER*4+1
+0005B5r 1  A9 10                lda     #SP_SAUCER
+0005B7r 1  8D rr rr             sta     spr_tab+S_SAUCER*4+2
+0005BAr 1  A9 08                lda     #C_SAUCER
+0005BCr 1  8D rr rr             sta     spr_tab+S_SAUCER*4+3
+0005BFr 1  20 rr rr             jsr     show_ctrl
+0005C2r 1  20 rr rr             jsr     show_hiscore
+0005C5r 1  20 rr rr             jsr     read_pad
+0005C8r 1  20 rr rr     @wait:  jsr     menu_key
+0005CBr 1  C9 51                cmp     #'Q'
+0005CDr 1  D0 03                bne     @notq
+0005CFr 1  4C rr rr             jmp     exit_game
+0005D2r 1  C9 4D        @notq:  cmp     #'M'
+0005D4r 1  D0 06                bne     @notm
+0005D6r 1  20 rr rr             jsr     toggle_sound
+0005D9r 1  4C rr rr             jmp     @wait
+0005DCr 1  C9 47        @notm:  cmp     #'G'
+0005DEr 1  D0 0E                bne     @notg
+0005E0r 1  AD rr rr             lda     ctrl
+0005E3r 1  49 01                eor     #1
+0005E5r 1  8D rr rr             sta     ctrl
+0005E8r 1  20 rr rr             jsr     show_ctrl
+0005EBr 1  4C rr rr             jmp     @wait
+0005EEr 1  C9 80        @notg:  cmp     #PAD_GO
+0005F0r 1  D0 07                bne     @notp
+0005F2r 1  A9 01                lda     #1
+0005F4r 1  8D rr rr             sta     ctrl
+0005F7r 1  D0 04                bne     new_game
+0005F9r 1  C9 20        @notp:  cmp     #' '
+0005FBr 1  D0 CB                bne     @wait
+0005FDr 1               
+0005FDr 1               ; ---- new game ----------------------------------------------------------------
+0005FDr 1               new_game:
+0005FDr 1  A9 00                lda     #0
+0005FFr 1  8D rr rr             sta     score
+000602r 1  8D rr rr             sta     score+1
+000605r 1  8D rr rr             sta     wave
+000608r 1  A9 03                lda     #3
+00060Ar 1  8D rr rr             sta     lives
+00060Dr 1               
+00060Dr 1               new_wave:
+00060Dr 1  20 rr rr             jsr     sfx_off
+000610r 1  20 rr rr             jsr     init_wave
+000613r 1  20 rr rr             jsr     draw_all
+000616r 1               
+000616r 1               ; ---- main loop ---------------------------------------------------------------
+000616r 1               game_loop:
+000616r 1  AD rr rr             lda     speed
+000619r 1  8D rr rr             sta     wf_n
+00061Cr 1  20 rr rr     @f:     jsr     vdp_frame
+00061Fr 1  CE rr rr             dec     wf_n
+000622r 1  D0 F8                bne     @f
+000624r 1  20 rr rr             jsr     put_sprites
+000627r 1  20 rr rr             jsr     sfx_poll
+00062Ar 1  20 rr rr             jsr     read_keys
+00062Dr 1  AD rr rr             lda     quit
+000630r 1  F0 03                beq     @noquit
+000632r 1  4C rr rr             jmp     exit_game
+000635r 1               @noquit:
+000635r 1  20 rr rr             jsr     move_player
+000638r 1  20 rr rr             jsr     fire
+00063Br 1  20 rr rr             jsr     move_shot
+00063Er 1  20 rr rr             jsr     move_bombs
+000641r 1  AD rr rr             lda     dead
+000644r 1  F0 0B                beq     @alive
+000646r 1  20 rr rr             jsr     player_died
+000649r 1  AD rr rr             lda     lives
+00064Cr 1  F0 31                beq     game_over
+00064Er 1  4C rr rr             jmp     game_loop
+000651r 1  20 rr rr     @alive: jsr     spawn_bomb
+000654r 1  20 rr rr             jsr     ufo_tick
+000657r 1  20 rr rr             jsr     inv_tick
+00065Ar 1  20 rr rr             jsr     expl_tick
+00065Dr 1  AD rr rr             lda     invaded
+000660r 1  D0 1D                bne     game_over
+000662r 1  AD rr rr             lda     alive_count
+000665r 1  D0 AF                bne     game_loop
+000667r 1  EE rr rr             inc     wave
+00066Ar 1  20 rr rr             jsr     sfx_off
+00066Dr 1  A9 0A                lda     #SND_WAVE
+00066Fr 1  A2 03                ldx     #3
+000671r 1  20 rr rr             jsr     sfx_play
+000674r 1  20 rr rr             jsr     hide_moving
+000677r 1  A9 3C                lda     #60
+000679r 1  20 rr rr             jsr     wait_frames     ; a second between waves
+00067Cr 1  4C rr rr             jmp     new_wave
+00067Fr 1               
+00067Fr 1               ; ---- game over ----------------------------------------------------------------
+00067Fr 1               game_over:
+00067Fr 1  AD rr rr             lda     score+1         ; a new high score?
+000682r 1  CD rr rr             cmp     hiscore+1
+000685r 1  90 19                bcc     @nohi
+000687r 1  D0 08                bne     @hi
+000689r 1  AD rr rr             lda     score
+00068Cr 1  CD rr rr             cmp     hiscore
+00068Fr 1  90 0F                bcc     @nohi
+000691r 1  AD rr rr     @hi:    lda     score
+000694r 1  8D rr rr             sta     hiscore
+000697r 1  AD rr rr             lda     score+1
+00069Ar 1  8D rr rr             sta     hiscore+1
+00069Dr 1  20 rr rr             jsr     show_score
+0006A0r 1  20 rr rr     @nohi:  jsr     sfx_off
+0006A3r 1  A9 0B                lda     #SND_OVER
+0006A5r 1  A2 03                ldx     #3
+0006A7r 1  20 rr rr             jsr     sfx_play
+0006AAr 1  20 rr rr             jsr     hide_moving
+0006ADr 1  A2 00                ldx     #0
+0006AFr 1  8E rr rr     @o:     stx     tmp
+0006B2r 1  BD rr rr             lda     over_txt,x
+0006B5r 1  F0 1E                beq     @odone
+0006B7r 1  48                   pha
+0006B8r 1  BC rr rr             ldy     over_txt+1,x
+0006BBr 1  68                   pla
+0006BCr 1  AA                   tax
+0006BDr 1  20 rr rr             jsr     vdp_at
+0006C0r 1  AE rr rr             ldx     tmp
+0006C3r 1  BD rr rr             lda     over_txt+2,x
+0006C6r 1  BC rr rr             ldy     over_txt+3,x
+0006C9r 1  20 rr rr             jsr     vdp_puts
+0006CCr 1  AD rr rr             lda     tmp
+0006CFr 1  18                   clc
+0006D0r 1  69 04                adc     #4
+0006D2r 1  AA                   tax
+0006D3r 1  D0 DA                bne     @o
+0006D5r 1  A9 3C        @odone: lda     #60
+0006D7r 1  20 rr rr             jsr     wait_frames     ; ignore keys for a second
+0006DAr 1  20 rr rr     @wait:  jsr     menu_key
+0006DDr 1  C9 51                cmp     #'Q'
+0006DFr 1  F0 15                beq     @title
+0006E1r 1  C9 4D                cmp     #'M'
+0006E3r 1  D0 06                bne     @nm
+0006E5r 1  20 rr rr             jsr     toggle_sound
+0006E8r 1  4C rr rr             jmp     @wait
+0006EBr 1  C9 20        @nm:    cmp     #' '
+0006EDr 1  F0 04                beq     @again
+0006EFr 1  C9 80                cmp     #PAD_GO
+0006F1r 1  D0 E7                bne     @wait
+0006F3r 1  4C rr rr     @again: jmp     new_game
+0006F6r 1  4C rr rr     @title: jmp     title
+0006F9r 1               
+0006F9r 1               ; ---- quit ------------------------------------------------------------------
+0006F9r 1               exit_game:
+0006F9r 1  20 rr rr             jsr     sfx_off
+0006FCr 1  20 39 FE             jsr     SBC_CONRESET    ; the console's text screen back
+0006FFr 1  4C 06 FE             jmp     SBC_MENU
+000702r 1               
+000702r 1               ; ============================================================================
+000702r 1               ; screen
+000702r 1               ; ============================================================================
+000702r 1               
+000702r 1               ; set up the VDP and load the patterns, colours and sprites
+000702r 1               gfx_init:
+000702r 1  A9 rr                lda     #<vdp_regs
+000704r 1  A0 rr                ldy     #>vdp_regs
+000706r 1  20 rr rr             jsr     vdp_setup
+000709r 1  A9 00                lda     #<(V_PAT + $20*8)       ; the font
+00070Br 1  A0 01                ldy     #>(V_PAT + $20*8)
+00070Dr 1  20 rr rr             jsr     vdp_waddr
+000710r 1  A2 rr                ldx     #<gfx_font
+000712r 1  A0 rr                ldy     #>gfx_font
+000714r 1  20 rr rr             jsr     copy_xy
+000717r 1  00 02                .word   64*8
+000719r 1  A9 C0                lda     #<(V_PAT + P_GROUND*8)  ; the ground and the cannon
+00071Br 1  A0 03                ldy     #>(V_PAT + P_GROUND*8)
+00071Dr 1  20 rr rr             jsr     vdp_waddr
+000720r 1  A2 rr                ldx     #<gfx_ground
+000722r 1  A0 rr                ldy     #>gfx_ground
+000724r 1  20 rr rr             jsr     copy_xy
+000727r 1  18 00                .word   3*8
+000729r 1  A9 00                lda     #<(V_PAT + P_INV*8)     ; the invaders
+00072Br 1  A0 04                ldy     #>(V_PAT + P_INV*8)
+00072Dr 1  20 rr rr             jsr     vdp_waddr
+000730r 1  A2 rr                ldx     #<gfx_inv
+000732r 1  A0 rr                ldy     #>gfx_inv
+000734r 1  20 rr rr             jsr     copy_xy
+000737r 1  40 02                .word   72*8
+000739r 1  A9 00                lda     #<V_COLOUR
+00073Br 1  A0 20                ldy     #>V_COLOUR
+00073Dr 1  20 rr rr             jsr     vdp_waddr
+000740r 1  A2 rr                ldx     #<gfx_colours
+000742r 1  A0 rr                ldy     #>gfx_colours
+000744r 1  20 rr rr             jsr     copy_xy
+000747r 1  20 00                .word   32
+000749r 1  A9 00                lda     #<V_SPAT
+00074Br 1  A0 38                ldy     #>V_SPAT
+00074Dr 1  20 rr rr             jsr     vdp_waddr
+000750r 1  A2 rr                ldx     #<gfx_sprites
+000752r 1  A0 rr                ldy     #>gfx_sprites
+000754r 1  20 rr rr             jsr     copy_xy
+000757r 1  00 01                .word   8*32
+000759r 1  A9 1C                lda     #<(V_SATTR + NSPR*4)    ; the end of the sprite list
+00075Br 1  A0 1B                ldy     #>(V_SATTR + NSPR*4)
+00075Dr 1  20 rr rr             jsr     vdp_waddr
+000760r 1  A9 D0                lda     #$D0
+000762r 1  8D 1C 7F             sta     VDP_DATA
+000765r 1  20 rr rr             jsr     hide_sprites
+000768r 1  20 rr rr             jsr     put_sprites
+00076Br 1  A9 C2                lda     #$C2            ; R1: display on, 16 x 16 sprites
+00076Dr 1  A2 01                ldx     #1
+00076Fr 1  4C rr rr             jmp     vdp_reg
+000772r 1               
+000772r 1               ; copy from X/Y (low/high) to VRAM; the length is the .word after the JSR
+000772r 1               copy_xy:
+000772r 1  8E rr rr             stx     vdp_src
+000775r 1  8C rr rr             sty     vdp_src+1
+000778r 1  68                   pla                     ; the return address points at the .word - 1
+000779r 1  8D rr rr             sta     cx_ret
+00077Cr 1  68                   pla
+00077Dr 1  8D rr rr             sta     cx_ret+1
+000780r 1  A0 01                ldy     #1
+000782r 1  20 rr rr             jsr     cx_byte
+000785r 1  8D rr rr             sta     vdp_n
+000788r 1  A0 02                ldy     #2
+00078Ar 1  20 rr rr             jsr     cx_byte
+00078Dr 1  8D rr rr             sta     vdp_n+1
+000790r 1  AD rr rr             lda     cx_ret          ; return past the .word
+000793r 1  18                   clc
+000794r 1  69 02                adc     #2
+000796r 1  AA                   tax
+000797r 1  AD rr rr             lda     cx_ret+1
+00079Ar 1  69 00                adc     #0
+00079Cr 1  48                   pha
+00079Dr 1  8A                   txa
+00079Er 1  48                   pha
+00079Fr 1  4C rr rr             jmp     vdp_copy
+0007A2r 1               cx_byte:                        ; A = the byte at cx_ret + Y
+0007A2r 1  AD rr rr             lda     cx_ret
+0007A5r 1  8D rr rr             sta     @rd+1
+0007A8r 1  AD rr rr             lda     cx_ret+1
+0007ABr 1  8D rr rr             sta     @rd+2
+0007AEr 1  B9 FF FF     @rd:    lda     $FFFF,y
+0007B1r 1  60                   rts
+0007B2r 1               
+0007B2r 1               ; the whole name table blank
+0007B2r 1               clear_names:
+0007B2r 1  A9 00                lda     #<V_NAME
+0007B4r 1  A0 18                ldy     #>V_NAME
+0007B6r 1  20 rr rr             jsr     vdp_waddr
+0007B9r 1  A9 00                lda     #<768
+0007BBr 1  8D rr rr             sta     vdp_n
+0007BEr 1  A9 03                lda     #>768
+0007C0r 1  8D rr rr             sta     vdp_n+1
+0007C3r 1  A9 00                lda     #P_BLANK
+0007C5r 1  4C rr rr             jmp     vdp_fill
+0007C8r 1               
+0007C8r 1               ; all sprites below the screen
+0007C8r 1               hide_sprites:
+0007C8r 1  A2 18                ldx     #NSPR*4-4
+0007CAr 1  A9 C0        @l:     lda     #HIDE_Y
+0007CCr 1  9D rr rr             sta     spr_tab,x
+0007CFr 1  A9 00                lda     #0
+0007D1r 1  9D rr rr             sta     spr_tab+3,x
+0007D4r 1  CA                   dex
+0007D5r 1  CA                   dex
+0007D6r 1  CA                   dex
+0007D7r 1  CA                   dex
+0007D8r 1  10 F0                bpl     @l
+0007DAr 1  60                   rts
+0007DBr 1               
+0007DBr 1               ; all but the cannon
+0007DBr 1               hide_moving:
+0007DBr 1  A9 C0                lda     #HIDE_Y
+0007DDr 1  A2 04                ldx     #S_SHOT*4
+0007DFr 1  9D rr rr     @l:     sta     spr_tab,x
+0007E2r 1  E8                   inx
+0007E3r 1  E8                   inx
+0007E4r 1  E8                   inx
+0007E5r 1  E8                   inx
+0007E6r 1  E0 1C                cpx     #NSPR*4
+0007E8r 1  D0 F5                bne     @l
+0007EAr 1  60                   rts
+0007EBr 1               
+0007EBr 1               ; the sprite table to VRAM (once a frame)
+0007EBr 1               put_sprites:
+0007EBr 1  A9 00                lda     #<V_SATTR
+0007EDr 1  A0 1B                ldy     #>V_SATTR
+0007EFr 1  20 rr rr             jsr     vdp_waddr
+0007F2r 1  A2 00                ldx     #0
+0007F4r 1  BD rr rr     @l:     lda     spr_tab,x
+0007F7r 1  8D 1C 7F             sta     VDP_DATA
+0007FAr 1  E8                   inx
+0007FBr 1  E0 1C                cpx     #NSPR*4
+0007FDr 1  D0 F5                bne     @l
+0007FFr 1  60                   rts
+000800r 1               
+000800r 1               ; the controls line on the title screen
+000800r 1               show_ctrl:
+000800r 1  A2 02                ldx     #2
+000802r 1  A0 14                ldy     #20
+000804r 1  20 rr rr             jsr     vdp_at
+000807r 1  AD rr rr             lda     ctrl
+00080Ar 1  F0 07                beq     @kb
+00080Cr 1  A9 rr                lda     #<ctrl_pad_txt
+00080Er 1  A0 rr                ldy     #>ctrl_pad_txt
+000810r 1  4C rr rr             jmp     vdp_puts
+000813r 1  A9 rr        @kb:    lda     #<ctrl_kb_txt
+000815r 1  A0 rr                ldy     #>ctrl_kb_txt
+000817r 1  4C rr rr             jmp     vdp_puts
+00081Ar 1               
+00081Ar 1               ; draw the whole playfield for a new wave
+00081Ar 1               draw_all:
+00081Ar 1  20 rr rr             jsr     clear_names
+00081Dr 1  A2 00                ldx     #0
+00081Fr 1  A0 00                ldy     #0
+000821r 1  20 rr rr             jsr     vdp_at
+000824r 1  A9 rr                lda     #<status_txt
+000826r 1  A0 rr                ldy     #>status_txt
+000828r 1  20 rr rr             jsr     vdp_puts
+00082Br 1  20 rr rr             jsr     show_score
+00082Er 1  20 rr rr             jsr     show_hiscore
+000831r 1  20 rr rr             jsr     show_lives
+000834r 1  A2 00                ldx     #0              ; the ground
+000836r 1  A0 16                ldy     #GROUND_ROW
+000838r 1  20 rr rr             jsr     vdp_at
+00083Br 1  A9 20                lda     #32
+00083Dr 1  8D rr rr             sta     vdp_n
+000840r 1  A9 00                lda     #0
+000842r 1  8D rr rr             sta     vdp_n+1
+000845r 1  A9 78                lda     #P_GROUND
+000847r 1  20 rr rr             jsr     vdp_fill
+00084Ar 1  20 rr rr             jsr     draw_shields
+00084Dr 1  A2 04                ldx     #NROWS-1
+00084Fr 1  20 rr rr     @inv:   jsr     draw_row        ; (keeps X)
+000852r 1  CA                   dex
+000853r 1  10 FA                bpl     @inv
+000855r 1  20 rr rr             jsr     hide_sprites
+000858r 1  4C rr rr             jmp     draw_player
+00085Br 1               
+00085Br 1               show_score:
+00085Br 1  A2 06                ldx     #6
+00085Dr 1  A0 00                ldy     #0
+00085Fr 1  20 rr rr             jsr     vdp_at
+000862r 1  AD rr rr             lda     score+1
+000865r 1  20 rr rr             jsr     vdp_bcd
+000868r 1  AD rr rr             lda     score
+00086Br 1  4C rr rr             jmp     vdp_bcd
+00086Er 1               
+00086Er 1               show_hiscore:
+00086Er 1  A2 15                ldx     #21
+000870r 1  A0 00                ldy     #0
+000872r 1  20 rr rr             jsr     vdp_at
+000875r 1  AD rr rr             lda     hiscore+1
+000878r 1  20 rr rr             jsr     vdp_bcd
+00087Br 1  AD rr rr             lda     hiscore
+00087Er 1  4C rr rr             jmp     vdp_bcd
+000881r 1               
+000881r 1               show_lives:
+000881r 1  A2 1F                ldx     #31
+000883r 1  A0 00                ldy     #0
+000885r 1  20 rr rr             jsr     vdp_at
+000888r 1  AD rr rr             lda     lives
+00088Br 1  09 30                ora     #'0'
+00088Dr 1  8D 1C 7F             sta     VDP_DATA
+000890r 1  60                   rts
+000891r 1               
+000891r 1               ; BCD score += Y:A
+000891r 1               add_score:
+000891r 1  F8                   sed
+000892r 1  18                   clc
+000893r 1  6D rr rr             adc     score
+000896r 1  8D rr rr             sta     score
+000899r 1  98                   tya
+00089Ar 1  6D rr rr             adc     score+1
+00089Dr 1  8D rr rr             sta     score+1
+0008A0r 1  D8                   cld
+0008A1r 1  4C rr rr             jmp     show_score
+0008A4r 1               
+0008A4r 1               ; ============================================================================
+0008A4r 1               ; a new wave
+0008A4r 1               ; ============================================================================
+0008A4r 1               init_wave:
+0008A4r 1  A2 04                ldx     #NROWS-1
+0008A6r 1  A9 FF        @row:   lda     #$FF
+0008A8r 1  9D rr rr             sta     alive,x
+0008ABr 1  A9 03                lda     #FORM_C
+0008ADr 1  9D rr rr             sta     rowc,x
+0008B0r 1  A9 00                lda     #0
+0008B2r 1  9D rr rr             sta     rowph,x
+0008B5r 1  9D rr rr             sta     rowfrm,x
+0008B8r 1  8A                   txa                     ; rowy = FORM_TOP + 2*row + min(wave, 4)
+0008B9r 1  0A                   asl
+0008BAr 1  18                   clc
+0008BBr 1  69 03                adc     #FORM_TOP
+0008BDr 1  9D rr rr             sta     rowy,x
+0008C0r 1  AD rr rr             lda     wave
+0008C3r 1  C9 04                cmp     #4
+0008C5r 1  90 02                bcc     @w
+0008C7r 1  A9 04                lda     #4
+0008C9r 1  18           @w:     clc
+0008CAr 1  7D rr rr             adc     rowy,x
+0008CDr 1  9D rr rr             sta     rowy,x
+0008D0r 1  CA                   dex
+0008D1r 1  10 D3                bpl     @row
+0008D3r 1  A9 28                lda     #NROWS*NCOLS
+0008D5r 1  8D rr rr             sta     alive_count
+0008D8r 1  A9 01                lda     #1
+0008DAr 1  8D rr rr             sta     dir
+0008DDr 1  8D rr rr             sta     inv_t
+0008E0r 1  A9 04                lda     #NROWS-1
+0008E2r 1  8D rr rr             sta     cur_row
+0008E5r 1  A9 00                lda     #0
+0008E7r 1  8D rr rr             sta     dropping
+0008EAr 1  8D rr rr             sta     invaded
+0008EDr 1  8D rr rr             sta     dead
+0008F0r 1  8D rr rr             sta     shot_on
+0008F3r 1  8D rr rr             sta     bomb_on
+0008F6r 1  8D rr rr             sta     bomb_on+1
+0008F9r 1  8D rr rr             sta     bomb_on+2
+0008FCr 1  8D rr rr             sta     ufo_on
+0008FFr 1  8D rr rr             sta     expl_t
+000902r 1  8D rr rr             sta     shield_gone
+000905r 1  8D rr rr             sta     key_dir
+000908r 1  8D rr rr             sta     key_hold
+00090Br 1  AD rr rr             lda     wave            ; bombs get more frequent each wave
+00090Er 1  C9 06                cmp     #6
+000910r 1  90 02                bcc     @r
+000912r 1  A9 06                lda     #6
+000914r 1  0A           @r:     asl
+000915r 1  0A                   asl
+000916r 1  18                   clc
+000917r 1  69 06                adc     #6              ; 6 .. 30 out of 256 a frame
+000919r 1  8D rr rr             sta     bomb_rate
+00091Cr 1  A9 78                lda     #PX_START
+00091Er 1  8D rr rr             sta     px
+000921r 1  20 rr rr             jsr     ufo_reset
+000924r 1  A2 BF                ldx     #4*48-1         ; fresh shields
+000926r 1  8A           @sh:    txa
+000927r 1  48                   pha
+000928r 1  C9 30        @m:     cmp     #48             ; (X mod 48)
+00092Ar 1  90 04                bcc     @g
+00092Cr 1  E9 30                sbc     #48
+00092Er 1  B0 F8                bcs     @m
+000930r 1  A8           @g:     tay
+000931r 1  B9 rr rr             lda     gfx_shield,y
+000934r 1  9D rr rr             sta     shields,x
+000937r 1  68                   pla
+000938r 1  AA                   tax
+000939r 1  CA                   dex
+00093Ar 1  E0 FF                cpx     #$FF
+00093Cr 1  D0 E8                bne     @sh
+00093Er 1  60                   rts
+00093Fr 1               
+00093Fr 1               ; the 4 shields: their patterns from the RAM copy, and their names
+00093Fr 1               draw_shields:
+00093Fr 1  A9 00                lda     #<(V_PAT + P_SHIELD*8)
+000941r 1  A0 03                ldy     #>(V_PAT + P_SHIELD*8)
+000943r 1  20 rr rr             jsr     vdp_waddr
+000946r 1  A2 00                ldx     #0              ; X = shield * 48 + line * 3 + column
+000948r 1  8E rr rr             stx     sd_s
+00094Br 1  A0 00        @s:     ldy     #0              ; pattern row 0/1, pattern 0-2, its 8 lines
+00094Dr 1  8C rr rr             sty     sd_tr
+000950r 1  A9 00        @tr:    lda     #0
+000952r 1  8D rr rr             sta     sd_tc
+000955r 1  AD rr rr     @tc:    lda     sd_s            ; first byte of this pattern:
+000958r 1  8D rr rr             sta     tmp             ; shield*48 + tr*24 + tc
+00095Br 1  0A                   asl
+00095Cr 1  18                   clc
+00095Dr 1  6D rr rr             adc     tmp
+000960r 1  0A                   asl
+000961r 1  0A                   asl
+000962r 1  0A                   asl
+000963r 1  0A                   asl                     ; shield * 48
+000964r 1  8D rr rr             sta     tmp
+000967r 1  AD rr rr             lda     sd_tr
+00096Ar 1  F0 02                beq     @t0
+00096Cr 1  A9 18                lda     #24
+00096Er 1  18           @t0:    clc
+00096Fr 1  6D rr rr             adc     tmp
+000972r 1  6D rr rr             adc     sd_tc
+000975r 1  AA                   tax
+000976r 1  A0 08                ldy     #8
+000978r 1  BD rr rr     @l:     lda     shields,x
+00097Br 1  8D 1C 7F             sta     VDP_DATA
+00097Er 1  E8                   inx
+00097Fr 1  E8                   inx
+000980r 1  E8                   inx
+000981r 1  88                   dey
+000982r 1  D0 F4                bne     @l
+000984r 1  EE rr rr             inc     sd_tc
+000987r 1  AD rr rr             lda     sd_tc
+00098Ar 1  C9 03                cmp     #3
+00098Cr 1  D0 C7                bne     @tc
+00098Er 1  EE rr rr             inc     sd_tr
+000991r 1  AD rr rr             lda     sd_tr
+000994r 1  C9 02                cmp     #2
+000996r 1  D0 B8                bne     @tr
+000998r 1  EE rr rr             inc     sd_s
+00099Br 1  AD rr rr             lda     sd_s
+00099Er 1  C9 04                cmp     #4
+0009A0r 1  D0 A9                bne     @s
+0009A2r 1                       ; the names: P_SHIELD + shield*6 + tr*3 + tc
+0009A2r 1  A9 00                lda     #0
+0009A4r 1  8D rr rr             sta     sd_s
+0009A7r 1  AE rr rr     @n:     ldx     sd_s
+0009AAr 1  BD rr rr             lda     shield_col,x
+0009ADr 1  AA                   tax
+0009AEr 1  A0 12                ldy     #SHIELD_ROW
+0009B0r 1  20 rr rr             jsr     vdp_at
+0009B3r 1  AD rr rr             lda     sd_s
+0009B6r 1  0A                   asl
+0009B7r 1  8D rr rr             sta     tmp
+0009BAr 1  0A                   asl
+0009BBr 1  18                   clc
+0009BCr 1  6D rr rr             adc     tmp             ; * 6
+0009BFr 1  69 60                adc     #P_SHIELD
+0009C1r 1  8D 1C 7F             sta     VDP_DATA
+0009C4r 1  69 01                adc     #1
+0009C6r 1  8D 1C 7F             sta     VDP_DATA
+0009C9r 1  69 01                adc     #1
+0009CBr 1  8D 1C 7F             sta     VDP_DATA
+0009CEr 1  8D rr rr             sta     tmp
+0009D1r 1  A0 13                ldy     #SHIELD_ROW+1
+0009D3r 1  20 rr rr             jsr     vdp_at
+0009D6r 1  AD rr rr             lda     tmp
+0009D9r 1  69 01                adc     #1
+0009DBr 1  8D 1C 7F             sta     VDP_DATA
+0009DEr 1  69 01                adc     #1
+0009E0r 1  8D 1C 7F             sta     VDP_DATA
+0009E3r 1  69 01                adc     #1
+0009E5r 1  8D 1C 7F             sta     VDP_DATA
+0009E8r 1  EE rr rr             inc     sd_s
+0009EBr 1  AD rr rr             lda     sd_s
+0009EEr 1  C9 04                cmp     #4
+0009F0r 1  D0 B5                bne     @n
+0009F2r 1  60                   rts
+0009F3r 1               
+0009F3r 1               ; the invaders have come down to the shields: remove them
+0009F3r 1               wipe_shields:
+0009F3r 1  AD rr rr             lda     shield_gone
+0009F6r 1  D0 32                bne     @done
+0009F8r 1  EE rr rr             inc     shield_gone
+0009FBr 1  A2 BF                ldx     #4*48-1
+0009FDr 1  A9 00                lda     #0
+0009FFr 1  9D rr rr     @z:     sta     shields,x
+000A02r 1  CA                   dex
+000A03r 1  E0 FF                cpx     #$FF
+000A05r 1  D0 F8                bne     @z
+000A07r 1  A2 00                ldx     #0
+000A09r 1  A0 12                ldy     #SHIELD_ROW
+000A0Br 1  20 rr rr             jsr     vdp_at
+000A0Er 1  A9 40                lda     #64
+000A10r 1  8D rr rr             sta     vdp_n
+000A13r 1  A9 00                lda     #0
+000A15r 1  8D rr rr             sta     vdp_n+1
+000A18r 1  A9 00                lda     #P_BLANK
+000A1Ar 1  20 rr rr             jsr     vdp_fill
+000A1Dr 1  A2 04                ldx     #NROWS-1        ; (any invaders on those lines again)
+000A1Fr 1  BD rr rr     @r:     lda     alive,x
+000A22r 1  F0 03                beq     @n
+000A24r 1  20 rr rr             jsr     draw_row
+000A27r 1  CA           @n:     dex
+000A28r 1  10 F5                bpl     @r
+000A2Ar 1  60           @done:  rts
+000A2Br 1               
+000A2Br 1               ; ============================================================================
+000A2Br 1               ; shields: 4 bitmaps of 24 x 16 pixels (3 bytes a line, bit 7 = left)
+000A2Br 1               ; ============================================================================
+000A2Br 1               
+000A2Br 1               ; is pixel X, Y part of a shield?  Carry set if so; then sh_i = its byte in
+000A2Br 1               ; shields, sh_m = its bit, and sh_va = the VRAM address of its pattern byte.
+000A2Br 1               ; Preserves X and Y.
+000A2Br 1               shield_px:
+000A2Br 1  8E rr rr             stx     sh_x
+000A2Er 1  8C rr rr             sty     sh_y
+000A31r 1  98                   tya
+000A32r 1  38                   sec
+000A33r 1  E9 90                sbc     #SHIELD_Y
+000A35r 1  C9 10                cmp     #16
+000A37r 1  B0 11                bcs     @no
+000A39r 1  8D rr rr             sta     sh_line
+000A3Cr 1  A0 03                ldy     #3
+000A3Er 1  8A           @k:     txa
+000A3Fr 1  38                   sec
+000A40r 1  F9 rr rr             sbc     shield_x,y
+000A43r 1  C9 18                cmp     #24
+000A45r 1  90 0B                bcc     @found
+000A47r 1  88                   dey
+000A48r 1  10 F4                bpl     @k
+000A4Ar 1  AE rr rr     @no:    ldx     sh_x
+000A4Dr 1  AC rr rr             ldy     sh_y
+000A50r 1  18                   clc
+000A51r 1  60                   rts
+000A52r 1  8D rr rr     @found: sta     sh_col          ; 0-23
+000A55r 1  8C rr rr             sty     sh_s
+000A58r 1  29 07                and     #7
+000A5Ar 1  AA                   tax
+000A5Br 1  BD rr rr             lda     bitmask_hi,x
+000A5Er 1  8D rr rr             sta     sh_m
+000A61r 1  AD rr rr             lda     sh_col          ; byte = shield*48 + line*3 + col/8
+000A64r 1  4A                   lsr
+000A65r 1  4A                   lsr
+000A66r 1  4A                   lsr
+000A67r 1  8D rr rr             sta     sh_tc
+000A6Ar 1  AD rr rr             lda     sh_line
+000A6Dr 1  0A                   asl
+000A6Er 1  6D rr rr             adc     sh_line
+000A71r 1  6D rr rr             adc     sh_tc
+000A74r 1  8D rr rr             sta     sh_i
+000A77r 1  AD rr rr             lda     sh_s            ; + shield*48
+000A7Ar 1  0A                   asl
+000A7Br 1  6D rr rr             adc     sh_s
+000A7Er 1  0A                   asl
+000A7Fr 1  0A                   asl
+000A80r 1  0A                   asl
+000A81r 1  0A                   asl
+000A82r 1  18                   clc
+000A83r 1  6D rr rr             adc     sh_i
+000A86r 1  8D rr rr             sta     sh_i
+000A89r 1  AA                   tax
+000A8Ar 1  BD rr rr             lda     shields,x
+000A8Dr 1  2D rr rr             and     sh_m
+000A90r 1  F0 B8                beq     @no
+000A92r 1                       ; the VRAM byte: (P_SHIELD + s*6 + (line/8)*3 + col/8) * 8 + line & 7
+000A92r 1  AD rr rr             lda     sh_s
+000A95r 1  0A                   asl
+000A96r 1  6D rr rr             adc     sh_s
+000A99r 1  0A                   asl                     ; s * 6
+000A9Ar 1  8D rr rr             sta     tmp3
+000A9Dr 1  AD rr rr             lda     sh_line
+000AA0r 1  C9 08                cmp     #8
+000AA2r 1  AD rr rr             lda     tmp3
+000AA5r 1  90 02                bcc     @t
+000AA7r 1  69 02                adc     #3-1            ; (carry is set)
+000AA9r 1  18           @t:     clc
+000AAAr 1  6D rr rr             adc     sh_tc
+000AADr 1  69 60                adc     #P_SHIELD       ; the pattern number (< $80)
+000AAFr 1  8D rr rr             sta     sh_va+1         ; * 8, into 16 bits
+000AB2r 1  A9 00                lda     #0
+000AB4r 1  0E rr rr             asl     sh_va+1
+000AB7r 1  2A                   rol
+000AB8r 1  0E rr rr             asl     sh_va+1
+000ABBr 1  2A                   rol
+000ABCr 1  0E rr rr             asl     sh_va+1
+000ABFr 1  2A                   rol
+000AC0r 1  8D rr rr             sta     tmp3            ; high byte
+000AC3r 1  AD rr rr             lda     sh_line
+000AC6r 1  29 07                and     #7
+000AC8r 1  0D rr rr             ora     sh_va+1
+000ACBr 1  8D rr rr             sta     sh_va
+000ACEr 1  AD rr rr             lda     tmp3
+000AD1r 1  8D rr rr             sta     sh_va+1
+000AD4r 1  AE rr rr             ldx     sh_x
+000AD7r 1  AC rr rr             ldy     sh_y
+000ADAr 1  38                   sec
+000ADBr 1  60                   rts
+000ADCr 1               
+000ADCr 1               ; clear the pixel shield_px found.  Preserves X and Y.
+000ADCr 1               shield_clr:
+000ADCr 1  8E rr rr             stx     sh_x2
+000ADFr 1  AE rr rr             ldx     sh_i
+000AE2r 1  AD rr rr             lda     sh_m
+000AE5r 1  49 FF                eor     #$FF
+000AE7r 1  3D rr rr             and     shields,x
+000AEAr 1  9D rr rr             sta     shields,x
+000AEDr 1  48                   pha
+000AEEr 1  AD rr rr             lda     sh_va
+000AF1r 1  8D 1D 7F             sta     VDP_CTRL
+000AF4r 1  AD rr rr             lda     sh_va+1
+000AF7r 1  09 40                ora     #$40 + >V_PAT
+000AF9r 1  8D 1D 7F             sta     VDP_CTRL
+000AFCr 1  68                   pla
+000AFDr 1  8D 1C 7F             sta     VDP_DATA
+000B00r 1  AE rr rr             ldx     sh_x2
+000B03r 1  60                   rts
+000B04r 1               
+000B04r 1               ; blast a hole round X, Y: the shield pixels in a 3 x 3 square (and a few
+000B04r 1               ; more at random).  Preserves X and Y.
+000B04r 1               shield_blast:
+000B04r 1  8E rr rr             stx     bl_x
+000B07r 1  8C rr rr             sty     bl_y
+000B0Ar 1  A9 0C                lda     #12
+000B0Cr 1  8D rr rr             sta     bl_n
+000B0Fr 1  AE rr rr     @l:     ldx     bl_n
+000B12r 1  AD rr rr             lda     bl_y
+000B15r 1  18                   clc
+000B16r 1  7D rr rr             adc     blast_dy,x
+000B19r 1  A8                   tay
+000B1Ar 1  AD rr rr             lda     bl_x
+000B1Dr 1  18                   clc
+000B1Er 1  7D rr rr             adc     blast_dx,x
+000B21r 1  AA                   tax
+000B22r 1  20 rr rr             jsr     shield_px
+000B25r 1  90 0F                bcc     @next
+000B27r 1  AD rr rr             lda     bl_n
+000B2Ar 1  C9 09                cmp     #9
+000B2Cr 1  90 05                bcc     @clr            ; the square: always
+000B2Er 1  20 rr rr             jsr     rand
+000B31r 1  30 03                bmi     @next           ; the rest: half of them
+000B33r 1  20 rr rr     @clr:   jsr     shield_clr
+000B36r 1  CE rr rr     @next:  dec     bl_n
+000B39r 1  10 D4                bpl     @l
+000B3Br 1  AE rr rr             ldx     bl_x
+000B3Er 1  AC rr rr             ldy     bl_y
+000B41r 1  60                   rts
+000B42r 1               
+000B42r 1               ; ============================================================================
+000B42r 1               ; keyboard / gamepad
+000B42r 1               ; ============================================================================
+000B42r 1               read_keys:
+000B42r 1  A9 00                lda     #0
+000B44r 1  8D rr rr             sta     key_fire
+000B47r 1  AD rr rr             lda     key_hold        ; a direction key moves for KEY_HOLD frames
+000B4Ar 1  F0 0A                beq     @nh             ; (its auto-repeat keeps it going)
+000B4Cr 1  CE rr rr             dec     key_hold
+000B4Fr 1  D0 05                bne     @nh
+000B51r 1  A9 00                lda     #0
+000B53r 1  8D rr rr             sta     key_dir
+000B56r 1  AD rr rr     @nh:    lda     padold          ; the pad, in either mode: held = moving
+000B59r 1  8D rr rr             sta     pad_prev
+000B5Cr 1  20 rr rr             jsr     read_pad
+000B5Fr 1  AD rr rr             lda     pad
+000B62r 1  29 C0                and     #PAD_LEFT | PAD_RIGHT
+000B64r 1  F0 17                beq     @nopad
+000B66r 1  A2 01                ldx     #1
+000B68r 1  29 40                and     #PAD_LEFT
+000B6Ar 1  F0 02                beq     @pr
+000B6Cr 1  A2 FF                ldx     #$FF
+000B6Er 1  8E rr rr     @pr:    stx     key_dir
+000B71r 1  A9 00                lda     #0
+000B73r 1  8D rr rr             sta     key_hold
+000B76r 1  A9 01                lda     #1
+000B78r 1  8D rr rr             sta     pad_mv
+000B7Br 1  D0 0D                bne     @pf
+000B7Dr 1  AD rr rr     @nopad: lda     pad_mv          ; let go: stop at once
+000B80r 1  F0 08                beq     @pf
+000B82r 1  A9 00                lda     #0
+000B84r 1  8D rr rr             sta     pad_mv
+000B87r 1  8D rr rr             sta     key_dir
+000B8Ar 1  AD rr rr     @pf:    lda     pad
+000B8Dr 1  29 03                and     #PAD_A | PAD_B
+000B8Fr 1  F0 05                beq     @nf
+000B91r 1  A9 01                lda     #1
+000B93r 1  8D rr rr             sta     key_fire
+000B96r 1  AD rr rr     @nf:    lda     padnew
+000B99r 1  29 08                and     #PAD_START
+000B9Br 1  F0 03                beq     @l
+000B9Dr 1  20 rr rr             jsr     pad_pause
+000BA0r 1  20 00 FE     @l:     jsr     getc
+000BA3r 1  90 06                bcc     @done
+000BA5r 1  20 rr rr             jsr     handle_key
+000BA8r 1  4C rr rr             jmp     @l
+000BABr 1  60           @done:  rts
+000BACr 1               
+000BACr 1               handle_key:
+000BACr 1  AE rr rr             ldx     esc_st          ; ESC [ C / ESC [ D: arrows from a terminal
+000BAFr 1  F0 24                beq     @plain
+000BB1r 1  E0 01                cpx     #1
+000BB3r 1  D0 12                bne     @esc2
+000BB5r 1  C9 5B                cmp     #'['
+000BB7r 1  F0 0A                beq     @br
+000BB9r 1  C9 4F                cmp     #'O'
+000BBBr 1  F0 06                beq     @br
+000BBDr 1  A9 00                lda     #0
+000BBFr 1  8D rr rr             sta     esc_st
+000BC2r 1  60                   rts
+000BC3r 1  EE rr rr     @br:    inc     esc_st
+000BC6r 1  60                   rts
+000BC7r 1  A2 00        @esc2:  ldx     #0
+000BC9r 1  8E rr rr             stx     esc_st
+000BCCr 1  C9 43                cmp     #'C'
+000BCEr 1  F0 5D                beq     @right
+000BD0r 1  C9 44                cmp     #'D'
+000BD2r 1  F0 55                beq     @left
+000BD4r 1  60                   rts
+000BD5r 1  C9 1B        @plain: cmp     #$1B
+000BD7r 1  D0 04                bne     @np
+000BD9r 1  EE rr rr             inc     esc_st
+000BDCr 1  60                   rts
+000BDDr 1  C9 10        @np:    cmp     #KEY_LEFT       ; the AVR keyboard's arrow keys
+000BDFr 1  F0 48                beq     @left
+000BE1r 1  C9 04                cmp     #KEY_RIGHT
+000BE3r 1  F0 48                beq     @right
+000BE5r 1  C9 18                cmp     #KEY_DOWN
+000BE7r 1  F0 4F                beq     @stop
+000BE9r 1  20 rr rr             jsr     pad_typed       ; W A S D space: typed by the pad?
+000BECr 1  90 10                bcc     @kb
+000BEEr 1  AE rr rr             ldx     ctrl            ; gamepad mode: always ignored
+000BF1r 1  D0 0A                bne     @ign
+000BF3r 1  AE rr rr             ldx     pad             ; or while a pad button is (was) held
+000BF6r 1  D0 05                bne     @ign
+000BF8r 1  AE rr rr             ldx     pad_prev
+000BFBr 1  F0 01                beq     @kb
+000BFDr 1  60           @ign:   rts
+000BFEr 1  C9 20        @kb:    cmp     #' '
+000C00r 1  F0 3F                beq     @fire
+000C02r 1  C9 2C                cmp     #','
+000C04r 1  F0 23                beq     @left
+000C06r 1  C9 2E                cmp     #'.'
+000C08r 1  F0 23                beq     @right
+000C0Ar 1  29 DF                and     #$DF            ; letters to upper case
+000C0Cr 1  C9 41                cmp     #'A'
+000C0Er 1  F0 19                beq     @left
+000C10r 1  C9 44                cmp     #'D'
+000C12r 1  F0 19                beq     @right
+000C14r 1  C9 53                cmp     #'S'
+000C16r 1  F0 20                beq     @stop
+000C18r 1  C9 57                cmp     #'W'
+000C1Ar 1  F0 25                beq     @fire
+000C1Cr 1  C9 51                cmp     #'Q'
+000C1Er 1  F0 27                beq     @quit
+000C20r 1  C9 50                cmp     #'P'
+000C22r 1  F0 29                beq     @pause
+000C24r 1  C9 4D                cmp     #'M'
+000C26r 1  F0 3C                beq     toggle_sound
+000C28r 1  60                   rts
+000C29r 1  A9 FF        @left:  lda     #$FF
+000C2Br 1  D0 02                bne     @dir
+000C2Dr 1  A9 01        @right: lda     #1
+000C2Fr 1  8D rr rr     @dir:   sta     key_dir
+000C32r 1  A9 07                lda     #KEY_HOLD
+000C34r 1  8D rr rr             sta     key_hold
+000C37r 1  60                   rts
+000C38r 1  A9 00        @stop:  lda     #0
+000C3Ar 1  8D rr rr             sta     key_dir
+000C3Dr 1  8D rr rr             sta     key_hold
+000C40r 1  60                   rts
+000C41r 1  A9 01        @fire:  lda     #1
+000C43r 1  8D rr rr             sta     key_fire
+000C46r 1  60                   rts
+000C47r 1  A9 01        @quit:  lda     #1
+000C49r 1  8D rr rr             sta     quit
+000C4Cr 1  60                   rts
+000C4Dr 1  20 rr rr     @pause: jsr     sfx_hush
+000C50r 1  20 rr rr     @pw:    jsr     frame_idle_q
+000C53r 1  20 00 FE             jsr     getc
+000C56r 1  90 F8                bcc     @pw
+000C58r 1  A9 00                lda     #0
+000C5Ar 1  8D rr rr             sta     key_dir
+000C5Dr 1  8D rr rr             sta     key_hold
+000C60r 1  60                   rts
+000C61r 1               
+000C61r 1               ; keeps the random numbers going in a pause (the sound stays quiet)
+000C61r 1               frame_idle_q:
+000C61r 1  4C rr rr             jmp     rand
+000C64r 1               
+000C64r 1               toggle_sound:
+000C64r 1  AD rr rr             lda     sfx_mute
+000C67r 1  49 01                eor     #1
+000C69r 1  8D rr rr             sta     sfx_mute
+000C6Cr 1  4C rr rr             jmp     sfx_hush
+000C6Fr 1               
+000C6Fr 1               ; pause until Start is pressed again (or a key)
+000C6Fr 1               pad_pause:
+000C6Fr 1  20 rr rr             jsr     sfx_hush
+000C72r 1  20 rr rr     @l:     jsr     read_pad
+000C75r 1  AD rr rr             lda     padnew
+000C78r 1  29 08                and     #PAD_START
+000C7Ar 1  D0 05                bne     @done
+000C7Cr 1  20 00 FE             jsr     getc
+000C7Fr 1  90 F1                bcc     @l
+000C81r 1  4C rr rr     @done:  jmp     flush_in
+000C84r 1               
+000C84r 1               ; ============================================================================
+000C84r 1               ; the cannon and its shot
+000C84r 1               ; ============================================================================
+000C84r 1               move_player:
+000C84r 1  AD rr rr             lda     key_dir
+000C87r 1  F0 34                beq     @done
+000C89r 1  AD rr rr             lda     frame_odd       ; 1.5 pixels a frame: 1, then 2
+000C8Cr 1  49 01                eor     #1
+000C8Er 1  8D rr rr             sta     frame_odd
+000C91r 1  18                   clc
+000C92r 1  69 01                adc     #1
+000C94r 1  8D rr rr             sta     tmp
+000C97r 1  AD rr rr             lda     key_dir
+000C9Ar 1  30 0F                bmi     @left
+000C9Cr 1  AD rr rr             lda     px
+000C9Fr 1  18                   clc
+000CA0r 1  6D rr rr             adc     tmp
+000CA3r 1  C9 EF                cmp     #PX_MAX+1
+000CA5r 1  90 13                bcc     @set
+000CA7r 1  A9 EE                lda     #PX_MAX
+000CA9r 1  D0 0F                bne     @set
+000CABr 1  AD rr rr     @left:  lda     px
+000CAEr 1  38                   sec
+000CAFr 1  ED rr rr             sbc     tmp
+000CB2r 1  90 04                bcc     @min
+000CB4r 1  C9 04                cmp     #PX_MIN
+000CB6r 1  B0 02                bcs     @set
+000CB8r 1  A9 04        @min:   lda     #PX_MIN
+000CBAr 1  8D rr rr     @set:   sta     px
+000CBDr 1               @done:  ; (on into draw_player)
+000CBDr 1               
+000CBDr 1               draw_player:
+000CBDr 1  A9 A7                lda     #PLAYER_Y-1
+000CBFr 1  8D rr rr             sta     spr_tab+S_CANNON*4
+000CC2r 1  AD rr rr             lda     px
+000CC5r 1  8D rr rr             sta     spr_tab+S_CANNON*4+1
+000CC8r 1  A9 00                lda     #SP_CANNON
+000CCAr 1  8D rr rr             sta     spr_tab+S_CANNON*4+2
+000CCDr 1  A9 03                lda     #C_CANNON
+000CCFr 1  8D rr rr             sta     spr_tab+S_CANNON*4+3
+000CD2r 1  60                   rts
+000CD3r 1               
+000CD3r 1  AD rr rr     fire:   lda     key_fire
+000CD6r 1  F0 1F                beq     @done
+000CD8r 1  AD rr rr             lda     shot_on
+000CDBr 1  D0 1A                bne     @done
+000CDDr 1  AD rr rr             lda     px              ; the gun is at the sprite's 8th pixel
+000CE0r 1  8D rr rr             sta     shot_x
+000CE3r 1  A9 A4                lda     #PLAYER_Y-4
+000CE5r 1  8D rr rr             sta     shot_y
+000CE8r 1  A9 01                lda     #1
+000CEAr 1  8D rr rr             sta     shot_on
+000CEDr 1  20 rr rr             jsr     draw_shot
+000CF0r 1  A9 04                lda     #SND_SHOT
+000CF2r 1  A2 04                ldx     #4
+000CF4r 1  4C rr rr             jmp     sfx_play
+000CF7r 1  60           @done:  rts
+000CF8r 1               
+000CF8r 1               draw_shot:
+000CF8r 1  AD rr rr             lda     shot_y
+000CFBr 1  38                   sec
+000CFCr 1  E9 01                sbc     #1
+000CFEr 1  8D rr rr             sta     spr_tab+S_SHOT*4
+000D01r 1  AD rr rr             lda     shot_x
+000D04r 1  8D rr rr             sta     spr_tab+S_SHOT*4+1
+000D07r 1  A9 04                lda     #SP_SHOT
+000D09r 1  8D rr rr             sta     spr_tab+S_SHOT*4+2
+000D0Cr 1  A9 0F                lda     #C_SHOT
+000D0Er 1  8D rr rr             sta     spr_tab+S_SHOT*4+3
+000D11r 1  60                   rts
+000D12r 1               
+000D12r 1               ; the shot goes up 4 pixels a frame, checked a pixel at a time
+000D12r 1               move_shot:
+000D12r 1  AD rr rr             lda     shot_on
+000D15r 1  F0 26                beq     @done
+000D17r 1  A9 04                lda     #4
+000D19r 1  8D rr rr             sta     shot_n
+000D1Cr 1  CE rr rr     @step:  dec     shot_y
+000D1Fr 1  AD rr rr             lda     shot_y
+000D22r 1  C9 09                cmp     #9              ; the status line
+000D24r 1  90 0D                bcc     @off
+000D26r 1  20 rr rr             jsr     shot_hits
+000D29r 1  B0 08                bcs     @off
+000D2Br 1  CE rr rr             dec     shot_n
+000D2Er 1  D0 EC                bne     @step
+000D30r 1  4C rr rr             jmp     draw_shot
+000D33r 1  A9 00        @off:   lda     #0
+000D35r 1  8D rr rr             sta     shot_on
+000D38r 1  A9 C0                lda     #HIDE_Y
+000D3Ar 1  8D rr rr             sta     spr_tab+S_SHOT*4
+000D3Dr 1  60           @done:  rts
+000D3Er 1               
+000D3Er 1               ; has the shot's tip (shot_x + 7, shot_y) hit something?  Carry set if so.
+000D3Er 1               shot_hits:
+000D3Er 1  AD rr rr             lda     shot_x
+000D41r 1  18                   clc
+000D42r 1  69 07                adc     #7
+000D44r 1  8D rr rr             sta     hit_x
+000D47r 1  AD rr rr             lda     ufo_on          ; the saucer?
+000D4Ar 1  F0 1B                beq     @inv
+000D4Cr 1  AD rr rr             lda     shot_y
+000D4Fr 1  C9 0C                cmp     #UFO_Y
+000D51r 1  90 14                bcc     @inv
+000D53r 1  C9 13                cmp     #UFO_Y+7
+000D55r 1  B0 10                bcs     @inv
+000D57r 1  AD rr rr             lda     hit_x
+000D5Ar 1  38                   sec
+000D5Br 1  ED rr rr             sbc     ufo_x
+000D5Er 1  C9 10                cmp     #16
+000D60r 1  B0 05                bcs     @inv
+000D62r 1  20 rr rr             jsr     ufo_hit
+000D65r 1  38                   sec
+000D66r 1  60                   rts
+000D67r 1  AD rr rr     @inv:   lda     shot_y          ; an invader?
+000D6Ar 1  4A                   lsr
+000D6Br 1  4A                   lsr
+000D6Cr 1  4A                   lsr
+000D6Dr 1  8D rr rr             sta     hit_row
+000D70r 1  A2 04                ldx     #NROWS-1
+000D72r 1  BD rr rr     @rl:    lda     alive,x
+000D75r 1  F0 15                beq     @next
+000D77r 1  BD rr rr             lda     rowy,x
+000D7Ar 1  CD rr rr             cmp     hit_row
+000D7Dr 1  D0 0D                bne     @next
+000D7Fr 1  AD rr rr             lda     hit_x
+000D82r 1  20 rr rr             jsr     slot_at
+000D85r 1  90 05                bcc     @next
+000D87r 1  20 rr rr             jsr     kill_inv
+000D8Ar 1  38                   sec
+000D8Br 1  60                   rts
+000D8Cr 1  CA           @next:  dex
+000D8Dr 1  10 E3                bpl     @rl
+000D8Fr 1  AE rr rr             ldx     hit_x           ; a shield?
+000D92r 1  AC rr rr             ldy     shot_y
+000D95r 1  20 rr rr             jsr     shield_px
+000D98r 1  90 04                bcc     @r
+000D9Ar 1  20 rr rr             jsr     shield_blast
+000D9Dr 1  38                   sec
+000D9Er 1  60           @r:     rts
+000D9Fr 1               
+000D9Fr 1               ; ============================================================================
+000D9Fr 1               ; the invaders
+000D9Fr 1               ; ============================================================================
+000D9Fr 1               
+000D9Fr 1               ; row X's left pixel (of slot 0), signed 16 bit -> rx (lo), rx+1 (hi):
+000D9Fr 1               ; rowc * 8 + rowph * 2.  Preserves X.
+000D9Fr 1               row_left:
+000D9Fr 1  A9 00                lda     #0
+000DA1r 1  8D rr rr             sta     rx+1
+000DA4r 1  BD rr rr             lda     rowc,x
+000DA7r 1  10 03                bpl     @p
+000DA9r 1  CE rr rr             dec     rx+1            ; (negative)
+000DACr 1  0A           @p:     asl
+000DADr 1  2E rr rr             rol     rx+1
+000DB0r 1  0A                   asl
+000DB1r 1  2E rr rr             rol     rx+1
+000DB4r 1  0A                   asl
+000DB5r 1  2E rr rr             rol     rx+1
+000DB8r 1  8D rr rr             sta     rx
+000DBBr 1  BD rr rr             lda     rowph,x
+000DBEr 1  0A                   asl
+000DBFr 1  18                   clc
+000DC0r 1  6D rr rr             adc     rx
+000DC3r 1  8D rr rr             sta     rx
+000DC6r 1  90 03                bcc     @r
+000DC8r 1  EE rr rr             inc     rx+1
+000DCBr 1  60           @r:     rts
+000DCCr 1               
+000DCCr 1               ; is pixel column A on a live invader of row X?  Carry set if so, with its
+000DCCr 1               ; slot in Y.  Preserves X.
+000DCCr 1               slot_at:
+000DCCr 1  8D rr rr             sta     sa_x
+000DCFr 1  20 rr rr             jsr     row_left
+000DD2r 1  AD rr rr             lda     sa_x            ; rel = x - left (16 bit), must be 0-191
+000DD5r 1  38                   sec
+000DD6r 1  ED rr rr             sbc     rx
+000DD9r 1  8D rr rr             sta     sa_rel
+000DDCr 1  A9 00                lda     #0
+000DDEr 1  ED rr rr             sbc     rx+1
+000DE1r 1  D0 35                bne     @no
+000DE3r 1  AD rr rr             lda     sa_rel
+000DE6r 1  C9 C0                cmp     #NCOLS*CELL
+000DE8r 1  B0 2E                bcs     @no
+000DEAr 1  A0 00                ldy     #0              ; slot = rel / 24, rel = rel mod 24
+000DECr 1  C9 18        @d:     cmp     #CELL
+000DEEr 1  90 05                bcc     @got
+000DF0r 1  E9 18                sbc     #CELL
+000DF2r 1  C8                   iny
+000DF3r 1  D0 F7                bne     @d
+000DF5r 1  8D rr rr     @got:   sta     sa_rel
+000DF8r 1  BD rr rr             lda     alive,x
+000DFBr 1  39 rr rr             and     bitmask,y
+000DFEr 1  F0 18                beq     @no
+000E00r 1  8E rr rr             stx     sa_row
+000E03r 1  BD rr rr             lda     rowkind,x       ; inside the picture?
+000E06r 1  AA                   tax
+000E07r 1  AD rr rr             lda     sa_rel
+000E0Ar 1  38                   sec
+000E0Br 1  FD rr rr             sbc     inv_ox,x
+000E0Er 1  DD rr rr             cmp     inv_w,x
+000E11r 1  AE rr rr             ldx     sa_row
+000E14r 1  B0 02                bcs     @no
+000E16r 1  38                   sec
+000E17r 1  60                   rts
+000E18r 1  18           @no:    clc
+000E19r 1  60                   rts
+000E1Ar 1               
+000E1Ar 1               ; draw row X: blank, 8 cells of 3 patterns, blank, starting a cell to the
+000E1Ar 1               ; left of slot 0 (only the part on the screen).  Preserves X.
+000E1Ar 1               draw_row:
+000E1Ar 1  8E rr rr             stx     dr_r
+000E1Dr 1  A0 00                ldy     #0              ; build the 26 names in rowbuf
+000E1Fr 1  8C rr rr             sty     rowbuf
+000E22r 1  C8                   iny
+000E23r 1  BD rr rr             lda     rowkind,x       ; the first pattern: kind*24 + frame*12 + pos*3
+000E26r 1  8D rr rr             sta     tmp
+000E29r 1  0A                   asl
+000E2Ar 1  18                   clc
+000E2Br 1  6D rr rr             adc     tmp
+000E2Er 1  0A                   asl
+000E2Fr 1  0A                   asl
+000E30r 1  0A                   asl                     ; kind * 24
+000E31r 1  8D rr rr             sta     tmp
+000E34r 1  BD rr rr             lda     rowfrm,x
+000E37r 1  F0 02                beq     @f0
+000E39r 1  A9 0C                lda     #12
+000E3Br 1  18           @f0:    clc
+000E3Cr 1  6D rr rr             adc     tmp
+000E3Fr 1  8D rr rr             sta     tmp
+000E42r 1  BD rr rr             lda     rowph,x
+000E45r 1  0A                   asl
+000E46r 1  7D rr rr             adc     rowph,x
+000E49r 1  6D rr rr             adc     tmp
+000E4Cr 1  69 80                adc     #P_INV
+000E4Er 1  8D rr rr             sta     dr_base
+000E51r 1  BD rr rr             lda     alive,x
+000E54r 1  8D rr rr             sta     dr_mask
+000E57r 1  A2 08                ldx     #NCOLS
+000E59r 1  4E rr rr     @s:     lsr     dr_mask
+000E5Cr 1  90 16                bcc     @dead
+000E5Er 1  AD rr rr             lda     dr_base
+000E61r 1  99 rr rr             sta     rowbuf,y
+000E64r 1  C8                   iny
+000E65r 1  69 00                adc     #0              ; (carry set: +1)
+000E67r 1  99 rr rr             sta     rowbuf,y
+000E6Ar 1  C8                   iny
+000E6Br 1  18                   clc
+000E6Cr 1  69 01                adc     #1
+000E6Er 1  99 rr rr             sta     rowbuf,y
+000E71r 1  C8                   iny
+000E72r 1  D0 0E                bne     @n
+000E74r 1  A9 00        @dead:  lda     #P_BLANK
+000E76r 1  99 rr rr             sta     rowbuf,y
+000E79r 1  C8                   iny
+000E7Ar 1  99 rr rr             sta     rowbuf,y
+000E7Dr 1  C8                   iny
+000E7Er 1  99 rr rr             sta     rowbuf,y
+000E81r 1  C8                   iny
+000E82r 1  CA           @n:     dex
+000E83r 1  D0 D4                bne     @s
+000E85r 1  A9 00                lda     #P_BLANK
+000E87r 1  99 rr rr             sta     rowbuf,y        ; [25]
+000E8Ar 1                       ; the part on the screen: columns rowc-1 .. rowc+24
+000E8Ar 1  AE rr rr             ldx     dr_r
+000E8Dr 1  BD rr rr             lda     rowc,x
+000E90r 1  38                   sec
+000E91r 1  E9 01                sbc     #1
+000E93r 1  8D rr rr             sta     dr_c            ; first column (signed)
+000E96r 1  A0 00                ldy     #0              ; first index into rowbuf
+000E98r 1  AD rr rr             lda     dr_c
+000E9Br 1  10 0B                bpl     @on
+000E9Dr 1  49 FF                eor     #$FF            ; off the left: skip -c names
+000E9Fr 1  18                   clc
+000EA0r 1  69 01                adc     #1
+000EA2r 1  A8                   tay
+000EA3r 1  A9 00                lda     #0
+000EA5r 1  8D rr rr             sta     dr_c
+000EA8r 1  8C rr rr     @on:    sty     dr_i
+000EABr 1  C0 1A                cpy     #26
+000EADr 1  B0 2A                bcs     @out
+000EAFr 1  AD rr rr             lda     dr_c
+000EB2r 1  C9 20                cmp     #32
+000EB4r 1  B0 23                bcs     @out
+000EB6r 1  AE rr rr             ldx     dr_c
+000EB9r 1  AC rr rr             ldy     dr_r
+000EBCr 1  B9 rr rr             lda     rowy,y
+000EBFr 1  A8                   tay
+000EC0r 1  20 rr rr             jsr     vdp_at
+000EC3r 1  AC rr rr             ldy     dr_i
+000EC6r 1  AE rr rr             ldx     dr_c
+000EC9r 1  B9 rr rr     @w:     lda     rowbuf,y
+000ECCr 1  8D 1C 7F             sta     VDP_DATA
+000ECFr 1  C8                   iny
+000ED0r 1  C0 1A                cpy     #26
+000ED2r 1  B0 05                bcs     @out
+000ED4r 1  E8                   inx
+000ED5r 1  E0 20                cpx     #32
+000ED7r 1  90 F0                bcc     @w
+000ED9r 1  AE rr rr     @out:   ldx     dr_r
+000EDCr 1  60                   rts
+000EDDr 1               
+000EDDr 1               ; blank cell row Y (all of it).  Preserves X.
+000EDDr 1               blank_line:
+000EDDr 1  8E rr rr             stx     tmp2
+000EE0r 1  A2 00                ldx     #0
+000EE2r 1  20 rr rr             jsr     vdp_at
+000EE5r 1  A9 20                lda     #32
+000EE7r 1  8D rr rr             sta     vdp_n
+000EEAr 1  A9 00                lda     #0
+000EECr 1  8D rr rr             sta     vdp_n+1
+000EEFr 1  A9 00                lda     #P_BLANK
+000EF1r 1  20 rr rr             jsr     vdp_fill
+000EF4r 1  AE rr rr             ldx     tmp2
+000EF7r 1  60                   rts
+000EF8r 1               
+000EF8r 1               ; move one row a step: the rows take turns, from the bottom up, as in the
+000EF8r 1               ; arcade game.  The step rate goes up as invaders are shot.
+000EF8r 1               inv_tick:
+000EF8r 1  CE rr rr             dec     inv_t
+000EFBr 1  F0 01                beq     @go
+000EFDr 1  60                   rts
+000EFEr 1  AD rr rr     @go:    lda     alive_count     ; frames a step = alive / 8 + 1
+000F01r 1  4A                   lsr
+000F02r 1  4A                   lsr
+000F03r 1  4A                   lsr
+000F04r 1  18                   clc
+000F05r 1  69 01                adc     #1
+000F07r 1  8D rr rr             sta     inv_t
+000F0Ar 1  AE rr rr     @find:  ldx     cur_row
+000F0Dr 1  30 52                bmi     @sweep_end
+000F0Fr 1  BD rr rr             lda     alive,x
+000F12r 1  D0 06                bne     @do
+000F14r 1  CE rr rr             dec     cur_row
+000F17r 1  4C rr rr             jmp     @find
+000F1Ar 1  BD rr rr     @do:    lda     rowfrm,x        ; the next picture
+000F1Dr 1  49 01                eor     #1
+000F1Fr 1  9D rr rr             sta     rowfrm,x
+000F22r 1  AD rr rr             lda     dropping
+000F25r 1  F0 0C                beq     @horiz
+000F27r 1  BC rr rr             ldy     rowy,x          ; down a cell row
+000F2Ar 1  20 rr rr             jsr     blank_line
+000F2Dr 1  FE rr rr             inc     rowy,x
+000F30r 1  4C rr rr             jmp     @draw
+000F33r 1  AD rr rr     @horiz: lda     dir
+000F36r 1  30 15                bmi     @l
+000F38r 1  FE rr rr             inc     rowph,x         ; 2 pixels right
+000F3Br 1  BD rr rr             lda     rowph,x
+000F3Er 1  C9 04                cmp     #4
+000F40r 1  D0 18                bne     @draw
+000F42r 1  A9 00                lda     #0
+000F44r 1  9D rr rr             sta     rowph,x
+000F47r 1  FE rr rr             inc     rowc,x
+000F4Ar 1  4C rr rr             jmp     @draw
+000F4Dr 1  DE rr rr     @l:     dec     rowph,x         ; 2 pixels left
+000F50r 1  10 08                bpl     @draw
+000F52r 1  A9 03                lda     #3
+000F54r 1  9D rr rr             sta     rowph,x
+000F57r 1  DE rr rr             dec     rowc,x
+000F5Ar 1  20 rr rr     @draw:  jsr     draw_row
+000F5Dr 1  CE rr rr             dec     cur_row
+000F60r 1  60                   rts
+000F61r 1               
+000F61r 1               @sweep_end:                     ; every row has moved: the next sweep
+000F61r 1  AD rr rr             lda     march           ; the march: one of 4 notes a step
+000F64r 1  18                   clc
+000F65r 1  69 01                adc     #1
+000F67r 1  29 03                and     #3
+000F69r 1  8D rr rr             sta     march
+000F6Cr 1  A2 00                ldx     #0
+000F6Er 1  20 rr rr             jsr     sfx_play        ; (SND_MARCH0 .. 3 are 0 .. 3)
+000F71r 1  A9 04                lda     #NROWS-1
+000F73r 1  8D rr rr             sta     cur_row
+000F76r 1  A9 01                lda     #1
+000F78r 1  8D rr rr             sta     inv_t
+000F7Br 1  AD rr rr             lda     dropping
+000F7Er 1  F0 08                beq     @edges
+000F80r 1  A9 00                lda     #0
+000F82r 1  8D rr rr             sta     dropping
+000F85r 1  4C rr rr             jmp     after_drop
+000F88r 1  20 rr rr     @edges: jsr     form_extent
+000F8Br 1  AD rr rr             lda     dir
+000F8Er 1  30 0D                bmi     @left
+000F90r 1  AD rr rr             lda     ext_max+1       ; right edge + 2 past EDGE_R?
+000F93r 1  D0 17                bne     @drop
+000F95r 1  AD rr rr             lda     ext_max
+000F98r 1  C9 F9                cmp     #EDGE_R-2
+000F9Ar 1  B0 10                bcs     @drop
+000F9Cr 1  60                   rts
+000F9Dr 1  AD rr rr     @left:  lda     ext_min+1       ; left edge - 2 below EDGE_L?
+000FA0r 1  30 0A                bmi     @drop
+000FA2r 1  D0 07                bne     @ok
+000FA4r 1  AD rr rr             lda     ext_min
+000FA7r 1  C9 06                cmp     #EDGE_L+2
+000FA9r 1  90 01                bcc     @drop
+000FABr 1  60           @ok:    rts
+000FACr 1  A9 01        @drop:  lda     #1
+000FAEr 1  8D rr rr             sta     dropping
+000FB1r 1  AD rr rr             lda     dir
+000FB4r 1  49 FF                eor     #$FF
+000FB6r 1  18                   clc
+000FB7r 1  69 01                adc     #1
+000FB9r 1  8D rr rr             sta     dir
+000FBCr 1  60                   rts
+000FBDr 1               
+000FBDr 1               ; the left and right pixels of the live invaders -> ext_min, ext_max (16 bit)
+000FBDr 1               form_extent:
+000FBDr 1  A9 FF                lda     #$FF
+000FBFr 1  8D rr rr             sta     ext_min
+000FC2r 1  A9 7F                lda     #$7F
+000FC4r 1  8D rr rr             sta     ext_min+1
+000FC7r 1  A9 00                lda     #0
+000FC9r 1  8D rr rr             sta     ext_max
+000FCCr 1  A9 FF                lda     #$FF
+000FCEr 1  8D rr rr             sta     ext_max+1
+000FD1r 1  A2 04                ldx     #NROWS-1
+000FD3r 1  BD rr rr     @l:     lda     alive,x
+000FD6r 1  F0 69                beq     @next
+000FD8r 1  20 rr rr             jsr     row_left
+000FDBr 1  BD rr rr             lda     alive,x         ; first live slot -> Y
+000FDEr 1  A0 FF                ldy     #$FF
+000FE0r 1  C8           @f:     iny
+000FE1r 1  4A                   lsr
+000FE2r 1  90 FC                bcc     @f
+000FE4r 1  20 rr rr             jsr     slot_px         ; left of its picture
+000FE7r 1  AD rr rr             lda     ex_t+1          ; < ext_min? (signed)
+000FEAr 1  CD rr rr             cmp     ext_min+1
+000FEDr 1  30 0A                bmi     @lo
+000FEFr 1  D0 14                bne     @hi
+000FF1r 1  AD rr rr             lda     ex_t
+000FF4r 1  CD rr rr             cmp     ext_min
+000FF7r 1  B0 0C                bcs     @hi
+000FF9r 1  AD rr rr     @lo:    lda     ex_t
+000FFCr 1  8D rr rr             sta     ext_min
+000FFFr 1  AD rr rr             lda     ex_t+1
+001002r 1  8D rr rr             sta     ext_min+1
+001005r 1  BD rr rr     @hi:    lda     alive,x         ; last live slot -> Y
+001008r 1  A0 08                ldy     #NCOLS
+00100Ar 1  88           @h:     dey
+00100Br 1  0A                   asl
+00100Cr 1  90 FC                bcc     @h
+00100Er 1  20 rr rr             jsr     slot_px
+001011r 1  BC rr rr             ldy     rowkind,x       ; its right pixel
+001014r 1  AD rr rr             lda     ex_t
+001017r 1  18                   clc
+001018r 1  79 rr rr             adc     inv_w,y
+00101Br 1  8D rr rr             sta     ex_t
+00101Er 1  90 03                bcc     :+
+001020r 1  EE rr rr             inc     ex_t+1
+001023r 1  AD rr rr     :       lda     ex_t+1          ; > ext_max? (signed)
+001026r 1  CD rr rr             cmp     ext_max+1
+001029r 1  30 16                bmi     @next
+00102Br 1  D0 08                bne     @max
+00102Dr 1  AD rr rr             lda     ex_t
+001030r 1  CD rr rr             cmp     ext_max
+001033r 1  90 0C                bcc     @next
+001035r 1  AD rr rr     @max:   lda     ex_t
+001038r 1  8D rr rr             sta     ext_max
+00103Br 1  AD rr rr             lda     ex_t+1
+00103Er 1  8D rr rr             sta     ext_max+1
+001041r 1  CA           @next:  dex
+001042r 1  10 8F                bpl     @l
+001044r 1  60                   rts
+001045r 1               
+001045r 1               ; ex_t = rx + slot Y * 24 + the picture's offset for row X's kind (16 bit).
+001045r 1               ; Preserves X and Y.
+001045r 1               slot_px:
+001045r 1  8C rr rr             sty     ex_y
+001048r 1  AD rr rr             lda     rx
+00104Br 1  8D rr rr             sta     ex_t
+00104Er 1  AD rr rr             lda     rx+1
+001051r 1  8D rr rr             sta     ex_t+1
+001054r 1  98                   tya
+001055r 1  F0 11                beq     @k
+001057r 1  AD rr rr     @m:     lda     ex_t
+00105Ar 1  18                   clc
+00105Br 1  69 18                adc     #CELL
+00105Dr 1  8D rr rr             sta     ex_t
+001060r 1  90 03                bcc     :+
+001062r 1  EE rr rr             inc     ex_t+1
+001065r 1  88           :       dey
+001066r 1  D0 EF                bne     @m
+001068r 1  BC rr rr     @k:     ldy     rowkind,x
+00106Br 1  AD rr rr             lda     ex_t
+00106Er 1  18                   clc
+00106Fr 1  79 rr rr             adc     inv_ox,y
+001072r 1  8D rr rr             sta     ex_t
+001075r 1  90 03                bcc     :+
+001077r 1  EE rr rr             inc     ex_t+1
+00107Ar 1  AC rr rr     :       ldy     ex_y
+00107Dr 1  60                   rts
+00107Er 1               
+00107Er 1               ; after the formation has come down a row: shields gone?  landed?
+00107Er 1               after_drop:
+00107Er 1  A2 04                ldx     #NROWS-1
+001080r 1  BD rr rr     @l:     lda     alive,x         ; the lowest live row
+001083r 1  D0 04                bne     @found
+001085r 1  CA                   dex
+001086r 1  10 F8                bpl     @l
+001088r 1  60                   rts
+001089r 1  BD rr rr     @found: lda     rowy,x
+00108Cr 1  C9 15                cmp     #PLAYER_ROW
+00108Er 1  90 06                bcc     @1
+001090r 1  A9 01                lda     #1
+001092r 1  8D rr rr             sta     invaded
+001095r 1  60                   rts
+001096r 1  C9 11        @1:     cmp     #SHIELD_ROW-1   ; touching the shields?
+001098r 1  90 03                bcc     @2
+00109Ar 1  4C rr rr             jmp     wipe_shields
+00109Dr 1  60           @2:     rts
+00109Er 1               
+00109Er 1               ; shoot the invader in row X, slot Y
+00109Er 1               kill_inv:
+00109Er 1  B9 rr rr             lda     bitmask,y
+0010A1r 1  49 FF                eor     #$FF
+0010A3r 1  3D rr rr             and     alive,x
+0010A6r 1  9D rr rr             sta     alive,x
+0010A9r 1  CE rr rr             dec     alive_count
+0010ACr 1  8E rr rr             stx     kv_r
+0010AFr 1  8C rr rr             sty     kv_s
+0010B2r 1  20 rr rr             jsr     row_left        ; the explosion where it was
+0010B5r 1  20 rr rr             jsr     slot_px
+0010B8r 1  AD rr rr             lda     ex_t
+0010BBr 1  38                   sec
+0010BCr 1  E9 01                sbc     #1
+0010BEr 1  8D rr rr             sta     spr_tab+S_EXPL*4+1
+0010C1r 1  BD rr rr             lda     rowy,x
+0010C4r 1  0A                   asl
+0010C5r 1  0A                   asl
+0010C6r 1  0A                   asl
+0010C7r 1  38                   sec
+0010C8r 1  E9 01                sbc     #1
+0010CAr 1  8D rr rr             sta     spr_tab+S_EXPL*4
+0010CDr 1  A9 14                lda     #SP_EXPL
+0010CFr 1  8D rr rr             sta     spr_tab+S_EXPL*4+2
+0010D2r 1  A9 0F                lda     #C_EXPL
+0010D4r 1  8D rr rr             sta     spr_tab+S_EXPL*4+3
+0010D7r 1  A9 10                lda     #16
+0010D9r 1  8D rr rr             sta     expl_t
+0010DCr 1  AE rr rr             ldx     kv_r
+0010DFr 1  20 rr rr             jsr     draw_row        ; (the row without it)
+0010E2r 1  A9 05                lda     #SND_KILL
+0010E4r 1  A2 05                ldx     #5
+0010E6r 1  20 rr rr             jsr     sfx_play
+0010E9r 1  AE rr rr             ldx     kv_r
+0010ECr 1  BD rr rr             lda     points,x
+0010EFr 1  A0 00                ldy     #0
+0010F1r 1  4C rr rr             jmp     add_score
+0010F4r 1               
+0010F4r 1               expl_tick:
+0010F4r 1  AD rr rr             lda     expl_t
+0010F7r 1  F0 0A                beq     @done
+0010F9r 1  CE rr rr             dec     expl_t
+0010FCr 1  D0 05                bne     @done
+0010FEr 1  A9 C0                lda     #HIDE_Y
+001100r 1  8D rr rr             sta     spr_tab+S_EXPL*4
+001103r 1  60           @done:  rts
+001104r 1               
+001104r 1               ; ============================================================================
+001104r 1               ; bombs: 3 of them, falling a pixel a frame (2 from wave 4)
+001104r 1               ; ============================================================================
+001104r 1               spawn_bomb:
+001104r 1  20 rr rr             jsr     rand
+001107r 1  CD rr rr             cmp     bomb_rate
+00110Ar 1  B0 0A                bcs     @done
+00110Cr 1  A2 02                ldx     #2
+00110Er 1  BD rr rr     @free:  lda     bomb_on,x
+001111r 1  F0 04                beq     @got
+001113r 1  CA                   dex
+001114r 1  10 F8                bpl     @free
+001116r 1  60           @done:  rts
+001117r 1  8E rr rr     @got:   stx     bm_i
+00111Ar 1  20 rr rr             jsr     rand
+00111Dr 1  29 07                and     #NCOLS-1
+00111Fr 1  A8                   tay                     ; a random column ...
+001120r 1  A2 04                ldx     #NROWS-1
+001122r 1  BD rr rr     @r:     lda     alive,x         ; ... and its lowest invader drops it
+001125r 1  39 rr rr             and     bitmask,y
+001128r 1  D0 04                bne     @found
+00112Ar 1  CA                   dex
+00112Br 1  10 F5                bpl     @r
+00112Dr 1  60                   rts
+00112Er 1  20 rr rr     @found: jsr     row_left
+001131r 1  20 rr rr             jsr     slot_px         ; the middle of the picture - 1
+001134r 1  BC rr rr             ldy     rowkind,x
+001137r 1  B9 rr rr             lda     inv_w,y
+00113Ar 1  4A                   lsr
+00113Br 1  38                   sec
+00113Cr 1  E9 01                sbc     #1
+00113Er 1  18                   clc
+00113Fr 1  6D rr rr             adc     ex_t
+001142r 1  8D rr rr             sta     tmp
+001145r 1  AD rr rr             lda     ex_t+1
+001148r 1  69 00                adc     #0
+00114Ar 1  D0 CA                bne     @done           ; (off the screen)
+00114Cr 1  BD rr rr             lda     rowy,x
+00114Fr 1  0A                   asl
+001150r 1  0A                   asl
+001151r 1  0A                   asl
+001152r 1  69 08                adc     #8
+001154r 1  AE rr rr             ldx     bm_i
+001157r 1  9D rr rr             sta     bomb_y,x
+00115Ar 1  AD rr rr             lda     tmp
+00115Dr 1  9D rr rr             sta     bomb_x,x
+001160r 1  A9 01                lda     #1
+001162r 1  9D rr rr             sta     bomb_on,x
+001165r 1  60                   rts
+001166r 1               
+001166r 1               move_bombs:
+001166r 1  A9 02                lda     #2
+001168r 1  8D rr rr             sta     bm_i
+00116Br 1  AE rr rr     @l:     ldx     bm_i
+00116Er 1  BD rr rr             lda     bomb_on,x
+001171r 1  D0 08                bne     @on
+001173r 1  A9 C0                lda     #HIDE_Y
+001175r 1  8D rr rr             sta     tmp
+001178r 1  4C rr rr             jmp     @spr
+00117Br 1  AD rr rr     @on:    lda     wave            ; speed: 1, or 2 from wave 4
+00117Er 1  C9 03                cmp     #3
+001180r 1  A9 01                lda     #1
+001182r 1  69 00                adc     #0
+001184r 1  8D rr rr             sta     bm_n
+001187r 1  AE rr rr     @step:  ldx     bm_i
+00118Ar 1  FE rr rr             inc     bomb_y,x
+00118Dr 1  BD rr rr             lda     bomb_y,x        ; its tip: x + 1, y + 6
+001190r 1  18                   clc
+001191r 1  69 06                adc     #6
+001193r 1  A8                   tay
+001194r 1  C0 B4                cpy     #GROUND_Y
+001196r 1  B0 3E                bcs     @gone
+001198r 1  BD rr rr             lda     bomb_x,x
+00119Br 1  18                   clc
+00119Cr 1  69 01                adc     #1
+00119Er 1  AA                   tax
+00119Fr 1  C0 A9                cpy     #PLAYER_Y+1     ; the cannon?
+0011A1r 1  90 13                bcc     @noplayer
+0011A3r 1  8A                   txa
+0011A4r 1  38                   sec
+0011A5r 1  ED rr rr             sbc     px
+0011A8r 1  38                   sec
+0011A9r 1  E9 01                sbc     #1
+0011ABr 1  C9 0D                cmp     #13
+0011ADr 1  B0 07                bcs     @noplayer
+0011AFr 1  A9 01                lda     #1
+0011B1r 1  8D rr rr             sta     dead
+0011B4r 1  D0 20                bne     @gone
+0011B6r 1               @noplayer:
+0011B6r 1  20 rr rr             jsr     shield_px
+0011B9r 1  90 07                bcc     @next
+0011BBr 1  C8                   iny                     ; the hole is a little lower
+0011BCr 1  20 rr rr             jsr     shield_blast
+0011BFr 1  4C rr rr             jmp     @gone
+0011C2r 1  CE rr rr     @next:  dec     bm_n
+0011C5r 1  D0 C0                bne     @step
+0011C7r 1  AE rr rr             ldx     bm_i
+0011CAr 1  BD rr rr             lda     bomb_y,x
+0011CDr 1  38                   sec
+0011CEr 1  E9 01                sbc     #1
+0011D0r 1  8D rr rr             sta     tmp
+0011D3r 1  4C rr rr             jmp     @spr
+0011D6r 1  AE rr rr     @gone:  ldx     bm_i
+0011D9r 1  A9 00                lda     #0
+0011DBr 1  9D rr rr             sta     bomb_on,x
+0011DEr 1  A9 C0                lda     #HIDE_Y
+0011E0r 1  8D rr rr             sta     tmp
+0011E3r 1  AD rr rr     @spr:   lda     bm_i            ; its sprite
+0011E6r 1  18                   clc
+0011E7r 1  69 02                adc     #S_BOMB
+0011E9r 1  0A                   asl
+0011EAr 1  0A                   asl
+0011EBr 1  A8                   tay
+0011ECr 1  AE rr rr             ldx     bm_i
+0011EFr 1  AD rr rr             lda     tmp
+0011F2r 1  99 rr rr             sta     spr_tab,y
+0011F5r 1  BD rr rr             lda     bomb_x,x
+0011F8r 1  99 rr rr             sta     spr_tab+1,y
+0011FBr 1  BD rr rr             lda     bomb_y,x        ; the zigzag turns every 4 pixels
+0011FEr 1  29 04                and     #4
+001200r 1  18                   clc
+001201r 1  69 08                adc     #SP_BOMB
+001203r 1  99 rr rr             sta     spr_tab+2,y
+001206r 1  A9 0F                lda     #C_BOMB
+001208r 1  99 rr rr             sta     spr_tab+3,y
+00120Br 1  CE rr rr             dec     bm_i
+00120Er 1  30 03                bmi     @done
+001210r 1  4C rr rr             jmp     @l
+001213r 1  60           @done:  rts
+001214r 1               
+001214r 1               ; the cannon was hit
+001214r 1               player_died:
+001214r 1  A9 00                lda     #0
+001216r 1  8D rr rr             sta     dead
+001219r 1  A2 01                ldx     #1              ; (the saucer's hum stops)
+00121Br 1  20 rr rr             jsr     sfx_stop
+00121Er 1  A9 08                lda     #SND_DEATH
+001220r 1  A2 05                ldx     #5
+001222r 1  20 rr rr             jsr     sfx_play
+001225r 1  A9 09                lda     #SND_DEATH2
+001227r 1  A2 03                ldx     #3
+001229r 1  20 rr rr             jsr     sfx_play
+00122Cr 1  A9 00                lda     #0              ; the shot and the bombs go
+00122Er 1  8D rr rr             sta     shot_on
+001231r 1  8D rr rr             sta     bomb_on
+001234r 1  8D rr rr             sta     bomb_on+1
+001237r 1  8D rr rr             sta     bomb_on+2
+00123Ar 1  A9 C0                lda     #HIDE_Y
+00123Cr 1  8D rr rr             sta     spr_tab+S_SHOT*4
+00123Fr 1  8D rr rr             sta     spr_tab+S_BOMB*4
+001242r 1  8D rr rr             sta     spr_tab+S_BOMB*4+4
+001245r 1  8D rr rr             sta     spr_tab+S_BOMB*4+8
+001248r 1  A9 0C                lda     #12             ; the wreck flickers for a second
+00124Ar 1  8D rr rr             sta     tmp3
+00124Dr 1  AD rr rr     @flash: lda     tmp3
+001250r 1  29 01                and     #1
+001252r 1  0A                   asl
+001253r 1  0A                   asl
+001254r 1  18                   clc
+001255r 1  69 18                adc     #SP_PEXPL
+001257r 1  8D rr rr             sta     spr_tab+S_CANNON*4+2
+00125Ar 1  A9 05                lda     #5
+00125Cr 1  20 rr rr             jsr     wait_frames
+00125Fr 1  20 rr rr             jsr     ufo_tick        ; (the saucer flies on)
+001262r 1  CE rr rr             dec     tmp3
+001265r 1  D0 E6                bne     @flash
+001267r 1  A9 C0                lda     #HIDE_Y
+001269r 1  8D rr rr             sta     spr_tab+S_CANNON*4
+00126Cr 1  CE rr rr             dec     lives
+00126Fr 1  20 rr rr             jsr     show_lives
+001272r 1  AD rr rr             lda     lives
+001275r 1  F0 21                beq     @done
+001277r 1  A9 1E                lda     #30
+001279r 1  20 rr rr             jsr     wait_frames
+00127Cr 1  A9 78                lda     #PX_START
+00127Er 1  8D rr rr             sta     px
+001281r 1  A9 00                lda     #0
+001283r 1  8D rr rr             sta     key_dir
+001286r 1  8D rr rr             sta     key_hold
+001289r 1  20 rr rr             jsr     draw_player
+00128Cr 1  AD rr rr             lda     ufo_on          ; the saucer's hum again
+00128Fr 1  F0 07                beq     @done
+001291r 1  A9 06                lda     #SND_UFO
+001293r 1  A2 01                ldx     #1
+001295r 1  20 rr rr             jsr     sfx_play
+001298r 1  60           @done:  rts
+001299r 1               
+001299r 1               ; ============================================================================
+001299r 1               ; the saucer
+001299r 1               ; ============================================================================
+001299r 1               
+001299r 1               ; the next one comes in 10-18 seconds
+001299r 1               ufo_reset:
+001299r 1  20 rr rr             jsr     rand
+00129Cr 1  29 7F                and     #$7F
+00129Er 1  18                   clc
+00129Fr 1  69 58                adc     #<600
+0012A1r 1  8D rr rr             sta     ufo_t
+0012A4r 1  A9 02                lda     #>600
+0012A6r 1  69 00                adc     #0
+0012A8r 1  8D rr rr             sta     ufo_t+1
+0012ABr 1  20 rr rr             jsr     rand
+0012AEr 1  29 01                and     #1
+0012B0r 1  18                   clc
+0012B1r 1  6D rr rr             adc     ufo_t+1
+0012B4r 1  8D rr rr             sta     ufo_t+1
+0012B7r 1  60                   rts
+0012B8r 1               
+0012B8r 1               ufo_tick:
+0012B8r 1  AD rr rr             lda     ufo_on
+0012BBr 1  D0 41                bne     @move
+0012BDr 1  AD rr rr             lda     ufo_t           ; count down
+0012C0r 1  D0 08                bne     @d
+0012C2r 1  AD rr rr             lda     ufo_t+1
+0012C5r 1  F0 07                beq     @start
+0012C7r 1  CE rr rr             dec     ufo_t+1
+0012CAr 1  CE rr rr     @d:     dec     ufo_t
+0012CDr 1  60                   rts
+0012CEr 1  AD rr rr     @start: lda     alive_count     ; not for the last few
+0012D1r 1  C9 08                cmp     #8
+0012D3r 1  90 3D                bcc     @done
+0012D5r 1  20 rr rr             jsr     rand
+0012D8r 1  29 01                and     #1
+0012DAr 1  F0 09                beq     @fromleft
+0012DCr 1  A9 F0                lda     #240
+0012DEr 1  8D rr rr             sta     ufo_x
+0012E1r 1  A9 FF                lda     #$FF
+0012E3r 1  D0 07                bne     @go
+0012E5r 1               @fromleft:
+0012E5r 1  A9 00                lda     #0
+0012E7r 1  8D rr rr             sta     ufo_x
+0012EAr 1  A9 01                lda     #1
+0012ECr 1  8D rr rr     @go:    sta     ufo_dir
+0012EFr 1  A9 01                lda     #1
+0012F1r 1  8D rr rr             sta     ufo_on
+0012F4r 1  A9 06                lda     #SND_UFO        ; its hum, in the background
+0012F6r 1  A2 01                ldx     #1
+0012F8r 1  20 rr rr             jsr     sfx_play
+0012FBr 1  4C rr rr             jmp     draw_ufo
+0012FEr 1  AD rr rr     @move:  lda     ufo_x
+001301r 1  18                   clc
+001302r 1  6D rr rr             adc     ufo_dir
+001305r 1  8D rr rr             sta     ufo_x
+001308r 1  C9 F1                cmp     #241            ; gone off either side?
+00130Ar 1  B0 03                bcs     @off
+00130Cr 1  4C rr rr     @draw:  jmp     draw_ufo
+00130Fr 1  20 rr rr     @off:   jsr     ufo_gone
+001312r 1  60           @done:  rts
+001313r 1               
+001313r 1               ufo_gone:
+001313r 1  A9 00                lda     #0
+001315r 1  8D rr rr             sta     ufo_on
+001318r 1  A9 C0                lda     #HIDE_Y
+00131Ar 1  8D rr rr             sta     spr_tab+S_SAUCER*4
+00131Dr 1  A2 01                ldx     #1
+00131Fr 1  20 rr rr             jsr     sfx_stop
+001322r 1  4C rr rr             jmp     ufo_reset
+001325r 1               
+001325r 1               draw_ufo:
+001325r 1  A9 0B                lda     #UFO_Y-1
+001327r 1  8D rr rr             sta     spr_tab+S_SAUCER*4
+00132Ar 1  AD rr rr             lda     ufo_x
+00132Dr 1  8D rr rr             sta     spr_tab+S_SAUCER*4+1
+001330r 1  A9 10                lda     #SP_SAUCER
+001332r 1  8D rr rr             sta     spr_tab+S_SAUCER*4+2
+001335r 1  A9 08                lda     #C_SAUCER
+001337r 1  8D rr rr             sta     spr_tab+S_SAUCER*4+3
+00133Ar 1  60                   rts
+00133Br 1               
+00133Br 1               ufo_hit:
+00133Br 1  AD rr rr             lda     ufo_x           ; an explosion where it was
+00133Er 1  8D rr rr             sta     spr_tab+S_EXPL*4+1
+001341r 1  A9 0B                lda     #UFO_Y-1
+001343r 1  8D rr rr             sta     spr_tab+S_EXPL*4
+001346r 1  A9 14                lda     #SP_EXPL
+001348r 1  8D rr rr             sta     spr_tab+S_EXPL*4+2
+00134Br 1  A9 08                lda     #C_SAUCER
+00134Dr 1  8D rr rr             sta     spr_tab+S_EXPL*4+3
+001350r 1  A9 18                lda     #24
+001352r 1  8D rr rr             sta     expl_t
+001355r 1  20 rr rr             jsr     ufo_gone
+001358r 1  A9 07                lda     #SND_UFO_HIT
+00135Ar 1  A2 05                ldx     #5
+00135Cr 1  20 rr rr             jsr     sfx_play
+00135Fr 1  20 rr rr             jsr     rand            ; 50, 100, 150 or 300 points
+001362r 1  29 03                and     #3
+001364r 1  AA                   tax
+001365r 1  BD rr rr             lda     ufo_pts_lo,x
+001368r 1  BC rr rr             ldy     ufo_pts_hi,x
+00136Br 1  4C rr rr             jmp     add_score
+00136Er 1               
+00136Er 1               ; ============================================================================
+00136Er 1               ; data
+00136Er 1               ; ============================================================================
+00136Er 1                       .segment "RODATA"
+000000r 1               
+000000r 1               ; R0-R7: Graphics I, display off for now, 16 x 16 sprites, no VDP interrupt;
+000000r 1               ; names $1800, colours $2000, patterns $0000, sprites $1B00 / $3800; black
+000000r 1               vdp_regs:
+000000r 1  00 82 06 80          .byte   $00, $82, V_NAME/$400, V_COLOUR/$40, V_PAT/$800, V_SATTR/$80, V_SPAT/$800, $01
+000004r 1  00 36 07 01  
+000008r 1               
+000008r 1  00 01 01 02  rowkind:.byte   0, 1, 1, 2, 2   ; squids, crabs, octopuses
+00000Cr 1  02           
+00000Dr 1  80 98 B0     kind_pat:.byte  P_INV, P_INV+24, P_INV+48
+000010r 1  30 20 20 10  points: .byte   $30, $20, $20, $10, $10
+000014r 1  10           
+000015r 1  50 00 50 00  ufo_pts_lo: .byte $50, $00, $50, $00
+000019r 1  00 01 01 03  ufo_pts_hi: .byte $00, $01, $01, $03
+00001Dr 1  01 02 04 08  bitmask:.byte   $01, $02, $04, $08, $10, $20, $40, $80
+000021r 1  10 20 40 80  
+000025r 1               bitmask_hi:
+000025r 1  80 40 20 10          .byte   $80, $40, $20, $10, $08, $04, $02, $01
+000029r 1  08 04 02 01  
+00002Dr 1  20 58 90 C8  shield_x:   .byte 32, 88, 144, 200          ; left pixel of each shield
+000031r 1  04 0B 12 19  shield_col: .byte 4, 11, 18, 25             ; = shield_x / 8
+000035r 1               ; the hole a hit makes: a 3 x 3 square (0-8), then 4 more at random (9-12)
+000035r 1  00 FF 01 00  blast_dx:   .byte 0, $FF, 1, 0, $FF, 1, 0, $FF, 1, $FE, 2, 0, 0
+000039r 1  FF 01 00 FF  
+00003Dr 1  01 FE 02 00  
+000042r 1  00 00 00 FF  blast_dy:   .byte 0, 0, 0, $FF, $FF, $FF, 1, 1, 1, 0, 0, $FE, 2
+000046r 1  FF FF 01 01  
+00004Ar 1  01 00 00 FE  
+00004Fr 1               
+00004Fr 1                       .include "invaders_gfx.inc"
+00004Fr 2               ; invaders_gfx.inc - made by gen.py; don't edit, run  python gen.py
+00004Fr 2               gfx_font:
+00004Fr 2  00 00 00 00          .byte   $00,$00,$00,$00,$00,$00,$00,$00
+000053r 2  00 00 00 00  
+000057r 2  00 18 18 18          .byte   $00,$18,$18,$18,$18,$00,$18,$00
+00005Br 2  18 00 18 00  
+00005Fr 2  00 3C 3C 3C          .byte   $00,$3C,$3C,$3C,$00,$00,$00,$00
+000063r 2  00 00 00 00  
+000067r 2  3C 3C 7E 3C          .byte   $3C,$3C,$7E,$3C,$7E,$3C,$3C,$00
+00006Br 2  7E 3C 3C 00  
+00006Fr 2  18 3C 78 3C          .byte   $18,$3C,$78,$3C,$1E,$3C,$18,$00
+000073r 2  1E 3C 18 00  
+000077r 2  00 30 3C 18          .byte   $00,$30,$3C,$18,$3C,$0C,$00,$00
+00007Br 2  3C 0C 00 00  
+00007Fr 2  30 78 78 30          .byte   $30,$78,$78,$30,$78,$78,$3C,$00
+000083r 2  78 78 3C 00  
+000087r 2  00 18 18 18          .byte   $00,$18,$18,$18,$00,$00,$00,$00
+00008Br 2  00 00 00 00  
+00008Fr 2  00 18 30 30          .byte   $00,$18,$30,$30,$30,$30,$18,$00
+000093r 2  30 30 18 00  
+000097r 2  00 30 18 18          .byte   $00,$30,$18,$18,$18,$18,$30,$00
+00009Br 2  18 18 30 00  
+00009Fr 2  00 00 6C 38          .byte   $00,$00,$6C,$38,$7C,$38,$6C,$00
+0000A3r 2  7C 38 6C 00  
+0000A7r 2  00 00 18 18          .byte   $00,$00,$18,$18,$7E,$18,$18,$00
+0000ABr 2  7E 18 18 00  
+0000AFr 2  00 00 00 00          .byte   $00,$00,$00,$00,$00,$1C,$18,$30
+0000B3r 2  00 1C 18 30  
+0000B7r 2  00 00 00 00          .byte   $00,$00,$00,$00,$7C,$00,$00,$00
+0000BBr 2  7C 00 00 00  
+0000BFr 2  00 00 00 00          .byte   $00,$00,$00,$00,$00,$18,$3C,$18
+0000C3r 2  00 18 3C 18  
+0000C7r 2  00 0C 0C 18          .byte   $00,$0C,$0C,$18,$30,$60,$60,$00
+0000CBr 2  30 60 60 00  
+0000CFr 2  00 3C 66 66          .byte   $00,$3C,$66,$66,$66,$66,$3C,$00
+0000D3r 2  66 66 3C 00  
+0000D7r 2  00 18 38 18          .byte   $00,$18,$38,$18,$18,$18,$3C,$00
+0000DBr 2  18 18 3C 00  
+0000DFr 2  00 38 6C 0C          .byte   $00,$38,$6C,$0C,$38,$60,$7C,$00
+0000E3r 2  38 60 7C 00  
+0000E7r 2  00 7C 18 38          .byte   $00,$7C,$18,$38,$0C,$6C,$38,$00
+0000EBr 2  0C 6C 38 00  
+0000EFr 2  00 18 38 78          .byte   $00,$18,$38,$78,$7C,$18,$18,$00
+0000F3r 2  7C 18 18 00  
+0000F7r 2  00 7C 60 78          .byte   $00,$7C,$60,$78,$0C,$6C,$38,$00
+0000FBr 2  0C 6C 38 00  
+0000FFr 2  00 38 60 78          .byte   $00,$38,$60,$78,$6C,$6C,$38,$00
+000103r 2  6C 6C 38 00  
+000107r 2  00 7C 0C 18          .byte   $00,$7C,$0C,$18,$18,$30,$30,$00
+00010Br 2  18 30 30 00  
+00010Fr 2  00 38 6C 38          .byte   $00,$38,$6C,$38,$6C,$6C,$38,$00
+000113r 2  6C 6C 38 00  
+000117r 2  00 38 6C 6C          .byte   $00,$38,$6C,$6C,$3C,$0C,$38,$00
+00011Br 2  3C 0C 38 00  
+00011Fr 2  00 00 38 38          .byte   $00,$00,$38,$38,$00,$38,$38,$00
+000123r 2  00 38 38 00  
+000127r 2  00 00 1C 1C          .byte   $00,$00,$1C,$1C,$00,$1C,$18,$30
+00012Br 2  00 1C 18 30  
+00012Fr 2  00 0C 18 30          .byte   $00,$0C,$18,$30,$30,$18,$0C,$00
+000133r 2  30 18 0C 00  
+000137r 2  00 00 00 7C          .byte   $00,$00,$00,$7C,$00,$7C,$00,$00
+00013Br 2  00 7C 00 00  
+00013Fr 2  00 30 18 0C          .byte   $00,$30,$18,$0C,$0C,$18,$30,$00
+000143r 2  0C 18 30 00  
+000147r 2  00 18 3C 0C          .byte   $00,$18,$3C,$0C,$18,$00,$18,$00
+00014Br 2  18 00 18 00  
+00014Fr 2  1C 36 6E 7E          .byte   $1C,$36,$6E,$7E,$7E,$6C,$30,$1C
+000153r 2  7E 6C 30 1C  
+000157r 2  00 38 6C 6C          .byte   $00,$38,$6C,$6C,$7C,$6C,$6C,$00
+00015Br 2  7C 6C 6C 00  
+00015Fr 2  00 78 6C 78          .byte   $00,$78,$6C,$78,$6C,$6C,$78,$00
+000163r 2  6C 6C 78 00  
+000167r 2  00 38 6C 60          .byte   $00,$38,$6C,$60,$60,$6C,$38,$00
+00016Br 2  60 6C 38 00  
+00016Fr 2  00 78 6C 6C          .byte   $00,$78,$6C,$6C,$6C,$6C,$78,$00
+000173r 2  6C 6C 78 00  
+000177r 2  00 7C 60 78          .byte   $00,$7C,$60,$78,$60,$60,$7C,$00
+00017Br 2  60 60 7C 00  
+00017Fr 2  00 7C 60 78          .byte   $00,$7C,$60,$78,$60,$60,$60,$00
+000183r 2  60 60 60 00  
+000187r 2  00 38 6C 60          .byte   $00,$38,$6C,$60,$7C,$6C,$38,$00
+00018Br 2  7C 6C 38 00  
+00018Fr 2  00 6C 6C 7C          .byte   $00,$6C,$6C,$7C,$6C,$6C,$6C,$00
+000193r 2  6C 6C 6C 00  
+000197r 2  00 3C 18 18          .byte   $00,$3C,$18,$18,$18,$18,$3C,$00
+00019Br 2  18 18 3C 00  
+00019Fr 2  00 3C 18 18          .byte   $00,$3C,$18,$18,$18,$78,$30,$00
+0001A3r 2  18 78 30 00  
+0001A7r 2  00 6C 78 70          .byte   $00,$6C,$78,$70,$78,$78,$6C,$00
+0001ABr 2  78 78 6C 00  
+0001AFr 2  00 60 60 60          .byte   $00,$60,$60,$60,$60,$60,$7C,$00
+0001B3r 2  60 60 7C 00  
+0001B7r 2  00 6C 7C 7C          .byte   $00,$6C,$7C,$7C,$6C,$6C,$6C,$00
+0001BBr 2  6C 6C 6C 00  
+0001BFr 2  00 6C 7C 7C          .byte   $00,$6C,$7C,$7C,$7C,$7C,$6C,$00
+0001C3r 2  7C 7C 6C 00  
+0001C7r 2  00 38 6C 6C          .byte   $00,$38,$6C,$6C,$6C,$6C,$38,$00
+0001CBr 2  6C 6C 38 00  
+0001CFr 2  00 78 6C 6C          .byte   $00,$78,$6C,$6C,$78,$60,$60,$00
+0001D3r 2  78 60 60 00  
+0001D7r 2  00 38 6C 6C          .byte   $00,$38,$6C,$6C,$7C,$7C,$38,$0C
+0001DBr 2  7C 7C 38 0C  
+0001DFr 2  00 78 6C 6C          .byte   $00,$78,$6C,$6C,$78,$6C,$6C,$00
+0001E3r 2  78 6C 6C 00  
+0001E7r 2  00 38 6C 30          .byte   $00,$38,$6C,$30,$18,$6C,$38,$00
+0001EBr 2  18 6C 38 00  
+0001EFr 2  00 3C 18 18          .byte   $00,$3C,$18,$18,$18,$18,$18,$00
+0001F3r 2  18 18 18 00  
+0001F7r 2  00 6C 6C 6C          .byte   $00,$6C,$6C,$6C,$6C,$6C,$38,$00
+0001FBr 2  6C 6C 38 00  
+0001FFr 2  00 6C 6C 6C          .byte   $00,$6C,$6C,$6C,$6C,$38,$38,$00
+000203r 2  6C 38 38 00  
+000207r 2  00 6C 6C 6C          .byte   $00,$6C,$6C,$6C,$7C,$7C,$6C,$00
+00020Br 2  7C 7C 6C 00  
+00020Fr 2  00 6C 6C 38          .byte   $00,$6C,$6C,$38,$38,$6C,$6C,$00
+000213r 2  38 6C 6C 00  
+000217r 2  00 66 66 3C          .byte   $00,$66,$66,$3C,$18,$18,$18,$00
+00021Br 2  18 18 18 00  
+00021Fr 2  00 7C 0C 18          .byte   $00,$7C,$0C,$18,$30,$60,$7C,$00
+000223r 2  30 60 7C 00  
+000227r 2  00 3C 30 30          .byte   $00,$3C,$30,$30,$30,$30,$3C,$00
+00022Br 2  30 30 3C 00  
+00022Fr 2  00 60 60 30          .byte   $00,$60,$60,$30,$18,$0C,$0C,$00
+000233r 2  18 0C 0C 00  
+000237r 2  00 3C 0C 0C          .byte   $00,$3C,$0C,$0C,$0C,$0C,$3C,$00
+00023Br 2  0C 0C 3C 00  
+00023Fr 2  00 18 3C 00          .byte   $00,$18,$3C,$00,$00,$00,$00,$00
+000243r 2  00 00 00 00  
+000247r 2  00 00 00 00          .byte   $00,$00,$00,$00,$00,$00,$00,$7C
+00024Br 2  00 00 00 7C  
+00024Fr 2               gfx_inv:
+00024Fr 2  01 03 07 0D          .byte   $01,$03,$07,$0D,$0F,$02,$05,$0A
+000253r 2  0F 02 05 0A  
+000257r 2  80 C0 E0 B0          .byte   $80,$C0,$E0,$B0,$F0,$40,$A0,$50
+00025Br 2  F0 40 A0 50  
+00025Fr 2  00 00 00 00          .byte   $00,$00,$00,$00,$00,$00,$00,$00
+000263r 2  00 00 00 00  
+000267r 2  00 00 01 03          .byte   $00,$00,$01,$03,$03,$00,$01,$02
+00026Br 2  03 00 01 02  
+00026Fr 2  60 F0 F8 6C          .byte   $60,$F0,$F8,$6C,$FC,$90,$68,$94
+000273r 2  FC 90 68 94  
+000277r 2  00 00 00 00          .byte   $00,$00,$00,$00,$00,$00,$00,$00
+00027Br 2  00 00 00 00  
+00027Fr 2  00 00 00 00          .byte   $00,$00,$00,$00,$00,$00,$00,$00
+000283r 2  00 00 00 00  
+000287r 2  18 3C 7E DB          .byte   $18,$3C,$7E,$DB,$FF,$24,$5A,$A5
+00028Br 2  FF 24 5A A5  
+00028Fr 2  00 00 00 00          .byte   $00,$00,$00,$00,$00,$00,$00,$00
+000293r 2  00 00 00 00  
+000297r 2  00 00 00 00          .byte   $00,$00,$00,$00,$00,$00,$00,$00
+00029Br 2  00 00 00 00  
+00029Fr 2  06 0F 1F 36          .byte   $06,$0F,$1F,$36,$3F,$09,$16,$29
+0002A3r 2  3F 09 16 29  
+0002A7r 2  00 00 80 C0          .byte   $00,$00,$80,$C0,$C0,$00,$80,$40
+0002ABr 2  C0 00 80 40  
+0002AFr 2  01 03 07 0D          .byte   $01,$03,$07,$0D,$0F,$05,$08,$04
+0002B3r 2  0F 05 08 04  
+0002B7r 2  80 C0 E0 B0          .byte   $80,$C0,$E0,$B0,$F0,$A0,$10,$20
+0002BBr 2  F0 A0 10 20  
+0002BFr 2  00 00 00 00          .byte   $00,$00,$00,$00,$00,$00,$00,$00
+0002C3r 2  00 00 00 00  
+0002C7r 2  00 00 01 03          .byte   $00,$00,$01,$03,$03,$01,$02,$01
+0002CBr 2  03 01 02 01  
+0002CFr 2  60 F0 F8 6C          .byte   $60,$F0,$F8,$6C,$FC,$68,$04,$08
+0002D3r 2  FC 68 04 08  
+0002D7r 2  00 00 00 00          .byte   $00,$00,$00,$00,$00,$00,$00,$00
+0002DBr 2  00 00 00 00  
+0002DFr 2  00 00 00 00          .byte   $00,$00,$00,$00,$00,$00,$00,$00
+0002E3r 2  00 00 00 00  
+0002E7r 2  18 3C 7E DB          .byte   $18,$3C,$7E,$DB,$FF,$5A,$81,$42
+0002EBr 2  FF 5A 81 42  
+0002EFr 2  00 00 00 00          .byte   $00,$00,$00,$00,$00,$00,$00,$00
+0002F3r 2  00 00 00 00  
+0002F7r 2  00 00 00 00          .byte   $00,$00,$00,$00,$00,$00,$00,$00
+0002FBr 2  00 00 00 00  
+0002FFr 2  06 0F 1F 36          .byte   $06,$0F,$1F,$36,$3F,$16,$20,$10
+000303r 2  3F 16 20 10  
+000307r 2  00 00 80 C0          .byte   $00,$00,$80,$C0,$C0,$80,$40,$80
+00030Br 2  C0 80 40 80  
+00030Fr 2  08 04 0F 1B          .byte   $08,$04,$0F,$1B,$3F,$2F,$28,$06
+000313r 2  3F 2F 28 06  
+000317r 2  20 40 E0 B0          .byte   $20,$40,$E0,$B0,$F8,$E8,$28,$C0
+00031Br 2  F8 E8 28 C0  
+00031Fr 2  00 00 00 00          .byte   $00,$00,$00,$00,$00,$00,$00,$00
+000323r 2  00 00 00 00  
+000327r 2  02 01 03 06          .byte   $02,$01,$03,$06,$0F,$0B,$0A,$01
+00032Br 2  0F 0B 0A 01  
+00032Fr 2  08 10 F8 EC          .byte   $08,$10,$F8,$EC,$FE,$FA,$0A,$B0
+000333r 2  FE FA 0A B0  
+000337r 2  00 00 00 00          .byte   $00,$00,$00,$00,$00,$00,$00,$00
+00033Br 2  00 00 00 00  
+00033Fr 2  00 00 00 01          .byte   $00,$00,$00,$01,$03,$02,$02,$00
+000343r 2  03 02 02 00  
+000347r 2  82 44 FE BB          .byte   $82,$44,$FE,$BB,$FF,$FE,$82,$6C
+00034Br 2  FF FE 82 6C  
+00034Fr 2  00 00 00 00          .byte   $00,$00,$00,$00,$80,$80,$80,$00
+000353r 2  80 80 80 00  
+000357r 2  00 00 00 00          .byte   $00,$00,$00,$00,$00,$00,$00,$00
+00035Br 2  00 00 00 00  
+00035Fr 2  20 11 3F 6E          .byte   $20,$11,$3F,$6E,$FF,$BF,$A0,$1B
+000363r 2  FF BF A0 1B  
+000367r 2  80 00 80 C0          .byte   $80,$00,$80,$C0,$E0,$A0,$A0,$00
+00036Br 2  E0 A0 A0 00  
+00036Fr 2  08 24 2F 3B          .byte   $08,$24,$2F,$3B,$3F,$1F,$08,$10
+000373r 2  3F 1F 08 10  
+000377r 2  20 48 E8 B8          .byte   $20,$48,$E8,$B8,$F8,$F0,$20,$10
+00037Br 2  F8 F0 20 10  
+00037Fr 2  00 00 00 00          .byte   $00,$00,$00,$00,$00,$00,$00,$00
+000383r 2  00 00 00 00  
+000387r 2  02 09 0B 0E          .byte   $02,$09,$0B,$0E,$0F,$07,$02,$04
+00038Br 2  0F 07 02 04  
+00038Fr 2  08 12 FA EE          .byte   $08,$12,$FA,$EE,$FE,$FC,$08,$04
+000393r 2  FE FC 08 04  
+000397r 2  00 00 00 00          .byte   $00,$00,$00,$00,$00,$00,$00,$00
+00039Br 2  00 00 00 00  
+00039Fr 2  00 02 02 03          .byte   $00,$02,$02,$03,$03,$01,$00,$01
+0003A3r 2  03 01 00 01  
+0003A7r 2  82 44 FE BB          .byte   $82,$44,$FE,$BB,$FF,$FF,$82,$01
+0003ABr 2  FF FF 82 01  
+0003AFr 2  00 80 80 80          .byte   $00,$80,$80,$80,$80,$00,$00,$00
+0003B3r 2  80 00 00 00  
+0003B7r 2  00 00 00 00          .byte   $00,$00,$00,$00,$00,$00,$00,$00
+0003BBr 2  00 00 00 00  
+0003BFr 2  20 91 BF EE          .byte   $20,$91,$BF,$EE,$FF,$7F,$20,$40
+0003C3r 2  FF 7F 20 40  
+0003C7r 2  80 20 A0 E0          .byte   $80,$20,$A0,$E0,$E0,$C0,$80,$40
+0003CBr 2  E0 C0 80 40  
+0003CFr 2  03 1F 3F 39          .byte   $03,$1F,$3F,$39,$3F,$06,$0D,$30
+0003D3r 2  3F 06 0D 30  
+0003D7r 2  C0 F8 FC 9C          .byte   $C0,$F8,$FC,$9C,$FC,$60,$B0,$0C
+0003DBr 2  FC 60 B0 0C  
+0003DFr 2  00 00 00 00          .byte   $00,$00,$00,$00,$00,$00,$00,$00
+0003E3r 2  00 00 00 00  
+0003E7r 2  00 07 0F 0E          .byte   $00,$07,$0F,$0E,$0F,$01,$03,$0C
+0003EBr 2  0F 01 03 0C  
+0003EFr 2  F0 FE FF 67          .byte   $F0,$FE,$FF,$67,$FF,$98,$6C,$03
+0003F3r 2  FF 98 6C 03  
+0003F7r 2  00 00 00 00          .byte   $00,$00,$00,$00,$00,$00,$00,$00
+0003FBr 2  00 00 00 00  
+0003FFr 2  00 01 03 03          .byte   $00,$01,$03,$03,$03,$00,$00,$03
+000403r 2  03 00 00 03  
+000407r 2  3C FF FF 99          .byte   $3C,$FF,$FF,$99,$FF,$66,$DB,$00
+00040Br 2  FF 66 DB 00  
+00040Fr 2  00 80 C0 C0          .byte   $00,$80,$C0,$C0,$C0,$00,$00,$C0
+000413r 2  C0 00 00 C0  
+000417r 2  00 00 00 00          .byte   $00,$00,$00,$00,$00,$00,$00,$00
+00041Br 2  00 00 00 00  
+00041Fr 2  0F 7F FF E6          .byte   $0F,$7F,$FF,$E6,$FF,$19,$36,$C0
+000423r 2  FF 19 36 C0  
+000427r 2  00 E0 F0 70          .byte   $00,$E0,$F0,$70,$F0,$80,$C0,$30
+00042Br 2  F0 80 C0 30  
+00042Fr 2  03 1F 3F 39          .byte   $03,$1F,$3F,$39,$3F,$0E,$19,$0C
+000433r 2  3F 0E 19 0C  
+000437r 2  C0 F8 FC 9C          .byte   $C0,$F8,$FC,$9C,$FC,$70,$98,$30
+00043Br 2  FC 70 98 30  
+00043Fr 2  00 00 00 00          .byte   $00,$00,$00,$00,$00,$00,$00,$00
+000443r 2  00 00 00 00  
+000447r 2  00 07 0F 0E          .byte   $00,$07,$0F,$0E,$0F,$03,$06,$03
+00044Br 2  0F 03 06 03  
+00044Fr 2  F0 FE FF 67          .byte   $F0,$FE,$FF,$67,$FF,$9C,$66,$0C
+000453r 2  FF 9C 66 0C  
+000457r 2  00 00 00 00          .byte   $00,$00,$00,$00,$00,$00,$00,$00
+00045Br 2  00 00 00 00  
+00045Fr 2  00 01 03 03          .byte   $00,$01,$03,$03,$03,$00,$01,$00
+000463r 2  03 00 01 00  
+000467r 2  3C FF FF 99          .byte   $3C,$FF,$FF,$99,$FF,$E7,$99,$C3
+00046Br 2  FF E7 99 C3  
+00046Fr 2  00 80 C0 C0          .byte   $00,$80,$C0,$C0,$C0,$00,$80,$00
+000473r 2  C0 00 80 00  
+000477r 2  00 00 00 00          .byte   $00,$00,$00,$00,$00,$00,$00,$00
+00047Br 2  00 00 00 00  
+00047Fr 2  0F 7F FF E6          .byte   $0F,$7F,$FF,$E6,$FF,$39,$66,$30
+000483r 2  FF 39 66 30  
+000487r 2  00 E0 F0 70          .byte   $00,$E0,$F0,$70,$F0,$C0,$60,$C0
+00048Br 2  F0 C0 60 C0  
+00048Fr 2               ; the shield (24 x 16 pixels, 3 bytes a line)
+00048Fr 2               gfx_shield:
+00048Fr 2  0F FF F0             .byte   $0F,$FF,$F0
+000492r 2  1F FF F8             .byte   $1F,$FF,$F8
+000495r 2  3F FF FC             .byte   $3F,$FF,$FC
+000498r 2  7F FF FE             .byte   $7F,$FF,$FE
+00049Br 2  7F FF FE             .byte   $7F,$FF,$FE
+00049Er 2  7F FF FE             .byte   $7F,$FF,$FE
+0004A1r 2  7F FF FE             .byte   $7F,$FF,$FE
+0004A4r 2  7F FF FE             .byte   $7F,$FF,$FE
+0004A7r 2  7F FF FE             .byte   $7F,$FF,$FE
+0004AAr 2  7F FF FE             .byte   $7F,$FF,$FE
+0004ADr 2  7F FF FE             .byte   $7F,$FF,$FE
+0004B0r 2  7F FF FE             .byte   $7F,$FF,$FE
+0004B3r 2  7F 00 FE             .byte   $7F,$00,$FE
+0004B6r 2  7E 00 7E             .byte   $7E,$00,$7E
+0004B9r 2  7C 00 3E             .byte   $7C,$00,$3E
+0004BCr 2  7C 00 3E             .byte   $7C,$00,$3E
+0004BFr 2               gfx_ground:
+0004BFr 2  00 00 00 00          .byte   $00,$00,$00,$00,$FF,$00,$00,$00
+0004C3r 2  FF 00 00 00  
+0004C7r 2               gfx_life:
+0004C7r 2  01 03 03 3F          .byte   $01,$03,$03,$3F,$7F,$7F,$7F,$7F
+0004CBr 2  7F 7F 7F 7F  
+0004CFr 2  00 80 80 F8          .byte   $00,$80,$80,$F8,$FC,$FC,$FC,$FC
+0004D3r 2  FC FC FC FC  
+0004D7r 2               gfx_colours:
+0004D7r 2  00 00 00 00          .byte   $00,$00,$00,$00,$F0,$F0,$F0,$F0
+0004DBr 2  F0 F0 F0 F0  
+0004DFr 2  F0 F0 F0 F0          .byte   $F0,$F0,$F0,$F0,$20,$20,$20,$20
+0004E3r 2  20 20 20 20  
+0004E7r 2  70 70 70 D0          .byte   $70,$70,$70,$D0,$D0,$D0,$B0,$B0
+0004EBr 2  D0 D0 B0 B0  
+0004EFr 2  B0 00 00 00          .byte   $B0,$00,$00,$00,$00,$00,$00,$00
+0004F3r 2  00 00 00 00  
+0004F7r 2               gfx_sprites:
+0004F7r 2  01 03 03 3F          .byte   $01,$03,$03,$3F,$7F,$7F,$7F,$7F
+0004FBr 2  7F 7F 7F 7F  
+0004FFr 2  00 00 00 00          .byte   $00,$00,$00,$00,$00,$00,$00,$00
+000503r 2  00 00 00 00  
+000507r 2  00 80 80 F8          .byte   $00,$80,$80,$F8,$FC,$FC,$FC,$FC
+00050Br 2  FC FC FC FC  
+00050Fr 2  00 00 00 00          .byte   $00,$00,$00,$00,$00,$00,$00,$00
+000513r 2  00 00 00 00  
+000517r 2  01 01 01 01          .byte   $01,$01,$01,$01,$00,$00,$00,$00
+00051Br 2  00 00 00 00  
+00051Fr 2  00 00 00 00          .byte   $00,$00,$00,$00,$00,$00,$00,$00
+000523r 2  00 00 00 00  
+000527r 2  00 00 00 00          .byte   $00,$00,$00,$00,$00,$00,$00,$00
+00052Br 2  00 00 00 00  
+00052Fr 2  00 00 00 00          .byte   $00,$00,$00,$00,$00,$00,$00,$00
+000533r 2  00 00 00 00  
+000537r 2  40 80 40 20          .byte   $40,$80,$40,$20,$40,$80,$40,$00
+00053Br 2  40 80 40 00  
+00053Fr 2  00 00 00 00          .byte   $00,$00,$00,$00,$00,$00,$00,$00
+000543r 2  00 00 00 00  
+000547r 2  00 00 00 00          .byte   $00,$00,$00,$00,$00,$00,$00,$00
+00054Br 2  00 00 00 00  
+00054Fr 2  00 00 00 00          .byte   $00,$00,$00,$00,$00,$00,$00,$00
+000553r 2  00 00 00 00  
+000557r 2  40 20 40 80          .byte   $40,$20,$40,$80,$40,$20,$40,$00
+00055Br 2  40 20 40 00  
+00055Fr 2  00 00 00 00          .byte   $00,$00,$00,$00,$00,$00,$00,$00
+000563r 2  00 00 00 00  
+000567r 2  00 00 00 00          .byte   $00,$00,$00,$00,$00,$00,$00,$00
+00056Br 2  00 00 00 00  
+00056Fr 2  00 00 00 00          .byte   $00,$00,$00,$00,$00,$00,$00,$00
+000573r 2  00 00 00 00  
+000577r 2  07 1F 3F 6D          .byte   $07,$1F,$3F,$6D,$FF,$39,$10,$00
+00057Br 2  FF 39 10 00  
+00057Fr 2  00 00 00 00          .byte   $00,$00,$00,$00,$00,$00,$00,$00
+000583r 2  00 00 00 00  
+000587r 2  E0 F8 FC B6          .byte   $E0,$F8,$FC,$B6,$FF,$9C,$08,$00
+00058Br 2  FF 9C 08 00  
+00058Fr 2  00 00 00 00          .byte   $00,$00,$00,$00,$00,$00,$00,$00
+000593r 2  00 00 00 00  
+000597r 2  08 45 20 10          .byte   $08,$45,$20,$10,$C0,$10,$28,$45
+00059Br 2  C0 10 28 45  
+00059Fr 2  00 00 00 00          .byte   $00,$00,$00,$00,$00,$00,$00,$00
+0005A3r 2  00 00 00 00  
+0005A7r 2  80 10 20 40          .byte   $80,$10,$20,$40,$18,$40,$A0,$10
+0005ABr 2  18 40 A0 10  
+0005AFr 2  00 00 00 00          .byte   $00,$00,$00,$00,$00,$00,$00,$00
+0005B3r 2  00 00 00 00  
+0005B7r 2  04 20 05 4F          .byte   $04,$20,$05,$4F,$1F,$3F,$3F,$7F
+0005BBr 2  1F 3F 3F 7F  
+0005BFr 2  00 00 00 00          .byte   $00,$00,$00,$00,$00,$00,$00,$00
+0005C3r 2  00 00 00 00  
+0005C7r 2  00 48 A0 E4          .byte   $00,$48,$A0,$E4,$F8,$FC,$FC,$FE
+0005CBr 2  F8 FC FC FE  
+0005CFr 2  00 00 00 00          .byte   $00,$00,$00,$00,$00,$00,$00,$00
+0005D3r 2  00 00 00 00  
+0005D7r 2  82 10 4D 17          .byte   $82,$10,$4D,$17,$BF,$3F,$7F,$FF
+0005DBr 2  BF 3F 7F FF  
+0005DFr 2  00 00 00 00          .byte   $00,$00,$00,$00,$00,$00,$00,$00
+0005E3r 2  00 00 00 00  
+0005E7r 2  21 44 28 64          .byte   $21,$44,$28,$64,$F5,$FC,$FE,$FF
+0005EBr 2  F5 FC FE FF  
+0005EFr 2  00 00 00 00          .byte   $00,$00,$00,$00,$00,$00,$00,$00
+0005F3r 2  00 00 00 00  
+0005F7r 2               ; each kind of invader: its left pixel in its 24 pixel cell, its width
+0005F7r 2  04 02 02     inv_ox: .byte   4, 2, 2
+0005FAr 2  08 0B 0C     inv_w:  .byte   8, 11, 12
+0005FDr 2               
+0005FDr 1               
+0005FDr 1               ; texts: column, row, address (0 = the end)
+0005FDr 1               title_txt:
+0005FDr 1  0C 00                .byte   12, 0
+0005FFr 1  rr rr                .word   t_hi
+000601r 1  09 02                .byte   9, 2
+000603r 1  rr rr                .word   t_title
+000605r 1  0D 06                .byte   13, 6
+000607r 1  rr rr                .word   t_mystery
+000609r 1  0D 08                .byte   13, 8
+00060Br 1  rr rr                .word   t_30
+00060Dr 1  0D 0A                .byte   13, 10
+00060Fr 1  rr rr                .word   t_20
+000611r 1  0D 0C                .byte   13, 12
+000613r 1  rr rr                .word   t_10
+000615r 1  01 0F                .byte   1, 15
+000617r 1  rr rr                .word   t_keys1
+000619r 1  01 10                .byte   1, 16
+00061Br 1  rr rr                .word   t_keys2
+00061Dr 1  01 11                .byte   1, 17
+00061Fr 1  rr rr                .word   t_keys3
+000621r 1  06 16                .byte   6, 22
+000623r 1  rr rr                .word   t_press
+000625r 1  00                   .byte   0
+000626r 1  48 49 2D 53  t_hi:     .byte "HI-SCORE", 0
+00062Ar 1  43 4F 52 45  
+00062Er 1  00           
+00062Fr 1  53 50 41 43  t_title:  .byte "SPACE  INVADERS", 0
+000633r 1  45 20 20 49  
+000637r 1  4E 56 41 44  
+00063Fr 1  3D 20 3F 20  t_mystery:.byte "= ? MYSTERY", 0
+000643r 1  4D 59 53 54  
+000647r 1  45 52 59 00  
+00064Br 1  3D 20 33 30  t_30:     .byte "= 30 POINTS", 0
+00064Fr 1  20 50 4F 49  
+000653r 1  4E 54 53 00  
+000657r 1  3D 20 32 30  t_20:     .byte "= 20 POINTS", 0
+00065Br 1  20 50 4F 49  
+00065Fr 1  4E 54 53 00  
+000663r 1  3D 20 31 30  t_10:     .byte "= 10 POINTS", 0
+000667r 1  20 50 4F 49  
+00066Br 1  4E 54 53 00  
+00066Fr 1  4B 45 59 53  t_keys1:  .byte "KEYS: A/D OR ARROWS, SPACE FIRE", 0
+000673r 1  3A 20 41 2F  
+000677r 1  44 20 4F 52  
+00068Fr 1  50 41 44 3A  t_keys2:  .byte "PAD:  LEFT/RIGHT, A OR B FIRE", 0
+000693r 1  20 20 4C 45  
+000697r 1  46 54 2F 52  
+0006ADr 1  50 2F 53 54  t_keys3:  .byte "P/START PAUSE  M SOUND  Q QUIT", 0
+0006B1r 1  41 52 54 20  
+0006B5r 1  50 41 55 53  
+0006CCr 1  53 50 41 43  t_press:  .byte "SPACE OR START: PLAY", 0
+0006D0r 1  45 20 4F 52  
+0006D4r 1  20 53 54 41  
+0006E1r 1               ctrl_kb_txt:
+0006E1r 1  43 4F 4E 54            .byte "CONTROLS: KEYBOARD  (G: PAD)  ", 0
+0006E5r 1  52 4F 4C 53  
+0006E9r 1  3A 20 4B 45  
+000700r 1               ctrl_pad_txt:
+000700r 1  43 4F 4E 54            .byte "CONTROLS: GAMEPAD   (G: KEYS) ", 0
+000704r 1  52 4F 4C 53  
+000708r 1  3A 20 47 41  
+00071Fr 1               status_txt:
+00071Fr 1  53 43 4F 52            .byte "SCORE       HI-SCORE      LIVES", 0
+000723r 1  45 20 20 20  
+000727r 1  20 20 20 20  
+00073Fr 1               over_txt:
+00073Fr 1  0A 0A                .byte   10, 10
+000741r 1  rr rr                .word   t_over1
+000743r 1  0A 0B                .byte   10, 11
+000745r 1  rr rr                .word   t_over2
+000747r 1  0A 0C                .byte   10, 12
+000749r 1  rr rr                .word   t_over3
+00074Br 1  0A 0D                .byte   10, 13
+00074Dr 1  rr rr                .word   t_over4
+00074Fr 1  00                   .byte   0
+000750r 1  20 20 20 20  t_over1:  .byte "            ", 0
+000754r 1  20 20 20 20  
+000758r 1  20 20 20 20  
+00075Dr 1  20 20 47 41  t_over2:  .byte "  GAME OVER ", 0
+000761r 1  4D 45 20 4F  
+000765r 1  56 45 52 20  
+00076Ar 1  20 53 50 41  t_over3:  .byte " SPACE: PLAY", 0
+00076Er 1  43 45 3A 20  
+000772r 1  50 4C 41 59  
+000777r 1  20 51 3A 20  t_over4:  .byte " Q: TITLE   ", 0
+00077Br 1  54 49 54 4C  
+00077Fr 1  45 20 20 20  
+000784r 1  0D 0A 49 4E  need_txt: .byte 13, 10, "INVADERS NEEDS THE PICO9918 CARD AND A CPU REV2 ROM", 13, 10, 0
+000788r 1  56 41 44 45  
+00078Cr 1  52 53 20 4E  
+0007BCr 1               
+0007BCr 1               ; ---- sounds (scripts for ay/sfx.s: voices 0-2 background, 3-5 foreground
+0007BCr 1               ; on channels A-C) ---------------------------------------------------------------
+0007BCr 1               SND_MARCH0      = 0             ; 0-3: the march, background A
+0007BCr 1               SND_SHOT        = 4             ; foreground B
+0007BCr 1               SND_KILL        = 5             ; foreground C
+0007BCr 1               SND_UFO         = 6             ; background B, until stopped
+0007BCr 1               SND_UFO_HIT     = 7             ; foreground C
+0007BCr 1               SND_DEATH       = 8             ; foreground C (noise) ...
+0007BCr 1               SND_DEATH2      = 9             ; ... and A (a falling tone)
+0007BCr 1               SND_WAVE        = 10            ; foreground A: a wave cleared
+0007BCr 1               SND_OVER        = 11            ; foreground A: game over
+0007BCr 1               sfx_scripts:
+0007BCr 1  rr rr rr rr          .word   s_march0, s_march1, s_march2, s_march3, s_shot, s_kill, s_ufo
+0007C0r 1  rr rr rr rr  
+0007C4r 1  rr rr rr rr  
+0007CAr 1  rr rr rr rr          .word   s_ufo_hit, s_death, s_death2, s_wave, s_over
+0007CEr 1  rr rr rr rr  
+0007D2r 1  rr rr        
+0007D4r 1               sfx_prio:
+0007D4r 1  01 01 01 01          .byte   1, 1, 1, 1, 3, 5, 2, 8, 10, 10, 6, 6
+0007D8r 1  03 05 02 08  
+0007DCr 1  0A 0A 06 06  
+0007E0r 1               
+0007E0r 1  02 0E 06 01  s_march0: .byte SX_VOL, 14, SX_DECAY, 1, SX_NOTE(19), SX_WAIT(10), SX_END    ; G2
+0007E4r 1  33 89 00     
+0007E7r 1  02 0E 06 01  s_march1: .byte SX_VOL, 14, SX_DECAY, 1, SX_NOTE(17), SX_WAIT(10), SX_END    ; F2
+0007EBr 1  31 89 00     
+0007EEr 1  02 0E 06 01  s_march2: .byte SX_VOL, 14, SX_DECAY, 1, SX_NOTE(15), SX_WAIT(10), SX_END    ; D#2
+0007F2r 1  2F 89 00     
+0007F5r 1  02 0E 06 01  s_march3: .byte SX_VOL, 14, SX_DECAY, 1, SX_NOTE(14), SX_WAIT(10), SX_END    ; D2
+0007F9r 1  2E 89 00     
+0007FCr 1  02 0C 06 02  s_shot:   .byte SX_VOL, 12, SX_DECAY, 2, SX_PER, 60, 0, SX_SWEEP, 9, 0, SX_WAIT(18), SX_END
+000800r 1  01 3C 00 05  
+000804r 1  09 00 91 00  
+000808r 1  04 02 03 0C  s_kill:   .byte SX_MIX, 2, SX_NOISE, 12, SX_VOL, 15, SX_DECAY, 1, SX_WAIT(15), SX_END
+00080Cr 1  02 0F 06 01  
+000810r 1  8E 00        
+000812r 1  02 09 07 00  s_ufo:    .byte SX_VOL, 9, SX_LOOP, 0
+000816r 1  01 50 00 05            .byte SX_PER, 80, 0, SX_SWEEP, 6, 0, SX_WAIT(8), SX_SWEEP, $FA, $FF, SX_WAIT(8)
+00081Ar 1  06 00 87 05  
+00081Er 1  FA FF 87     
+000821r 1  08                     .byte SX_NEXT
+000822r 1  02 0D 06 05  s_ufo_hit:.byte SX_VOL, 13, SX_DECAY, 5, SX_LOOP, 4
+000826r 1  07 04        
+000828r 1  63 82 60 82            .byte SX_NOTE(67), SX_WAIT(3), SX_NOTE(64), SX_WAIT(3), SX_NOTE(60), SX_WAIT(3), SX_NOTE(55), SX_WAIT(3)
+00082Cr 1  5C 82 57 82  
+000830r 1  08 00                  .byte SX_NEXT, SX_END
+000832r 1  04 02 03 18  s_death:  .byte SX_MIX, 2, SX_NOISE, 24, SX_VOL, 15, SX_DECAY, 4, SX_WAIT(64), SX_END
+000836r 1  02 0F 06 04  
+00083Ar 1  BF 00        
+00083Cr 1  02 0C 06 05  s_death2: .byte SX_VOL, 12, SX_DECAY, 5, SX_PER, $90, $01, SX_SWEEP, 14, 0, SX_WAIT(60), SX_END
+000840r 1  01 90 01 05  
+000844r 1  0E 00 BB 00  
+000848r 1  02 0C 06 03  s_wave:   .byte SX_VOL, 12, SX_DECAY, 3
+00084Cr 1  44 84 48 84            .byte SX_NOTE(36), SX_WAIT(5), SX_NOTE(40), SX_WAIT(5), SX_NOTE(43), SX_WAIT(5), SX_NOTE(48), SX_WAIT(20), SX_END
+000850r 1  4B 84 50 93  
+000854r 1  00           
+000855r 1  02 0C 06 04  s_over:   .byte SX_VOL, 12, SX_DECAY, 4
+000859r 1  3F 8B 3E 8B            .byte SX_NOTE(31), SX_WAIT(12), SX_NOTE(30), SX_WAIT(12), SX_NOTE(29), SX_WAIT(12), SX_NOTE(28), SX_WAIT(40), SX_END
+00085Dr 1  3D 8B 3C A7  
+000861r 1  00           
+000862r 1               
+000862r 1               ; ============================================================================
+000862r 1               ; variables (not in the file; cleared at start)
+000862r 1               ; ============================================================================
+000862r 1                       .segment "BSS"
+00007Br 1               vars_start:
+00007Br 1  xx           ctrl:       .res 1              ; 0 keyboard, 1 gamepad
+00007Cr 1  xx           pad:        .res 1
+00007Dr 1  xx           pad_prev:   .res 1              ; pad last frame
+00007Er 1  xx           pad_mv:     .res 1              ; moving because of the pad
+00007Fr 1  xx           padold:     .res 1
+000080r 1  xx           padnew:     .res 1
+000081r 1  xx xx        hiscore:    .res 2
+000083r 1  xx xx        rng:        .res 2
+000085r 1  xx xx        score:      .res 2
+000087r 1  xx           lives:      .res 1
+000088r 1  xx           wave:       .res 1
+000089r 1  xx           px:         .res 1              ; the cannon sprite's x
+00008Ar 1  xx           frame_odd:  .res 1
+00008Br 1  xx           key_dir:    .res 1
+00008Cr 1  xx           key_hold:   .res 1
+00008Dr 1  xx           key_fire:   .res 1
+00008Er 1  xx           quit:       .res 1
+00008Fr 1  xx           esc_st:     .res 1
+000090r 1  xx           shot_on:    .res 1
+000091r 1  xx           shot_x:     .res 1              ; the shot sprite's x (its line is at x + 7)
+000092r 1  xx           shot_y:     .res 1              ; its top pixel
+000093r 1  xx           shot_n:     .res 1
+000094r 1  xx           hit_x:      .res 1
+000095r 1  xx           hit_row:    .res 1
+000096r 1  xx xx xx     bomb_on:    .res 3
+000099r 1  xx xx xx     bomb_x:     .res 3              ; sprite x (the bomb is 3 pixels wide)
+00009Cr 1  xx xx xx     bomb_y:     .res 3              ; top pixel (7 tall)
+00009Fr 1  xx           bm_i:       .res 1
+0000A0r 1  xx           bm_n:       .res 1
+0000A1r 1  xx           bomb_rate:  .res 1
+0000A2r 1  xx           ufo_on:     .res 1
+0000A3r 1  xx           ufo_x:      .res 1
+0000A4r 1  xx           ufo_dir:    .res 1
+0000A5r 1  xx xx        ufo_t:      .res 2              ; frames until the next saucer
+0000A7r 1  xx xx xx xx  alive:      .res NROWS          ; bit n = invader in slot n is alive
+0000ABr 1  xx           
+0000ACr 1  xx xx xx xx  rowc:       .res NROWS          ; cell column of slot 0 (signed)
+0000B0r 1  xx           
+0000B1r 1  xx xx xx xx  rowph:      .res NROWS          ; + 0-3 x 2 pixels
+0000B5r 1  xx           
+0000B6r 1  xx xx xx xx  rowy:       .res NROWS          ; cell row
+0000BAr 1  xx           
+0000BBr 1  xx xx xx xx  rowfrm:     .res NROWS          ; picture 0 or 1
+0000BFr 1  xx           
+0000C0r 1  xx           alive_count:.res 1
+0000C1r 1  xx           dir:        .res 1              ; +1 or -1
+0000C2r 1  xx           dropping:   .res 1
+0000C3r 1  xx           cur_row:    .res 1
+0000C4r 1  xx           inv_t:      .res 1
+0000C5r 1  xx           march:      .res 1
+0000C6r 1  xx           expl_t:     .res 1
+0000C7r 1  xx           invaded:    .res 1
+0000C8r 1  xx           dead:       .res 1
+0000C9r 1  xx           shield_gone:.res 1
+0000CAr 1  xx xx        rx:         .res 2
+0000CCr 1  xx xx        ex_t:       .res 2
+0000CEr 1  xx           ex_y:       .res 1
+0000CFr 1  xx xx        ext_min:    .res 2
+0000D1r 1  xx xx        ext_max:    .res 2
+0000D3r 1  xx           sa_x:       .res 1
+0000D4r 1  xx           sa_rel:     .res 1
+0000D5r 1  xx           sa_row:     .res 1
+0000D6r 1  xx           dr_r:       .res 1
+0000D7r 1  xx           dr_base:    .res 1
+0000D8r 1  xx           dr_mask:    .res 1
+0000D9r 1  xx           dr_c:       .res 1
+0000DAr 1  xx           dr_i:       .res 1
+0000DBr 1  xx           kv_r:       .res 1
+0000DCr 1  xx           kv_s:       .res 1
+0000DDr 1  xx           sh_x:       .res 1
+0000DEr 1  xx           sh_y:       .res 1
+0000DFr 1  xx           sh_x2:      .res 1
+0000E0r 1  xx           sh_line:    .res 1
+0000E1r 1  xx           sh_col:     .res 1
+0000E2r 1  xx           sh_tc:      .res 1
+0000E3r 1  xx           sh_s:       .res 1
+0000E4r 1  xx           sh_i:       .res 1
+0000E5r 1  xx           sh_m:       .res 1
+0000E6r 1  xx xx        sh_va:      .res 2
+0000E8r 1  xx           bl_x:       .res 1
+0000E9r 1  xx           bl_y:       .res 1
+0000EAr 1  xx           bl_n:       .res 1
+0000EBr 1  xx           sd_s:       .res 1
+0000ECr 1  xx           sd_tr:      .res 1
+0000EDr 1  xx           sd_tc:      .res 1
+0000EEr 1  xx xx        cx_ret:     .res 2
+0000F0r 1  xx           wf_n:       .res 1
+0000F1r 1  xx           tmp:        .res 1
+0000F2r 1  xx           tmp2:       .res 1
+0000F3r 1  xx           tmp3:       .res 1
+0000F4r 1  xx xx xx xx  rowbuf:     .res 26
+0000F8r 1  xx xx xx xx  
+0000FCr 1  xx xx xx xx  
+00010Er 1  xx xx xx xx  spr_tab:    .res NSPR*4
+000112r 1  xx xx xx xx  
+000116r 1  xx xx xx xx  
+00012Ar 1  xx xx xx xx  shields:    .res 4*48
+00012Er 1  xx xx xx xx  
+000132r 1  xx xx xx xx  
+0001EAr 1               vars_end:
+0001EAr 1               

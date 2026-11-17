@@ -1,0 +1,32 @@
+Modules list:
+-------------
+rocks.o:
+    CODE              Offs=000000  Size=001A51  Align=00001  Fill=0000
+    RODATA            Offs=000000  Size=001C46  Align=00001  Fill=0000
+    BSS               Offs=000000  Size=0003C5  Align=00001  Fill=0000
+    BUFS              Offs=000000  Size=001000  Align=00001  Fill=0000
+
+
+Segment list:
+-------------
+Name                   Start     End    Size  Align
+----------------------------------------------------
+CODE                  000800  002250  001A51  00001
+RODATA                002251  003E96  001C46  00001
+BSS                   003E97  00425B  0003C5  00001
+BUFS                  004300  0052FF  001000  00001
+
+
+Exports list by name:
+---------------------
+
+
+
+Exports list by value:
+----------------------
+
+
+
+Imports list:
+-------------
+

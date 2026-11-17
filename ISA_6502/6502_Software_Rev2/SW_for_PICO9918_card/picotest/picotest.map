@@ -1,0 +1,30 @@
+Modules list:
+-------------
+picotest.o:
+    CODE              Offs=000000  Size=000378  Align=00001  Fill=0000
+    RODATA            Offs=000000  Size=000290  Align=00001  Fill=0000
+    BSS               Offs=000000  Size=00000D  Align=00001  Fill=0000
+
+
+Segment list:
+-------------
+Name                   Start     End    Size  Align
+----------------------------------------------------
+CODE                  000800  000B77  000378  00001
+RODATA                000B78  000E07  000290  00001
+BSS                   000E08  000E14  00000D  00001
+
+
+Exports list by name:
+---------------------
+
+
+
+Exports list by value:
+----------------------
+
+
+
+Imports list:
+-------------
+
