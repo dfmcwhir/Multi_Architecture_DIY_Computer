@@ -1,0 +1,3746 @@
+ca65 V2.19 - Git d20d99b
+Main file   : gui.s
+Current file: gui.s
+
+000000r 1               ; ============================================================================
+000000r 1               ; gui.s - the file manager (shell) for the 6502 SBC, CPU Rev2, PICO9918
+000000r 1               ;
+000000r 1               ;   build:  make.bat           (GUI.BIN = install.s + this)
+000000r 1               ;   start:  L GUI 0800  then  R      (once; after that G on the boot menu)
+000000r 1               ;
+000000r 1               ; It lives in the top RAM bank at $1000 (install.s copies it there and
+000000r 1               ; registers it with SBC_SHELL), so programs still load at $0800 in bank 0
+000000r 1               ; and have all of their RAM.  When a program ends with JMP SBC_MENU (all
+000000r 1               ; the games do), or BASIC's EXIT, the ROM comes back here.
+000000r 1               ;
+000000r 1               ; Needs ROM stage 6 (SBC_DIR, SBC_RUN, SBC_SHELL).
+000000r 1               ;
+000000r 1               ; Header (at $1000 in its bank):
+000000r 1               ;   $1000  JMP start
+000000r 1               ;   $1003  "SH65"            (the ROM checks it)
+000000r 1               ;   $1007  1 = first start   (install.s's copy; then 0)
+000000r 1               ;   $1008  .word the end of the program (for install.s)
+000000r 1               ;
+000000r 1               ; Screen: Graphics I with the F18A's ECM2 tiles (3 colours + background a
+000000r 1               ; tile) and an ECM2 sprite for the mouse pointer.
+000000r 1               ;   row 0      the drive and folder; the U: and C: buttons
+000000r 1               ;   row 1      column titles
+000000r 1               ;   rows 2-21  the files (20 a screen); column 31 the scroll bar
+000000r 1               ;   row 22     messages
+000000r 1               ;   row 23     buttons: COPY, PASTE, DEL, UP, BASIC, MON, MENU
+000000r 1               ;
+000000r 1               ; Mouse:    click selects, double click opens; right click = up a folder;
+000000r 1               ;           the scroll bar's arrows and track; the buttons
+000000r 1               ; Keyboard: Up / Down select, Enter or Right open, Backspace / Left / Esc
+000000r 1               ;           up a folder, U / C drive, B BASIC, M monitor, Q boot menu,
+000000r 1               ;           R read the folder again, < > a screen up / down,
+000000r 1               ;           F5 or K copy, F6 or P paste, F8 or X delete
+000000r 1               ;
+000000r 1               ; COPY remembers the selected file; PASTE copies it into the folder shown
+000000r 1               ; (any folder, either drive: SBC_COPY); DEL deletes the selected file
+000000r 1               ; (SBC_DELETE).  Replacing and deleting ask first: YES / NO on the message
+000000r 1               ; line (click, Y / N, or the pad's A / B).
+000000r 1               ; Gamepad:  Up / Down select, A / Start / Right open, B / Left up a folder,
+000000r 1               ;           Select changes the drive
+000000r 1               ;
+000000r 1               ; Opening: a folder goes into it; .BIN runs (SBC_RUN, bank 0 at $0800);
+000000r 1               ; .BAS starts BASIC and runs it; anything else is shown as text.
+000000r 1               ;
+000000r 1               ; No zero page is used (the ROM's pointers are left alone).
+000000r 1               ; ============================================================================
+000000r 1               
+000000r 1                       .include "sbc_api.inc"
+000000r 2               ; sbc_api.inc - fixed ROM entry points of the SBC (see jumptable.s), and the
+000000r 2               ; CPU clock.  Use in your own ca65 programs:  .include "sbc_api.inc"
+000000r 2               ; (the games find it one folder up: their make.bat passes  -I ..  to ca65)
+000000r 2               SBC_CHRIN       = $FE00         ; carry set + A = char, carry clear = none waiting
+000000r 2               SBC_CHROUT      = $FE03         ; print A (A, X, Y preserved)
+000000r 2               SBC_MENU        = $FE06         ; boot menu
+000000r 2               SBC_COLD        = $FE09         ; BASIC cold start
+000000r 2               SBC_WARM        = $FE0C         ; BASIC warm start
+000000r 2               SBC_MONITOR     = $FE0F         ; monitor prompt (or JMP $FF00)
+000000r 2               SBC_PADSTATE    = $FE12         ; A = gamepad buttons held: bit0 A,1 B,2 Select,3 Start,4 Up,5 Down,6 Left,7 Right
+000000r 2               SBC_LOAD        = $FE15         ; load a file from the current device (U: or C:): A/Y = parameter block (.word addr, .word max, "NAME.EXT",0)
+000000r 2                                               ;   carry clear = loaded, X/Y = length; carry set = failed, A = error code
+000000r 2               SBC_CWD         = $FE18         ; A/Y = the monitor's current folder: 0-ended, "" (the top) or "/A/B"
+000000r 2                                               ;   (newer ROMs: check for a JMP ($4C) at $FE18 first)
+000000r 2               
+000000r 2               ; ---- CPU Rev2 ROMs (API version 2).  Check first:  LDA $FE1B / CMP #$4C,
+000000r 2               ;      then JSR SBC_SYSINFO and check Y >= 2.
+000000r 2               SBC_SYSINFO     = $FE1B         ; A = display type (DISP_...), X = device status, Y = API version
+000000r 2               SBC_SEROUT      = $FE1E         ; send A out of the serial console port (A, X, Y preserved)
+000000r 2               SBC_MOUSEON     = $FE21         ; A = 1 mouse reports on, 0 off (off at reset); C=1 = no mouse
+000000r 2               SBC_MOUSE       = $FE24         ; A = buttons (bit0 L, 1 R, 2 M), X/Y = signed movement since
+000000r 2                                               ;   the last call (right/down +); C=1 = a report arrived
+000000r 2               SBC_BANKSET     = $FE27         ; A = RAM bank 0-15 for $1000-$7EFF (X, Y kept).  Your code that
+000000r 2                                               ;   calls it must be in $0000-$0FFF, or it switches itself out!
+000000r 2               SBC_BANKGET     = $FE2A         ; A = bank selected, X = number of banks fitted
+000000r 2               SBC_TICKS       = $FE2D         ; A/X/Y = 60 Hz counter, low/middle/high
+000000r 2               SBC_ACIAIN      = $FE30         ; serial card 6551: C=1 + A = byte, C=0 none
+000000r 2               SBC_ACIAOUT     = $FE33         ; serial card 6551: send A (A, X, Y preserved)
+000000r 2               SBC_VSYNC       = $FE36         ; C=1 if a frame ended since the last call (PICO9918 / ESP32_VGA),
+000000r 2                                               ;   A = the VDP status / ESP32 STATUS
+000000r 2               SBC_CONRESET    = $FE39         ; display back to the text console, cleared (call it when
+000000r 2                                               ;   your game exits after changing the display mode)
+000000r 2               SBC_SNDNOTE     = $FE3C         ; A/Y -> 5 bytes: voice (AY 0-2, ESP32 0-3), note (0-95, 36 = C4),
+000000r 2                                               ;   volume (0-15; AY 16 = envelope), time (16 bit, 1/60 s,
+000000r 2                                               ;   0 = hold).  Doesn't wait.  C=1 = bad values
+000000r 2               SBC_SNDQUIET    = $FE3F         ; all sound off
+000000r 2               SBC_SNDBUSY     = $FE42         ; A = voice: C=1 while its timed note is still playing
+000000r 2               SBC_SAY         = $FE45         ; A/Y -> SPO256 allophones (0-63) ended by $FF; queued
+000000r 2               SBC_SAYBUSY     = $FE48         ; C=1 while the SPO256 is speaking
+000000r 2               SBC_AYREAD      = $FE4B         ; X = AY register (14/15 = I/O ports A/B) -> A
+000000r 2               SBC_AYWRITE     = $FE4E         ; AY register X = A (register 7 bits 6/7 = ports A/B output)
+000000r 2               SBC_TIME        = $FE51         ; A/Y -> 18 byte buffer <- "mm/dd/yy hh:mm:ss",0 (CF card's DS1302);
+000000r 2                                               ;   C=1 = no clock
+000000r 2               SBC_SETTIME     = $FE54         ; A/Y -> 14 characters "dwyymmddHHMMSS" (dw 01 = Sunday)
+000000r 2               SBC_DIR         = $FE57         ; stage 6: A/Y -> block: .word table, .byte most entries, .byte device
+000000r 2                                               ;   ('U', 'C' or 0 = as it is): the current folder (SBC_CWD) into the
+000000r 2                                               ;   table, 16 bytes an entry: name 8, ext 3 (space padded), attributes
+000000r 2                                               ;   ($10 = folder), size 4.  C=0: A = entries; C=1: A = error code
+000000r 2               SBC_RUN         = $FE5A         ; stage 6: A/Y -> block: .byte 0 = .BIN (bank 0, $0800) / 1 = BASIC
+000000r 2                                               ;   program, .byte device, "NAME.EXT",0 (in the current folder).
+000000r 2                                               ;   Returns only on an error: C=1, A = code
+000000r 2               SBC_SHELL       = $FE5D         ; stage 6: A = the RAM bank of a shell ($1000 JMP, $1003 "SH65"):
+000000r 2                                               ;   SBC_MENU then goes back to it.  A = 0: none.  C=1: no shell there
+000000r 2               SBC_COPY        = $FE60         ; stage 6b: A/Y -> block: .byte source device ('U'/'C'), .word -> source
+000000r 2                                               ;   path "/A/NAME.EXT",0, .byte destination device, .word -> its path.
+000000r 2                                               ;   Uses every RAM bank but yours as the buffer (bank 0 is lost).
+000000r 2                                               ;   C=0 copied; C=1, A = error ($F0 too big)
+000000r 2               SBC_DELETE      = $FE63         ; stage 6b: A/Y -> block: .byte device, .word -> path.  C=1, A = error
+000000r 2                                               ;   ($42 not found, $FD the drive can't delete)
+000000r 2               SBC_DISPTYPE    = $FEFF         ; a byte: the display type (DISP_...)
+000000r 2               
+000000r 2               ; SBC_SYSINFO display types
+000000r 2               DISP_NONE       = 0
+000000r 2               DISP_TERM       = 1             ; KB_MONITOR_TERM (PIC32 terminal)
+000000r 2               DISP_PICO       = 2             ; PICO9918
+000000r 2               DISP_ESP32      = 3             ; ESP32_VGA
+000000r 2               
+000000r 2               ; SBC_SYSINFO device status bits (X)
+000000r 2               DEV_VIA         = $01
+000000r 2               DEV_ACIA        = $02
+000000r 2               DEV_DISPLAY     = $04
+000000r 2               DEV_AVRKBD      = $08
+000000r 2               
+000000r 2               ; Key codes from the AVR keyboard interface (Serial Rev3 / PICO9918 card)
+000000r 2               KEY_UP          = $05           ; ^E  (WordStar)
+000000r 2               KEY_DOWN        = $18           ; ^X
+000000r 2               KEY_LEFT        = $10           ; ^P
+000000r 2               KEY_RIGHT       = $04           ; ^D
+000000r 2               KEY_ESC         = $03           ; Esc sends ^C
+000000r 2               KEY_F1          = 129           ; F1-F12 = 129-140, shifted 141-152
+000000r 2               
+000000r 2               ; First RAM address for loaded programs (CPU Rev2 ROM)
+000000r 2               SBC_USER_RAM    = $0800
+000000r 2               
+000000r 2               ; The CPU clock in MHz (whole numbers, 1 to 8).  Programs size their delay
+000000r 2               ; loops from it, so a millisecond stays a millisecond.  To build for another
+000000r 2               ; clock, change it here or give it on the command line:  make.bat 1
+000000r 2               .ifndef CLOCK_MHZ
+000000r 2               CLOCK_MHZ       = 2
+000000r 2               .endif
+000000r 2               
+000000r 1               
+000000r 1               ; the stage 6 entries (an older sbc_api.inc doesn't have them)
+000000r 1               .ifndef SBC_SHELL
+000000r 1               SBC_DIR         = $FE57
+000000r 1               SBC_RUN         = $FE5A
+000000r 1               SBC_SHELL       = $FE5D
+000000r 1               .endif
+000000r 1               .ifndef SBC_COPY
+000000r 1               SBC_COPY        = $FE60
+000000r 1               SBC_DELETE      = $FE63
+000000r 1               .endif
+000000r 1               
+000000r 1               VDP_NAME        = $2000
+000000r 1               V_TP0           = $0000         ; tile patterns, plane 0
+000000r 1               V_TP1           = $0800         ;   plane 1
+000000r 1               V_SP0           = $1000         ; sprite patterns, plane 0
+000000r 1               V_SP1           = $1800         ;   plane 1
+000000r 1               V_ATT           = $2400         ; tile attributes (one a pattern)
+000000r 1               V_SAT           = $2600         ; sprite attributes
+000000r 1               
+000000r 1               LIST_Y          = 2             ; the list's first row
+000000r 1               LIST_H          = 20            ; rows in the list
+000000r 1               MAXENT          = 200           ; folder entries read
+000000r 1               PAGE_LINES      = 21            ; text lines a page in the viewer
+000000r 1               TRAMP           = $0F80         ; (common RAM: the way out to bank 0)
+000000r 1               
+000000r 1               K_BS            = $08
+000000r 1               K_CR            = $0D
+000000r 1               K_ESC           = $1B
+000000r 1               K_DEL           = $7F
+000000r 1               
+000000r 1                       .segment "CODE"
+000000r 1               gui_base:
+000000r 1  4C rr rr             jmp     start
+000003r 1  53 48 36 35          .byte   "SH65"
+000007r 1               gui_new:
+000007r 1  01                   .byte   1
+000008r 1  rr rr                .word   gui_end
+00000Ar 1               
+00000Ar 1               ; ----------------------------------------------------------------------------
+00000Ar 1               start:
+00000Ar 1  D8                   cld
+00000Br 1  20 1B FE             jsr     SBC_SYSINFO
+00000Er 1  C9 02                cmp     #DISP_PICO
+000010r 1  F0 08                beq     @ok
+000012r 1  A9 00                lda     #0              ; not the PICO9918: no shell
+000014r 1  20 5D FE             jsr     SBC_SHELL
+000017r 1  4C 06 FE             jmp     SBC_MENU
+00001Ar 1  AD rr rr     @ok:    lda     gui_new
+00001Dr 1  F0 20                beq     @old
+00001Fr 1  A9 00                lda     #0              ; the first start
+000021r 1  8D rr rr             sta     gui_new
+000024r 1  8D rr rr             sta     cwd
+000027r 1  8D rr rr             sta     sel
+00002Ar 1  8D rr rr             sta     top
+00002Dr 1  8D rr rr             sta     clip_name
+000030r 1  A9 55                lda     #'U'
+000032r 1  8D rr rr             sta     dev
+000035r 1  A9 80                lda     #128
+000037r 1  8D rr rr             sta     m_x
+00003Ar 1  A9 60                lda     #96
+00003Cr 1  8D rr rr             sta     m_y
+00003Fr 1  A9 00        @old:   lda     #0
+000041r 1  8D rr rr             sta     mouse_ok
+000044r 1  8D rr rr             sta     esc_st
+000047r 1  8D rr rr             sta     up_name
+00004Ar 1  8D rr rr             sta     m_click
+00004Dr 1  8D rr rr             sta     m_rclick
+000050r 1  20 12 FE             jsr     SBC_PADSTATE    ; (a button still held from the program)
+000053r 1  8D rr rr             sta     pad_old
+000056r 1  20 00 FE     @fl:    jsr     SBC_CHRIN       ; keys typed before
+000059r 1  B0 FB                bcs     @fl
+00005Br 1  20 rr rr             jsr     gfx_init
+00005Er 1  20 rr rr             jsr     mouse_init
+000061r 1  20 rr rr             jsr     load_dir
+000064r 1  20 rr rr     main:   jsr     vdp_frame
+000067r 1  EE rr rr             inc     frames
+00006Ar 1  20 rr rr             jsr     mouse_poll
+00006Dr 1  20 rr rr             jsr     do_mouse
+000070r 1  20 rr rr             jsr     do_pad
+000073r 1  20 rr rr             jsr     do_keys
+000076r 1  4C rr rr             jmp     main
+000079r 1               
+000079r 1               frame_idle:
+000079r 1  60                   rts
+00007Ar 1               
+00007Ar 1               ; ============================================================================
+00007Ar 1               ; the folder
+00007Ar 1               ; ============================================================================
+00007Ar 1               
+00007Ar 1               ; read the folder (dev, cwd), sort it, show it
+00007Ar 1               load_dir:
+00007Ar 1  A9 rr                lda     #<s_reading
+00007Cr 1  A0 rr                ldy     #>s_reading
+00007Er 1  20 rr rr             jsr     st_text
+000081r 1  20 rr rr             jsr     put_cwd
+000084r 1  20 rr rr             jsr     read_dir
+000087r 1  90 35                bcc     @ok
+000089r 1  8D rr rr             sta     errc
+00008Cr 1  AD rr rr             lda     cwd             ; a folder that has gone: try the top
+00008Fr 1  F0 16                beq     @fail
+000091r 1  A9 00                lda     #0
+000093r 1  8D rr rr             sta     cwd
+000096r 1  8D rr rr             sta     sel
+000099r 1  8D rr rr             sta     top
+00009Cr 1  20 rr rr             jsr     put_cwd
+00009Fr 1  20 rr rr             jsr     read_dir
+0000A2r 1  90 1A                bcc     @ok
+0000A4r 1  8D rr rr             sta     errc
+0000A7r 1  A9 00        @fail:  lda     #0
+0000A9r 1  8D rr rr             sta     n_ent
+0000ACr 1  8D rr rr             sta     n_list
+0000AFr 1  8D rr rr             sta     sel
+0000B2r 1  8D rr rr             sta     top
+0000B5r 1  20 rr rr             jsr     draw_all
+0000B8r 1  AD rr rr             lda     errc
+0000BBr 1  4C rr rr             jmp     st_error
+0000BEr 1  8D rr rr     @ok:    sta     n_ent
+0000C1r 1  A2 00                ldx     #0
+0000C3r 1  AD rr rr             lda     cwd
+0000C6r 1  F0 06                beq     @nu
+0000C8r 1  A9 FF                lda     #$FF            ; ".." first, below the top
+0000CAr 1  8D rr rr             sta     order
+0000CDr 1  E8                   inx
+0000CEr 1  8E rr rr     @nu:    stx     k0
+0000D1r 1  A0 00                ldy     #0
+0000D3r 1  CC rr rr     @o:     cpy     n_ent
+0000D6r 1  F0 08                beq     @od
+0000D8r 1  98                   tya
+0000D9r 1  9D rr rr             sta     order,x
+0000DCr 1  E8                   inx
+0000DDr 1  C8                   iny
+0000DEr 1  D0 F3                bne     @o
+0000E0r 1  8E rr rr     @od:    stx     n_list
+0000E3r 1  20 rr rr             jsr     sort
+0000E6r 1  AD rr rr             lda     up_name         ; (back up a folder: select the one left)
+0000E9r 1  F0 08                beq     @cl
+0000EBr 1  20 rr rr             jsr     find_up
+0000EEr 1  A9 00                lda     #0
+0000F0r 1  8D rr rr             sta     up_name
+0000F3r 1  20 rr rr     @cl:    jsr     clamp_sel
+0000F6r 1  20 rr rr             jsr     draw_all
+0000F9r 1  4C rr rr             jmp     st_count
+0000FCr 1               
+0000FCr 1               read_dir:
+0000FCr 1  AD rr rr             lda     dev
+0000FFr 1  8D rr rr             sta     dirblk+3
+000102r 1  A9 rr                lda     #<dirblk
+000104r 1  A0 rr                ldy     #>dirblk
+000106r 1  4C 57 FE             jmp     SBC_DIR
+000109r 1               
+000109r 1               ; the ROM's current folder = cwd
+000109r 1               put_cwd:
+000109r 1  20 18 FE             jsr     SBC_CWD
+00010Cr 1  8D rr rr             sta     @wr+1
+00010Fr 1  8C rr rr             sty     @wr+2
+000112r 1  A2 1F                ldx     #31
+000114r 1  BD rr rr     @c:     lda     cwd,x
+000117r 1  9D FF FF     @wr:    sta     $FFFF,x
+00011Ar 1  CA                   dex
+00011Br 1  10 F7                bpl     @c
+00011Dr 1  60                   rts
+00011Er 1               
+00011Er 1               ; table entry A -> ebuf (16 bytes)
+00011Er 1               get_ent:
+00011Er 1  20 rr rr             jsr     ent_addr
+000121r 1  8D rr rr             sta     @rd+1
+000124r 1  8C rr rr             sty     @rd+2
+000127r 1  A2 0F                ldx     #15
+000129r 1  BD FF FF     @rd:    lda     $FFFF,x
+00012Cr 1  9D rr rr             sta     ebuf,x
+00012Fr 1  CA                   dex
+000130r 1  10 F7                bpl     @rd
+000132r 1  60                   rts
+000133r 1               
+000133r 1               ; A = table index -> A/Y = its address (table + 16 A)
+000133r 1               ent_addr:
+000133r 1  8D rr rr             sta     ea
+000136r 1  A9 00                lda     #0
+000138r 1  8D rr rr             sta     ea+1
+00013Br 1  0E rr rr             asl     ea
+00013Er 1  2E rr rr             rol     ea+1
+000141r 1  0E rr rr             asl     ea
+000144r 1  2E rr rr             rol     ea+1
+000147r 1  0E rr rr             asl     ea
+00014Ar 1  2E rr rr             rol     ea+1
+00014Dr 1  0E rr rr             asl     ea
+000150r 1  2E rr rr             rol     ea+1
+000153r 1  AD rr rr             lda     ea
+000156r 1  18                   clc
+000157r 1  69 rr                adc     #<table
+000159r 1  48                   pha
+00015Ar 1  AD rr rr             lda     ea+1
+00015Dr 1  69 rr                adc     #>table
+00015Fr 1  A8                   tay
+000160r 1  68                   pla
+000161r 1  60                   rts
+000162r 1               
+000162r 1               ; sort order[k0 .. n_list): folders first, then by name (insertion sort)
+000162r 1  AE rr rr     sort:   ldx     k0
+000165r 1  E8                   inx
+000166r 1  8E rr rr             stx     si
+000169r 1  AD rr rr     @out:   lda     si
+00016Cr 1  CD rr rr             cmp     n_list
+00016Fr 1  B0 3F                bcs     @done
+000171r 1  AA                   tax
+000172r 1  BD rr rr             lda     order,x
+000175r 1  8D rr rr             sta     sv
+000178r 1  20 rr rr             jsr     get_ent         ; (the one being placed: in ebuf)
+00017Br 1  AD rr rr             lda     si
+00017Er 1  8D rr rr             sta     sj
+000181r 1  AD rr rr     @in:    lda     sj
+000184r 1  CD rr rr             cmp     k0
+000187r 1  F0 18                beq     @put
+000189r 1  AA                   tax
+00018Ar 1  BD rr rr             lda     order-1,x
+00018Dr 1  20 rr rr             jsr     v_less
+000190r 1  90 0F                bcc     @put
+000192r 1  AE rr rr             ldx     sj
+000195r 1  BD rr rr             lda     order-1,x
+000198r 1  9D rr rr             sta     order,x
+00019Br 1  CE rr rr             dec     sj
+00019Er 1  4C rr rr             jmp     @in
+0001A1r 1  AE rr rr     @put:   ldx     sj
+0001A4r 1  AD rr rr             lda     sv
+0001A7r 1  9D rr rr             sta     order,x
+0001AAr 1  EE rr rr             inc     si
+0001ADr 1  4C rr rr             jmp     @out
+0001B0r 1  60           @done:  rts
+0001B1r 1               
+0001B1r 1               ; C=1 if the entry in ebuf comes before table entry A
+0001B1r 1  20 rr rr     v_less: jsr     ent_addr
+0001B4r 1  8D rr rr             sta     @at+1
+0001B7r 1  8C rr rr             sty     @at+2
+0001BAr 1  8D rr rr             sta     @nm+1
+0001BDr 1  8C rr rr             sty     @nm+2
+0001C0r 1  AD rr rr             lda     ebuf+11
+0001C3r 1  29 10                and     #$10
+0001C5r 1  8D rr rr             sta     t1
+0001C8r 1  A2 0B                ldx     #11
+0001CAr 1  BD FF FF     @at:    lda     $FFFF,x
+0001CDr 1  29 10                and     #$10
+0001CFr 1  CD rr rr             cmp     t1
+0001D2r 1  F0 07                beq     @name
+0001D4r 1  AD rr rr             lda     t1              ; one folder, one file: the folder first
+0001D7r 1  F0 11                beq     @no
+0001D9r 1  38           @yes:   sec
+0001DAr 1  60                   rts
+0001DBr 1  A2 00        @name:  ldx     #0
+0001DDr 1  BD rr rr     @l:     lda     ebuf,x
+0001E0r 1  DD FF FF     @nm:    cmp     $FFFF,x
+0001E3r 1  D0 07                bne     @d
+0001E5r 1  E8                   inx
+0001E6r 1  E0 0B                cpx     #11
+0001E8r 1  D0 F3                bne     @l
+0001EAr 1  18           @no:    clc
+0001EBr 1  60                   rts
+0001ECr 1  90 EB        @d:     bcc     @yes
+0001EEr 1  18                   clc
+0001EFr 1  60                   rts
+0001F0r 1               
+0001F0r 1               ; select the entry named up_name
+0001F0r 1               find_up:
+0001F0r 1  20 rr rr             jsr     find_name
+0001F3r 1  90 03                bcc     @r
+0001F5r 1  8E rr rr             stx     sel
+0001F8r 1  60           @r:     rts
+0001F9r 1               
+0001F9r 1               ; the list row of the entry named up_name: C=1, X = the row (and ebuf,
+0001F9r 1               ; nbuf hold it); C=0 none
+0001F9r 1               find_name:
+0001F9r 1  AD rr rr             lda     k0
+0001FCr 1  8D rr rr             sta     si
+0001FFr 1  AD rr rr     @l:     lda     si
+000202r 1  CD rr rr             cmp     n_list
+000205r 1  B0 23                bcs     @no
+000207r 1  AA                   tax
+000208r 1  BD rr rr             lda     order,x
+00020Br 1  20 rr rr             jsr     get_ent
+00020Er 1  20 rr rr             jsr     fmt_name
+000211r 1  A2 00                ldx     #0
+000213r 1  BD rr rr     @c:     lda     nbuf,x
+000216r 1  DD rr rr             cmp     up_name,x
+000219r 1  D0 0A                bne     @n
+00021Br 1  E8                   inx
+00021Cr 1  C9 00                cmp     #0
+00021Er 1  D0 F3                bne     @c
+000220r 1  AE rr rr             ldx     si
+000223r 1  38                   sec
+000224r 1  60                   rts
+000225r 1  EE rr rr     @n:     inc     si
+000228r 1  D0 D5                bne     @l
+00022Ar 1  18           @no:    clc
+00022Br 1  60                   rts
+00022Cr 1               
+00022Cr 1               ; nbuf = the name in ebuf, "NAME.EXT", 0-ended; nlen = its length
+00022Cr 1               fmt_name:
+00022Cr 1  A2 00                ldx     #0
+00022Er 1  A0 00                ldy     #0
+000230r 1  B9 rr rr     @b:     lda     ebuf,y
+000233r 1  C9 20                cmp     #' '
+000235r 1  F0 09                beq     @be
+000237r 1  9D rr rr             sta     nbuf,x
+00023Ar 1  E8                   inx
+00023Br 1  C8                   iny
+00023Cr 1  C0 08                cpy     #8
+00023Er 1  D0 F0                bne     @b
+000240r 1  AD rr rr     @be:    lda     ebuf+8
+000243r 1  C9 20                cmp     #' '
+000245r 1  F0 18                beq     @e
+000247r 1  A9 2E                lda     #'.'
+000249r 1  9D rr rr             sta     nbuf,x
+00024Cr 1  E8                   inx
+00024Dr 1  A0 08                ldy     #8
+00024Fr 1  B9 rr rr     @x:     lda     ebuf,y
+000252r 1  C9 20                cmp     #' '
+000254r 1  F0 09                beq     @e
+000256r 1  9D rr rr             sta     nbuf,x
+000259r 1  E8                   inx
+00025Ar 1  C8                   iny
+00025Br 1  C0 0B                cpy     #11
+00025Dr 1  D0 F0                bne     @x
+00025Fr 1  A9 00        @e:     lda     #0
+000261r 1  9D rr rr             sta     nbuf,x
+000264r 1  8E rr rr             stx     nlen
+000267r 1  60                   rts
+000268r 1               
+000268r 1               ; A = the kind of the entry in ebuf: 0 folder, 2 program, 3 BASIC,
+000268r 1               ; 4 text, 5 other  (1 is "..")
+000268r 1               ent_kind:
+000268r 1  AD rr rr             lda     ebuf+11
+00026Br 1  29 10                and     #$10
+00026Dr 1  F0 03                beq     @f
+00026Fr 1  A9 00                lda     #0
+000271r 1  60                   rts
+000272r 1  A2 00        @f:     ldx     #0
+000274r 1  BD rr rr     @l:     lda     ext_tab,x       ; 3 letters, then the kind
+000277r 1  F0 1F                beq     @other
+000279r 1  CD rr rr             cmp     ebuf+8
+00027Cr 1  D0 14                bne     @n
+00027Er 1  BD rr rr             lda     ext_tab+1,x
+000281r 1  CD rr rr             cmp     ebuf+9
+000284r 1  D0 0C                bne     @n
+000286r 1  BD rr rr             lda     ext_tab+2,x
+000289r 1  CD rr rr             cmp     ebuf+10
+00028Cr 1  D0 04                bne     @n
+00028Er 1  BD rr rr             lda     ext_tab+3,x
+000291r 1  60                   rts
+000292r 1  E8           @n:     inx
+000293r 1  E8                   inx
+000294r 1  E8                   inx
+000295r 1  E8                   inx
+000296r 1  D0 DC                bne     @l
+000298r 1  A9 05        @other: lda     #5
+00029Ar 1  60                   rts
+00029Br 1               
+00029Br 1               ; sel inside the list, and on the screen
+00029Br 1               clamp_sel:
+00029Br 1  AD rr rr             lda     n_list
+00029Er 1  D0 09                bne     @a
+0002A0r 1  A9 00                lda     #0
+0002A2r 1  8D rr rr             sta     sel
+0002A5r 1  8D rr rr             sta     top
+0002A8r 1  60                   rts
+0002A9r 1  AD rr rr     @a:     lda     sel
+0002ACr 1  CD rr rr             cmp     n_list
+0002AFr 1  90 07                bcc     show_sel
+0002B1r 1  AE rr rr             ldx     n_list
+0002B4r 1  CA                   dex
+0002B5r 1  8E rr rr             stx     sel
+0002B8r 1               show_sel:
+0002B8r 1  AD rr rr             lda     sel
+0002BBr 1  CD rr rr             cmp     top
+0002BEr 1  B0 06                bcs     @1
+0002C0r 1  8D rr rr             sta     top
+0002C3r 1  4C rr rr             jmp     fix_top
+0002C6r 1  38           @1:     sec
+0002C7r 1  ED rr rr             sbc     top
+0002CAr 1  C9 14                cmp     #LIST_H
+0002CCr 1  90 09                bcc     fix_top
+0002CEr 1  AD rr rr             lda     sel
+0002D1r 1  38                   sec
+0002D2r 1  E9 13                sbc     #LIST_H-1
+0002D4r 1  8D rr rr             sta     top
+0002D7r 1               fix_top:                        ; top <= the last screen's
+0002D7r 1  AD rr rr             lda     n_list
+0002DAr 1  38                   sec
+0002DBr 1  E9 14                sbc     #LIST_H
+0002DDr 1  B0 02                bcs     @m
+0002DFr 1  A9 00                lda     #0
+0002E1r 1  CD rr rr     @m:     cmp     top
+0002E4r 1  B0 03                bcs     @r
+0002E6r 1  8D rr rr             sta     top
+0002E9r 1  60           @r:     rts
+0002EAr 1               
+0002EAr 1               ; ============================================================================
+0002EAr 1               ; actions
+0002EAr 1               ; ============================================================================
+0002EAr 1  AD rr rr     sel_up: lda     sel
+0002EDr 1  F0 09                beq     @r
+0002EFr 1  8D rr rr             sta     osel
+0002F2r 1  CE rr rr             dec     sel
+0002F5r 1  4C rr rr             jmp     sel_moved
+0002F8r 1  60           @r:     rts
+0002F9r 1               
+0002F9r 1  AE rr rr     sel_dn: ldx     sel
+0002FCr 1  8E rr rr             stx     osel
+0002FFr 1  E8                   inx
+000300r 1  EC rr rr             cpx     n_list
+000303r 1  B0 06                bcs     @r
+000305r 1  8E rr rr             stx     sel
+000308r 1  4C rr rr             jmp     sel_moved
+00030Br 1  60           @r:     rts
+00030Cr 1               
+00030Cr 1               ; the selection moved from osel: redraw its two rows (or the whole list if
+00030Cr 1               ; it had to scroll)
+00030Cr 1               sel_moved:
+00030Cr 1  AD rr rr             lda     top
+00030Fr 1  8D rr rr             sta     otop
+000312r 1  20 rr rr             jsr     show_sel
+000315r 1  AD rr rr             lda     top
+000318r 1  CD rr rr             cmp     otop
+00031Br 1  F0 03                beq     @two
+00031Dr 1  4C rr rr             jmp     draw_list
+000320r 1  AD rr rr     @two:   lda     osel
+000323r 1  38                   sec
+000324r 1  ED rr rr             sbc     top
+000327r 1  C9 14                cmp     #LIST_H
+000329r 1  B0 06                bcs     @new            ; (the old one wasn't on the screen)
+00032Br 1  8D rr rr             sta     cr
+00032Er 1  20 rr rr             jsr     draw_row
+000331r 1  AD rr rr     @new:   lda     sel
+000334r 1  38                   sec
+000335r 1  ED rr rr             sbc     top
+000338r 1  8D rr rr             sta     cr
+00033Br 1  4C rr rr             jmp     draw_row
+00033Er 1               
+00033Er 1               scroll_up1:
+00033Er 1  AD rr rr             lda     top
+000341r 1  F0 06                beq     @r
+000343r 1  CE rr rr             dec     top
+000346r 1  4C rr rr             jmp     draw_list
+000349r 1  60           @r:     rts
+00034Ar 1               
+00034Ar 1               scroll_dn1:
+00034Ar 1  EE rr rr             inc     top
+00034Dr 1  20 rr rr             jsr     fix_top
+000350r 1  4C rr rr             jmp     draw_list
+000353r 1               
+000353r 1               page_up:
+000353r 1  AD rr rr             lda     top
+000356r 1  38                   sec
+000357r 1  E9 14                sbc     #LIST_H
+000359r 1  B0 02                bcs     :+
+00035Br 1  A9 00                lda     #0
+00035Dr 1  8D rr rr     :       sta     top
+000360r 1  AD rr rr             lda     sel             ; (the selection moves with it)
+000363r 1  38                   sec
+000364r 1  E9 14                sbc     #LIST_H
+000366r 1  B0 02                bcs     :+
+000368r 1  A9 00                lda     #0
+00036Ar 1  8D rr rr     :       sta     sel
+00036Dr 1  4C rr rr             jmp     draw_list
+000370r 1               
+000370r 1               page_down:
+000370r 1  AD rr rr             lda     top
+000373r 1  18                   clc
+000374r 1  69 14                adc     #LIST_H
+000376r 1  8D rr rr             sta     top
+000379r 1  20 rr rr             jsr     fix_top
+00037Cr 1  AD rr rr             lda     sel
+00037Fr 1  18                   clc
+000380r 1  69 14                adc     #LIST_H
+000382r 1  B0 05                bcs     @last
+000384r 1  CD rr rr             cmp     n_list
+000387r 1  90 07                bcc     @s
+000389r 1  AE rr rr     @last:  ldx     n_list
+00038Cr 1  F0 05                beq     @d
+00038Er 1  CA                   dex
+00038Fr 1  8A                   txa
+000390r 1  8D rr rr     @s:     sta     sel
+000393r 1  4C rr rr     @d:     jmp     draw_list
+000396r 1               
+000396r 1               refresh:
+000396r 1  4C rr rr             jmp     load_dir
+000399r 1               
+000399r 1               drive_u:
+000399r 1  A9 55                lda     #'U'
+00039Br 1  D0 02                bne     set_drive
+00039Dr 1               drive_c:
+00039Dr 1  A9 43                lda     #'C'
+00039Fr 1               set_drive:
+00039Fr 1  8D rr rr             sta     dev
+0003A2r 1  A9 00                lda     #0
+0003A4r 1  8D rr rr             sta     cwd
+0003A7r 1  8D rr rr             sta     sel
+0003AAr 1  8D rr rr             sta     top
+0003ADr 1  4C rr rr             jmp     draw_dev        ; (the title first, then the folder)
+0003B0r 1               
+0003B0r 1               draw_dev:
+0003B0r 1  20 rr rr             jsr     draw_title
+0003B3r 1  4C rr rr             jmp     load_dir
+0003B6r 1               
+0003B6r 1               ; up a folder (the one left is selected afterwards)
+0003B6r 1  AD rr rr     go_up:  lda     cwd
+0003B9r 1  D0 01                bne     @g
+0003BBr 1  60                   rts
+0003BCr 1  A2 00        @g:     ldx     #0
+0003BEr 1  BD rr rr     @f:     lda     cwd,x           ; the last '/'
+0003C1r 1  F0 0A                beq     @e
+0003C3r 1  C9 2F                cmp     #'/'
+0003C5r 1  D0 03                bne     @n
+0003C7r 1  8E rr rr             stx     t1
+0003CAr 1  E8           @n:     inx
+0003CBr 1  D0 F1                bne     @f
+0003CDr 1  AE rr rr     @e:     ldx     t1
+0003D0r 1  E8                   inx
+0003D1r 1  A0 00                ldy     #0
+0003D3r 1  BD rr rr     @c:     lda     cwd,x
+0003D6r 1  99 rr rr             sta     up_name,y
+0003D9r 1  F0 04                beq     @z
+0003DBr 1  E8                   inx
+0003DCr 1  C8                   iny
+0003DDr 1  D0 F4                bne     @c
+0003DFr 1  AE rr rr     @z:     ldx     t1
+0003E2r 1  A9 00                lda     #0
+0003E4r 1  9D rr rr             sta     cwd,x
+0003E7r 1  8D rr rr             sta     sel
+0003EAr 1  8D rr rr             sta     top
+0003EDr 1  4C rr rr             jmp     load_dir
+0003F0r 1               
+0003F0r 1               ; open the selected entry
+0003F0r 1               open_sel:
+0003F0r 1  AD rr rr             lda     n_list
+0003F3r 1  D0 01                bne     @go
+0003F5r 1  60                   rts
+0003F6r 1  AE rr rr     @go:    ldx     sel
+0003F9r 1  BD rr rr             lda     order,x
+0003FCr 1  C9 FF                cmp     #$FF
+0003FEr 1  D0 03                bne     @e
+000400r 1  4C rr rr             jmp     go_up
+000403r 1  20 rr rr     @e:     jsr     get_ent
+000406r 1  20 rr rr             jsr     fmt_name
+000409r 1  20 rr rr             jsr     ent_kind
+00040Cr 1  C9 00                cmp     #0
+00040Er 1  F0 15                beq     enter_dir
+000410r 1  C9 02                cmp     #2
+000412r 1  D0 05                bne     @nb
+000414r 1  A9 00                lda     #0
+000416r 1  4C rr rr             jmp     run_it
+000419r 1  C9 03        @nb:    cmp     #3
+00041Br 1  D0 05                bne     @nv
+00041Dr 1  A9 01                lda     #1
+00041Fr 1  4C rr rr             jmp     run_it
+000422r 1  4C rr rr     @nv:    jmp     view_text
+000425r 1               
+000425r 1               ; into the folder in nbuf (cwd + "/" + name: 31 characters at most)
+000425r 1               enter_dir:
+000425r 1  A2 00                ldx     #0
+000427r 1  BD rr rr     @l:     lda     cwd,x
+00042Ar 1  F0 03                beq     @e
+00042Cr 1  E8                   inx
+00042Dr 1  D0 F8                bne     @l
+00042Fr 1  8A           @e:     txa
+000430r 1  38                   sec                     ; + "/"
+000431r 1  6D rr rr             adc     nlen
+000434r 1  C9 20                cmp     #32
+000436r 1  90 07                bcc     @ok
+000438r 1  A9 rr                lda     #<s_long
+00043Ar 1  A0 rr                ldy     #>s_long
+00043Cr 1  4C rr rr             jmp     st_text
+00043Fr 1  A9 2F        @ok:    lda     #'/'
+000441r 1  9D rr rr             sta     cwd,x
+000444r 1  E8                   inx
+000445r 1  A0 00                ldy     #0
+000447r 1  B9 rr rr     @c:     lda     nbuf,y
+00044Ar 1  9D rr rr             sta     cwd,x
+00044Dr 1  F0 04                beq     @d
+00044Fr 1  E8                   inx
+000450r 1  C8                   iny
+000451r 1  D0 F4                bne     @c
+000453r 1  A9 00        @d:     lda     #0
+000455r 1  8D rr rr             sta     sel
+000458r 1  8D rr rr             sta     top
+00045Br 1  4C rr rr             jmp     load_dir
+00045Er 1               
+00045Er 1               ; A = 0: run the program in nbuf; 1: the BASIC program.  Back here only
+00045Er 1               ; when it failed to load.
+00045Er 1  8D rr rr     run_it: sta     runblk
+000461r 1  AD rr rr             lda     dev
+000464r 1  8D rr rr             sta     runblk+1
+000467r 1  A2 00                ldx     #0
+000469r 1  BD rr rr     @c:     lda     nbuf,x
+00046Cr 1  9D rr rr             sta     runblk+2,x
+00046Fr 1  F0 03                beq     @d
+000471r 1  E8                   inx
+000472r 1  D0 F5                bne     @c
+000474r 1  A9 rr        @d:     lda     #<s_start
+000476r 1  A0 rr                ldy     #>s_start
+000478r 1  20 rr rr             jsr     st_text
+00047Br 1  20 rr rr             jsr     st_name
+00047Er 1  20 rr rr             jsr     st_show
+000481r 1  20 rr rr             jsr     put_cwd
+000484r 1  20 rr rr             jsr     mouse_off
+000487r 1  20 rr rr             jsr     leave_gfx
+00048Ar 1  A9 rr                lda     #<runblk
+00048Cr 1  A0 rr                ldy     #>runblk
+00048Er 1  20 5A FE             jsr     SBC_RUN
+000491r 1  8D rr rr             sta     errc            ; (it failed)
+000494r 1  20 rr rr             jsr     gfx_init
+000497r 1  20 rr rr             jsr     mouse_init
+00049Ar 1  20 rr rr             jsr     draw_all
+00049Dr 1  AD rr rr             lda     errc
+0004A0r 1  4C rr rr             jmp     st_error
+0004A3r 1               
+0004A3r 1               ; ============================================================================
+0004A3r 1               ; copy, paste, delete
+0004A3r 1               ; ============================================================================
+0004A3r 1               
+0004A3r 1               ; COPY: remember the selected file (its drive and full path)
+0004A3r 1               act_copy:
+0004A3r 1  20 rr rr             jsr     sel_file
+0004A6r 1  B0 39                bcs     @r
+0004A8r 1  A9 rr                lda     #<nbuf
+0004AAr 1  A0 rr                ldy     #>nbuf
+0004ACr 1  20 rr rr             jsr     mk_path
+0004AFr 1  B0 29                bcs     @long
+0004B1r 1  A2 2D                ldx     #45
+0004B3r 1  BD rr rr     @c:     lda     pbuf,x
+0004B6r 1  9D rr rr             sta     clip_path,x
+0004B9r 1  CA                   dex
+0004BAr 1  10 F7                bpl     @c
+0004BCr 1  A2 0C                ldx     #12
+0004BEr 1  BD rr rr     @n:     lda     nbuf,x
+0004C1r 1  9D rr rr             sta     clip_name,x
+0004C4r 1  CA                   dex
+0004C5r 1  10 F7                bpl     @n
+0004C7r 1  AD rr rr             lda     dev
+0004CAr 1  8D rr rr             sta     clip_dev
+0004CDr 1  A9 rr                lda     #<s_ready
+0004CFr 1  A0 rr                ldy     #>s_ready
+0004D1r 1  20 rr rr             jsr     st_text
+0004D4r 1  20 rr rr             jsr     st_name
+0004D7r 1  4C rr rr             jmp     st_show
+0004DAr 1  A9 rr        @long:  lda     #<s_long
+0004DCr 1  A0 rr                ldy     #>s_long
+0004DEr 1  4C rr rr             jmp     st_text
+0004E1r 1  60           @r:     rts
+0004E2r 1               
+0004E2r 1               ; PASTE: copy the remembered file into the folder shown
+0004E2r 1               act_paste:
+0004E2r 1  AD rr rr             lda     clip_name
+0004E5r 1  D0 07                bne     @have
+0004E7r 1  A9 rr                lda     #<s_noclip
+0004E9r 1  A0 rr                ldy     #>s_noclip
+0004EBr 1  4C rr rr             jmp     st_text
+0004EEr 1  A9 rr        @have:  lda     #<clip_name
+0004F0r 1  A0 rr                ldy     #>clip_name
+0004F2r 1  20 rr rr             jsr     mk_path
+0004F5r 1  90 07                bcc     :+
+0004F7r 1  A9 rr                lda     #<s_long
+0004F9r 1  A0 rr                ldy     #>s_long
+0004FBr 1  4C rr rr             jmp     st_text
+0004FEr 1  AD rr rr     :       lda     dev             ; the same file?
+000501r 1  CD rr rr             cmp     clip_dev
+000504r 1  D0 16                bne     @diff
+000506r 1  A2 00                ldx     #0
+000508r 1  BD rr rr     @sm:    lda     pbuf,x
+00050Br 1  DD rr rr             cmp     clip_path,x
+00050Er 1  D0 0C                bne     @diff
+000510r 1  E8                   inx
+000511r 1  C9 00                cmp     #0
+000513r 1  D0 F3                bne     @sm
+000515r 1  A9 rr                lda     #<s_same
+000517r 1  A0 rr                ldy     #>s_same
+000519r 1  4C rr rr             jmp     st_text
+00051Cr 1  A2 0C        @diff:  ldx     #12             ; one by that name here already?
+00051Er 1  BD rr rr     @un:    lda     clip_name,x
+000521r 1  9D rr rr             sta     up_name,x
+000524r 1  CA                   dex
+000525r 1  10 F7                bpl     @un
+000527r 1  20 rr rr             jsr     find_name
+00052Ar 1  90 24                bcc     @go
+00052Cr 1  AD rr rr             lda     ebuf+11
+00052Fr 1  29 10                and     #$10
+000531r 1  F0 0C                beq     @file
+000533r 1  A9 00                lda     #0
+000535r 1  8D rr rr             sta     up_name
+000538r 1  A9 rr                lda     #<s_isdir
+00053Ar 1  A0 rr                ldy     #>s_isdir
+00053Cr 1  4C rr rr             jmp     st_text
+00053Fr 1  A9 rr        @file:  lda     #<s_replace
+000541r 1  A0 rr                ldy     #>s_replace
+000543r 1  20 rr rr             jsr     confirm
+000546r 1  B0 08                bcs     @go
+000548r 1  A9 00                lda     #0
+00054Ar 1  8D rr rr             sta     up_name
+00054Dr 1  4C rr rr             jmp     st_count
+000550r 1  A2 0C        @go:    ldx     #12
+000552r 1  BD rr rr     @cn:    lda     clip_name,x
+000555r 1  9D rr rr             sta     nbuf,x
+000558r 1  CA                   dex
+000559r 1  10 F7                bpl     @cn
+00055Br 1  A9 rr                lda     #<s_copying
+00055Dr 1  A0 rr                ldy     #>s_copying
+00055Fr 1  20 rr rr             jsr     st_text
+000562r 1  20 rr rr             jsr     st_name
+000565r 1  20 rr rr             jsr     st_show
+000568r 1  AD rr rr             lda     clip_dev
+00056Br 1  8D rr rr             sta     cpblk
+00056Er 1  A9 rr                lda     #<clip_path
+000570r 1  8D rr rr             sta     cpblk+1
+000573r 1  A9 rr                lda     #>clip_path
+000575r 1  8D rr rr             sta     cpblk+2
+000578r 1  AD rr rr             lda     dev
+00057Br 1  8D rr rr             sta     cpblk+3
+00057Er 1  A9 rr                lda     #<pbuf
+000580r 1  8D rr rr             sta     cpblk+4
+000583r 1  A9 rr                lda     #>pbuf
+000585r 1  8D rr rr             sta     cpblk+5
+000588r 1  A9 rr                lda     #<cpblk
+00058Ar 1  A0 rr                ldy     #>cpblk
+00058Cr 1  20 60 FE             jsr     SBC_COPY
+00058Fr 1  B0 14                bcs     @err
+000591r 1  20 rr rr             jsr     load_dir        ; (up_name: the copy is selected)
+000594r 1  A9 rr                lda     #<s_copied
+000596r 1  A0 rr                ldy     #>s_copied
+000598r 1  20 rr rr             jsr     st_text
+00059Br 1  A9 rr                lda     #<clip_name
+00059Dr 1  A0 rr                ldy     #>clip_name
+00059Fr 1  20 rr rr             jsr     st_str
+0005A2r 1  4C rr rr             jmp     st_show
+0005A5r 1  8D rr rr     @err:   sta     errc2
+0005A8r 1  A9 00                lda     #0
+0005AAr 1  8D rr rr             sta     up_name
+0005ADr 1  20 rr rr             jsr     load_dir
+0005B0r 1  AD rr rr             lda     errc2
+0005B3r 1  4C rr rr             jmp     st_error
+0005B6r 1               
+0005B6r 1               ; DEL: delete the selected file (after YES)
+0005B6r 1               act_delete:
+0005B6r 1  20 rr rr             jsr     sel_file
+0005B9r 1  B0 60                bcs     @r
+0005BBr 1  A9 rr                lda     #<s_delete
+0005BDr 1  A0 rr                ldy     #>s_delete
+0005BFr 1  20 rr rr             jsr     confirm
+0005C2r 1  B0 03                bcs     @yes
+0005C4r 1  4C rr rr             jmp     st_count
+0005C7r 1  A9 rr        @yes:   lda     #<nbuf
+0005C9r 1  A0 rr                ldy     #>nbuf
+0005CBr 1  20 rr rr             jsr     mk_path
+0005CEr 1  B0 4B                bcs     @r
+0005D0r 1  AD rr rr             lda     dev
+0005D3r 1  8D rr rr             sta     delblk
+0005D6r 1  A9 rr                lda     #<pbuf
+0005D8r 1  8D rr rr             sta     delblk+1
+0005DBr 1  A9 rr                lda     #>pbuf
+0005DDr 1  8D rr rr             sta     delblk+2
+0005E0r 1  A9 rr                lda     #<delblk
+0005E2r 1  A0 rr                ldy     #>delblk
+0005E4r 1  20 63 FE             jsr     SBC_DELETE
+0005E7r 1  B0 26                bcs     @err
+0005E9r 1  AD rr rr             lda     dev             ; (it was the one remembered: forget it)
+0005ECr 1  CD rr rr             cmp     clip_dev
+0005EFr 1  D0 14                bne     @nc
+0005F1r 1  A2 00                ldx     #0
+0005F3r 1  BD rr rr     @sm:    lda     pbuf,x
+0005F6r 1  DD rr rr             cmp     clip_path,x
+0005F9r 1  D0 0A                bne     @nc
+0005FBr 1  E8                   inx
+0005FCr 1  C9 00                cmp     #0
+0005FEr 1  D0 F3                bne     @sm
+000600r 1  A9 00                lda     #0
+000602r 1  8D rr rr             sta     clip_name
+000605r 1  20 rr rr     @nc:    jsr     load_dir
+000608r 1  A9 rr                lda     #<s_deleted
+00060Ar 1  A0 rr                ldy     #>s_deleted
+00060Cr 1  4C rr rr             jmp     st_text
+00060Fr 1  8D rr rr     @err:   sta     errc2
+000612r 1  20 rr rr             jsr     load_dir
+000615r 1  AD rr rr             lda     errc2
+000618r 1  4C rr rr             jmp     st_error
+00061Br 1  60           @r:     rts
+00061Cr 1               
+00061Cr 1               ; the selected entry, if it is a file: C=0, ebuf / nbuf hold it
+00061Cr 1               sel_file:
+00061Cr 1  AD rr rr             lda     n_list
+00061Fr 1  F0 20                beq     @no
+000621r 1  AE rr rr             ldx     sel
+000624r 1  BD rr rr             lda     order,x
+000627r 1  C9 FF                cmp     #$FF
+000629r 1  F0 0F                beq     @fold
+00062Br 1  20 rr rr             jsr     get_ent
+00062Er 1  20 rr rr             jsr     fmt_name
+000631r 1  AD rr rr             lda     ebuf+11
+000634r 1  29 10                and     #$10
+000636r 1  D0 02                bne     @fold
+000638r 1  18                   clc
+000639r 1  60                   rts
+00063Ar 1  A9 rr        @fold:  lda     #<s_onlyf
+00063Cr 1  A0 rr                ldy     #>s_onlyf
+00063Er 1  20 rr rr             jsr     st_text
+000641r 1  38           @no:    sec
+000642r 1  60                   rts
+000643r 1               
+000643r 1               ; pbuf = cwd + "/" + the name at A/Y (C=1: longer than 45)
+000643r 1               mk_path:
+000643r 1  8D rr rr             sta     @rd+1
+000646r 1  8C rr rr             sty     @rd+2
+000649r 1  A2 00                ldx     #0
+00064Br 1  BD rr rr     @c:     lda     cwd,x
+00064Er 1  F0 06                beq     @s
+000650r 1  9D rr rr             sta     pbuf,x
+000653r 1  E8                   inx
+000654r 1  D0 F5                bne     @c
+000656r 1  A9 2F        @s:     lda     #'/'
+000658r 1  9D rr rr             sta     pbuf,x
+00065Br 1  E8                   inx
+00065Cr 1  A0 00                ldy     #0
+00065Er 1  B9 FF FF     @rd:    lda     $FFFF,y
+000661r 1  9D rr rr             sta     pbuf,x
+000664r 1  F0 08                beq     @ok
+000666r 1  E8                   inx
+000667r 1  C8                   iny
+000668r 1  E0 2D                cpx     #45
+00066Ar 1  90 F2                bcc     @rd
+00066Cr 1  38                   sec
+00066Dr 1  60                   rts
+00066Er 1  18           @ok:    clc
+00066Fr 1  60                   rts
+000670r 1               
+000670r 1               ; ask: the message at A/Y + nbuf + "?", and YES / NO on the message line.
+000670r 1               ; C=1 yes.  (a click on YES / NO, Y / N / Enter / Esc, the pad's A / B)
+000670r 1               confirm:
+000670r 1  48                   pha
+000671r 1  20 rr rr             jsr     st_clear
+000674r 1  68                   pla
+000675r 1  20 rr rr             jsr     st_str
+000678r 1  20 rr rr             jsr     st_name
+00067Br 1  A9 3F                lda     #'?'
+00067Dr 1  20 rr rr             jsr     st_chr
+000680r 1  20 rr rr             jsr     st_show
+000683r 1  A2 06                ldx     #6
+000685r 1  BD rr rr     @yn:    lda     s_yesno,x
+000688r 1  9D rr rr             sta     line+24,x
+00068Br 1  CA                   dex
+00068Cr 1  10 F7                bpl     @yn
+00068Er 1  A9 80                lda     #$80
+000690r 1  8D rr rr             sta     off
+000693r 1  A2 18                ldx     #24
+000695r 1  A9 1B                lda     #27
+000697r 1  8D rr rr             sta     lend
+00069Ar 1  20 rr rr             jsr     put_cells
+00069Dr 1  A2 1D                ldx     #29
+00069Fr 1  A9 1F                lda     #31
+0006A1r 1  8D rr rr             sta     lend
+0006A4r 1  20 rr rr             jsr     put_cells
+0006A7r 1  20 rr rr             jsr     mouse_flush
+0006AAr 1  20 12 FE             jsr     SBC_PADSTATE
+0006ADr 1  8D rr rr             sta     pad_old
+0006B0r 1  20 rr rr     @w:     jsr     vdp_frame
+0006B3r 1  EE rr rr             inc     frames
+0006B6r 1  20 rr rr             jsr     mouse_poll
+0006B9r 1  AD rr rr             lda     m_rclick
+0006BCr 1  D0 68                bne     @no
+0006BEr 1  AD rr rr             lda     m_click
+0006C1r 1  F0 25                beq     @pad
+0006C3r 1  A9 00                lda     #0
+0006C5r 1  8D rr rr             sta     m_click
+0006C8r 1  AD rr rr             lda     m_y
+0006CBr 1  4A                   lsr
+0006CCr 1  4A                   lsr
+0006CDr 1  4A                   lsr
+0006CEr 1  C9 16                cmp     #22
+0006D0r 1  D0 16                bne     @pad
+0006D2r 1  AD rr rr             lda     m_x
+0006D5r 1  4A                   lsr
+0006D6r 1  4A                   lsr
+0006D7r 1  4A                   lsr
+0006D8r 1  C9 18                cmp     #24
+0006DAr 1  90 0C                bcc     @pad
+0006DCr 1  C9 1B                cmp     #27
+0006DEr 1  90 41                bcc     @yes
+0006E0r 1  C9 1D                cmp     #29
+0006E2r 1  90 04                bcc     @pad
+0006E4r 1  C9 1F                cmp     #31
+0006E6r 1  90 3E                bcc     @no
+0006E8r 1  20 12 FE     @pad:   jsr     SBC_PADSTATE
+0006EBr 1  AA                   tax
+0006ECr 1  4D rr rr             eor     pad_old
+0006EFr 1  8E rr rr             stx     pad_old
+0006F2r 1  2D rr rr             and     pad_old
+0006F5r 1  4A                   lsr
+0006F6r 1  B0 29                bcs     @yes            ; A
+0006F8r 1  4A                   lsr
+0006F9r 1  B0 2B                bcs     @no             ; B
+0006FBr 1  20 00 FE             jsr     SBC_CHRIN
+0006FEr 1  90 B0                bcc     @w
+000700r 1  C9 61                cmp     #'a'
+000702r 1  90 02                bcc     :+
+000704r 1  29 DF                and     #$DF
+000706r 1  C9 59        :       cmp     #'Y'
+000708r 1  F0 17                beq     @yes
+00070Ar 1  C9 0D                cmp     #K_CR
+00070Cr 1  F0 13                beq     @yes
+00070Er 1  C9 4E                cmp     #'N'
+000710r 1  F0 14                beq     @no
+000712r 1  C9 1B                cmp     #K_ESC
+000714r 1  F0 10                beq     @no
+000716r 1  C9 03                cmp     #KEY_ESC
+000718r 1  F0 0C                beq     @no
+00071Ar 1  C9 08                cmp     #K_BS
+00071Cr 1  F0 08                beq     @no
+00071Er 1  4C rr rr             jmp     @w
+000721r 1  20 rr rr     @yes:   jsr     mouse_flush
+000724r 1  38                   sec
+000725r 1  60                   rts
+000726r 1  20 rr rr     @no:    jsr     mouse_flush
+000729r 1  18                   clc
+00072Ar 1  60                   rts
+00072Br 1               
+00072Br 1               ; the buttons: out to BASIC, the monitor, the boot menu
+00072Br 1               act_basic:
+00072Br 1  A9 09                lda     #<SBC_COLD
+00072Dr 1  A2 FE                ldx     #>SBC_COLD
+00072Fr 1  4C rr rr             jmp     leave_to
+000732r 1               act_monitor:
+000732r 1  A9 0F                lda     #<SBC_MONITOR
+000734r 1  A2 FE                ldx     #>SBC_MONITOR
+000736r 1  4C rr rr             jmp     leave_to
+000739r 1               act_menu:
+000739r 1  A9 00                lda     #0              ; no shell: the boot menu (G comes back)
+00073Br 1  20 5D FE             jsr     SBC_SHELL
+00073Er 1  A9 06                lda     #<SBC_MENU
+000740r 1  A2 FE                ldx     #>SBC_MENU
+000742r 1               leave_to:
+000742r 1  8D rr rr             sta     tr_code+6
+000745r 1  8E rr rr             stx     tr_code+7
+000748r 1  20 rr rr             jsr     put_cwd
+00074Br 1  20 rr rr             jsr     mouse_off
+00074Er 1  20 rr rr             jsr     leave_gfx
+000751r 1  20 39 FE             jsr     SBC_CONRESET
+000754r 1  A2 07                ldx     #7              ; bank 0 can't be chosen from in here:
+000756r 1  BD rr rr     @c:     lda     tr_code,x       ; a few bytes in common RAM do it
+000759r 1  9D 80 0F             sta     TRAMP,x
+00075Cr 1  CA                   dex
+00075Dr 1  10 F7                bpl     @c
+00075Fr 1  4C 80 0F             jmp     TRAMP
+000762r 1               tr_code:
+000762r 1  A9 00                lda     #0
+000764r 1  20 27 FE             jsr     SBC_BANKSET
+000767r 1  4C FF FF             jmp     $FFFF
+00076Ar 1               
+00076Ar 1               ; ============================================================================
+00076Ar 1               ; input
+00076Ar 1               ; ============================================================================
+00076Ar 1               do_mouse:
+00076Ar 1  AD rr rr             lda     m_rclick
+00076Dr 1  F0 08                beq     @l
+00076Fr 1  A9 00                lda     #0
+000771r 1  8D rr rr             sta     m_rclick
+000774r 1  4C rr rr             jmp     go_up
+000777r 1  AD rr rr     @l:     lda     m_click
+00077Ar 1  D0 01                bne     @c
+00077Cr 1  60           @r:     rts
+00077Dr 1  A9 00        @c:     lda     #0
+00077Fr 1  8D rr rr             sta     m_click
+000782r 1  AD rr rr             lda     m_x
+000785r 1  4A                   lsr
+000786r 1  4A                   lsr
+000787r 1  4A                   lsr
+000788r 1  8D rr rr             sta     cx
+00078Br 1  AD rr rr             lda     m_y
+00078Er 1  4A                   lsr
+00078Fr 1  4A                   lsr
+000790r 1  4A                   lsr
+000791r 1  8D rr rr             sta     cy
+000794r 1  D0 11                bne     @n0
+000796r 1  AD rr rr             lda     cx              ; the title row: the drive buttons
+000799r 1  C9 1C                cmp     #28
+00079Br 1  B0 07                bcs     @dc
+00079Dr 1  C9 18                cmp     #24
+00079Fr 1  90 DB                bcc     @r
+0007A1r 1  4C rr rr             jmp     drive_u
+0007A4r 1  4C rr rr     @dc:    jmp     drive_c
+0007A7r 1  C9 17        @n0:    cmp     #23
+0007A9r 1  D0 03                bne     @n23
+0007ABr 1  4C rr rr             jmp     click_button
+0007AEr 1  C9 02        @n23:   cmp     #LIST_Y
+0007B0r 1  90 CA                bcc     @r
+0007B2r 1  C9 16                cmp     #LIST_Y+LIST_H
+0007B4r 1  B0 C6                bcs     @r
+0007B6r 1  38                   sec
+0007B7r 1  E9 02                sbc     #LIST_Y
+0007B9r 1  8D rr rr             sta     cr
+0007BCr 1  AD rr rr             lda     cx
+0007BFr 1  C9 1F                cmp     #31
+0007C1r 1  D0 1D                bne     @row
+0007C3r 1  AD rr rr             lda     cr              ; the scroll bar
+0007C6r 1  D0 03                bne     @nu
+0007C8r 1  4C rr rr             jmp     scroll_up1
+0007CBr 1  C9 13        @nu:    cmp     #LIST_H-1
+0007CDr 1  D0 03                bne     @tr
+0007CFr 1  4C rr rr             jmp     scroll_dn1
+0007D2r 1  38           @tr:    sec
+0007D3r 1  E9 01                sbc     #1
+0007D5r 1  CD rr rr             cmp     tpos
+0007D8r 1  90 03                bcc     @pu
+0007DAr 1  4C rr rr             jmp     page_down
+0007DDr 1  4C rr rr     @pu:    jmp     page_up
+0007E0r 1  AD rr rr     @row:   lda     top
+0007E3r 1  18                   clc
+0007E4r 1  6D rr rr             adc     cr
+0007E7r 1  CD rr rr             cmp     n_list
+0007EAr 1  B0 90                bcs     @r
+0007ECr 1  CD rr rr             cmp     sel
+0007EFr 1  D0 1D                bne     @new
+0007F1r 1  AD rr rr             lda     frames          ; the same one again: a double click?
+0007F4r 1  38                   sec
+0007F5r 1  ED rr rr             sbc     click_t
+0007F8r 1  C9 1E                cmp     #30
+0007FAr 1  B0 0B                bcs     @slow
+0007FCr 1  AD rr rr             lda     frames
+0007FFr 1  49 80                eor     #$80
+000801r 1  8D rr rr             sta     click_t
+000804r 1  4C rr rr             jmp     open_sel
+000807r 1  AD rr rr     @slow:  lda     frames
+00080Ar 1  8D rr rr             sta     click_t
+00080Dr 1  60                   rts
+00080Er 1  AA           @new:   tax
+00080Fr 1  AD rr rr             lda     sel
+000812r 1  8D rr rr             sta     osel
+000815r 1  8E rr rr             stx     sel
+000818r 1  AD rr rr             lda     frames
+00081Br 1  8D rr rr             sta     click_t
+00081Er 1  4C rr rr             jmp     sel_moved
+000821r 1               
+000821r 1               click_button:
+000821r 1  A2 00                ldx     #0
+000823r 1  BD rr rr     @l:     lda     btn_x0,x
+000826r 1  C9 FF                cmp     #$FF
+000828r 1  F0 18                beq     @r
+00082Ar 1  AD rr rr             lda     cx
+00082Dr 1  DD rr rr             cmp     btn_x0,x
+000830r 1  90 11                bcc     @n
+000832r 1  DD rr rr             cmp     btn_x1,x
+000835r 1  B0 0C                bcs     @n
+000837r 1  8A                   txa
+000838r 1  0A                   asl
+000839r 1  AA                   tax
+00083Ar 1  BD rr rr             lda     btn_go+1,x
+00083Dr 1  48                   pha
+00083Er 1  BD rr rr             lda     btn_go,x
+000841r 1  48                   pha
+000842r 1  60           @r:     rts
+000843r 1  E8           @n:     inx
+000844r 1  D0 DD                bne     @l
+000846r 1               
+000846r 1  20 12 FE     do_pad: jsr     SBC_PADSTATE
+000849r 1  8D rr rr             sta     pad_now
+00084Cr 1  4D rr rr             eor     pad_old
+00084Fr 1  2D rr rr             and     pad_now
+000852r 1  8D rr rr             sta     pad_new
+000855r 1  AD rr rr             lda     pad_now
+000858r 1  8D rr rr             sta     pad_old
+00085Br 1  29 30                and     #$30            ; up / down, repeating
+00085Dr 1  F0 28                beq     @nr
+00085Fr 1  AD rr rr             lda     pad_new
+000862r 1  29 30                and     #$30
+000864r 1  F0 07                beq     @held
+000866r 1  A9 14                lda     #20
+000868r 1  8D rr rr             sta     pad_rep
+00086Br 1  D0 0A                bne     @mv
+00086Dr 1  CE rr rr     @held:  dec     pad_rep
+000870r 1  D0 15                bne     @nr
+000872r 1  A9 05                lda     #5
+000874r 1  8D rr rr             sta     pad_rep
+000877r 1  AD rr rr     @mv:    lda     pad_now
+00087Ar 1  29 10                and     #$10
+00087Cr 1  F0 06                beq     @dn
+00087Er 1  20 rr rr             jsr     sel_up
+000881r 1  4C rr rr             jmp     @nr
+000884r 1  20 rr rr     @dn:    jsr     sel_dn
+000887r 1  AD rr rr     @nr:    lda     pad_new
+00088Ar 1  29 89                and     #$89            ; A, Start, Right
+00088Cr 1  F0 03                beq     @b
+00088Er 1  4C rr rr             jmp     open_sel
+000891r 1  AD rr rr     @b:     lda     pad_new
+000894r 1  29 42                and     #$42            ; B, Left
+000896r 1  F0 03                beq     @s
+000898r 1  4C rr rr             jmp     go_up
+00089Br 1  AD rr rr     @s:     lda     pad_new
+00089Er 1  29 04                and     #$04            ; Select: the other drive
+0008A0r 1  F0 0D                beq     @r
+0008A2r 1  AD rr rr             lda     dev
+0008A5r 1  C9 55                cmp     #'U'
+0008A7r 1  F0 03                beq     @c
+0008A9r 1  4C rr rr             jmp     drive_u
+0008ACr 1  4C rr rr     @c:     jmp     drive_c
+0008AFr 1  60           @r:     rts
+0008B0r 1               
+0008B0r 1               do_keys:
+0008B0r 1  20 00 FE             jsr     SBC_CHRIN
+0008B3r 1  B0 01                bcs     @k
+0008B5r 1  60                   rts
+0008B6r 1  20 rr rr     @k:     jsr     key1
+0008B9r 1  4C rr rr             jmp     do_keys
+0008BCr 1               
+0008BCr 1               ; one key (Esc [ A-D from a serial terminal = the arrows)
+0008BCr 1  AE rr rr     key1:   ldx     esc_st
+0008BFr 1  F0 38                beq     @n
+0008C1r 1  E0 01                cpx     #1
+0008C3r 1  D0 0A                bne     @s2
+0008C5r 1  C9 5B                cmp     #'['
+0008C7r 1  D0 27                bne     @x
+0008C9r 1  A9 02                lda     #2
+0008CBr 1  8D rr rr             sta     esc_st
+0008CEr 1  60                   rts
+0008CFr 1  A2 00        @s2:    ldx     #0
+0008D1r 1  8E rr rr             stx     esc_st
+0008D4r 1  C9 41                cmp     #'A'
+0008D6r 1  D0 03                bne     :+
+0008D8r 1  4C rr rr             jmp     sel_up
+0008DBr 1  C9 42        :       cmp     #'B'
+0008DDr 1  D0 03                bne     :+
+0008DFr 1  4C rr rr             jmp     sel_dn
+0008E2r 1  C9 43        :       cmp     #'C'
+0008E4r 1  D0 03                bne     :+
+0008E6r 1  4C rr rr             jmp     open_sel
+0008E9r 1  C9 44        :       cmp     #'D'
+0008EBr 1  D0 15                bne     @r
+0008EDr 1  4C rr rr             jmp     go_up
+0008F0r 1  A2 00        @x:     ldx     #0
+0008F2r 1  8E rr rr             stx     esc_st
+0008F5r 1  20 rr rr             jsr     go_up           ; (a lone Esc)
+0008F8r 1  60                   rts
+0008F9r 1  C9 1B        @n:     cmp     #K_ESC
+0008FBr 1  D0 06                bne     @nk
+0008FDr 1  A9 01                lda     #1
+0008FFr 1  8D rr rr             sta     esc_st
+000902r 1  60           @r:     rts
+000903r 1  C9 61        @nk:    cmp     #'a'
+000905r 1  90 06                bcc     @u
+000907r 1  C9 7B                cmp     #'z'+1
+000909r 1  B0 02                bcs     @u
+00090Br 1  29 DF                and     #$DF
+00090Dr 1  A2 00        @u:     ldx     #0
+00090Fr 1  BC rr rr     @l:     ldy     key_tab,x
+000912r 1  F0 EE                beq     @r
+000914r 1  DD rr rr             cmp     key_tab,x
+000917r 1  F0 03                beq     @go
+000919r 1  E8                   inx
+00091Ar 1  D0 F3                bne     @l
+00091Cr 1  8A           @go:    txa
+00091Dr 1  0A                   asl
+00091Er 1  AA                   tax
+00091Fr 1  BD rr rr             lda     key_go+1,x
+000922r 1  48                   pha
+000923r 1  BD rr rr             lda     key_go,x
+000926r 1  48                   pha
+000927r 1  60                   rts
+000928r 1               
+000928r 1               ; ============================================================================
+000928r 1               ; the text viewer (the ROM's text console)
+000928r 1               ; ============================================================================
+000928r 1               view_text:
+000928r 1  A9 rr                lda     #<s_read
+00092Ar 1  A0 rr                ldy     #>s_read
+00092Cr 1  20 rr rr             jsr     st_text
+00092Fr 1  20 rr rr             jsr     st_name
+000932r 1  20 rr rr             jsr     st_show
+000935r 1  20 rr rr             jsr     put_cwd
+000938r 1  A2 00                ldx     #0
+00093Ar 1  BD rr rr     @c:     lda     nbuf,x
+00093Dr 1  9D rr rr             sta     ldblk+4,x
+000940r 1  F0 03                beq     @d
+000942r 1  E8                   inx
+000943r 1  D0 F5                bne     @c
+000945r 1  A9 rr        @d:     lda     #<ldblk
+000947r 1  A0 rr                ldy     #>ldblk
+000949r 1  20 15 FE             jsr     SBC_LOAD
+00094Cr 1  90 03                bcc     @ok
+00094Er 1  4C rr rr             jmp     st_error
+000951r 1  8A           @ok:    txa                     ; the end = viewbuf + the length
+000952r 1  18                   clc
+000953r 1  69 rr                adc     #<viewbuf
+000955r 1  8D rr rr             sta     vend
+000958r 1  98                   tya
+000959r 1  69 rr                adc     #>viewbuf
+00095Br 1  8D rr rr             sta     vend+1
+00095Er 1  20 rr rr             jsr     leave_gfx
+000961r 1  20 rr rr             jsr     pager
+000964r 1  20 rr rr             jsr     gfx_init
+000967r 1  20 rr rr             jsr     mouse_flush
+00096Ar 1  20 rr rr             jsr     draw_all
+00096Dr 1  4C rr rr             jmp     st_count
+000970r 1               
+000970r 1  A9 rr        pager:  lda     #<viewbuf
+000972r 1  8D rr rr             sta     vpos
+000975r 1  A9 rr                lda     #>viewbuf
+000977r 1  8D rr rr             sta     vpos+1
+00097Ar 1  A9 00                lda     #0
+00097Cr 1  8D rr rr             sta     vpn
+00097Fr 1  20 39 FE     @page:  jsr     SBC_CONRESET
+000982r 1  AD rr rr             lda     vpos
+000985r 1  8D rr rr             sta     vstart
+000988r 1  AD rr rr             lda     vpos+1
+00098Br 1  8D rr rr             sta     vstart+1
+00098Er 1  20 rr rr             jsr     v_head
+000991r 1  20 rr rr             jsr     show_page
+000994r 1  20 rr rr             jsr     v_prompt
+000997r 1  20 rr rr     @wait:  jsr     vdp_frame
+00099Ar 1  EE rr rr             inc     frames
+00099Dr 1  20 rr rr             jsr     mouse_poll
+0009A0r 1  20 rr rr             jsr     v_input
+0009A3r 1  F0 F2                beq     @wait
+0009A5r 1  C9 03                cmp     #3
+0009A7r 1  F0 3A                beq     @close
+0009A9r 1  C9 02                cmp     #2
+0009ABr 1  F0 1E                beq     @back
+0009ADr 1  AD rr rr             lda     veof            ; next page
+0009B0r 1  D0 E5                bne     @wait
+0009B2r 1  AE rr rr             ldx     vpn
+0009B5r 1  E0 40                cpx     #VSTK
+0009B7r 1  B0 C6                bcs     @page
+0009B9r 1  AD rr rr             lda     vstart
+0009BCr 1  9D rr rr             sta     vstk_lo,x
+0009BFr 1  AD rr rr             lda     vstart+1
+0009C2r 1  9D rr rr             sta     vstk_hi,x
+0009C5r 1  EE rr rr             inc     vpn
+0009C8r 1  4C rr rr             jmp     @page
+0009CBr 1  AE rr rr     @back:  ldx     vpn
+0009CEr 1  F0 C7                beq     @wait
+0009D0r 1  CA                   dex
+0009D1r 1  8E rr rr             stx     vpn
+0009D4r 1  BD rr rr             lda     vstk_lo,x
+0009D7r 1  8D rr rr             sta     vpos
+0009DAr 1  BD rr rr             lda     vstk_hi,x
+0009DDr 1  8D rr rr             sta     vpos+1
+0009E0r 1  4C rr rr             jmp     @page
+0009E3r 1  60           @close: rts
+0009E4r 1               
+0009E4r 1               ; the top line: the name and the page
+0009E4r 1  A2 00        v_head: ldx     #0
+0009E6r 1  BD rr rr     @n:     lda     nbuf,x
+0009E9r 1  F0 06                beq     @p
+0009EBr 1  20 03 FE             jsr     SBC_CHROUT
+0009EEr 1  E8                   inx
+0009EFr 1  D0 F5                bne     @n
+0009F1r 1  A9 rr        @p:     lda     #<s_page
+0009F3r 1  A0 rr                ldy     #>s_page
+0009F5r 1  20 rr rr             jsr     v_puts
+0009F8r 1  AD rr rr             lda     vpn
+0009FBr 1  18                   clc
+0009FCr 1  69 01                adc     #1
+0009FEr 1  20 rr rr             jsr     v_dec
+000A01r 1  A9 0D                lda     #13
+000A03r 1  20 03 FE             jsr     SBC_CHROUT
+000A06r 1  A9 0A                lda     #10
+000A08r 1  4C 03 FE             jmp     SBC_CHROUT
+000A0Br 1               
+000A0Br 1               v_prompt:
+000A0Br 1  AD rr rr             lda     vcol
+000A0Er 1  F0 0A                beq     :+
+000A10r 1  A9 0D                lda     #13
+000A12r 1  20 03 FE             jsr     SBC_CHROUT
+000A15r 1  A9 0A                lda     #10
+000A17r 1  20 03 FE             jsr     SBC_CHROUT
+000A1Ar 1  AD rr rr     :       lda     veof
+000A1Dr 1  F0 07                beq     @m
+000A1Fr 1  A9 rr                lda     #<s_vend
+000A21r 1  A0 rr                ldy     #>s_vend
+000A23r 1  4C rr rr             jmp     v_puts
+000A26r 1  A9 rr        @m:     lda     #<s_vmore
+000A28r 1  A0 rr                ldy     #>s_vmore
+000A2Ar 1  4C rr rr             jmp     v_puts
+000A2Dr 1               
+000A2Dr 1               ; print up to PAGE_LINES lines from vpos (veof = 1 at the end of the text)
+000A2Dr 1               show_page:
+000A2Dr 1  A9 00                lda     #0
+000A2Fr 1  8D rr rr             sta     vlines
+000A32r 1  8D rr rr             sta     vcol
+000A35r 1  8D rr rr             sta     veof
+000A38r 1  20 rr rr     @ch:    jsr     v_atend
+000A3Br 1  90 01                bcc     @get
+000A3Dr 1  60                   rts
+000A3Er 1  20 rr rr     @get:   jsr     v_next
+000A41r 1  C9 0D                cmp     #K_CR
+000A43r 1  D0 1E                bne     @n13
+000A45r 1  20 rr rr             jsr     v_atend         ; CR LF: one line end
+000A48r 1  B0 45                bcs     @nl
+000A4Ar 1  AD rr rr             lda     vpos
+000A4Dr 1  8D rr rr             sta     @pk+1
+000A50r 1  AD rr rr             lda     vpos+1
+000A53r 1  8D rr rr             sta     @pk+2
+000A56r 1  AD FF FF     @pk:    lda     $FFFF
+000A59r 1  C9 0A                cmp     #10
+000A5Br 1  D0 32                bne     @nl
+000A5Dr 1  20 rr rr             jsr     v_next
+000A60r 1  4C rr rr             jmp     @nl
+000A63r 1  C9 0A        @n13:   cmp     #10
+000A65r 1  F0 28                beq     @nl
+000A67r 1  C9 09                cmp     #9
+000A69r 1  D0 12                bne     @n9
+000A6Br 1  A9 20        @tab:   lda     #' '
+000A6Dr 1  20 rr rr             jsr     v_out
+000A70r 1  B0 22                bcs     @full
+000A72r 1  AD rr rr             lda     vcol
+000A75r 1  F0 C1                beq     @ch
+000A77r 1  29 07                and     #7
+000A79r 1  D0 F0                bne     @tab
+000A7Br 1  F0 BB                beq     @ch
+000A7Dr 1  C9 20        @n9:    cmp     #' '
+000A7Fr 1  90 04                bcc     @dot
+000A81r 1  C9 7F                cmp     #$7F
+000A83r 1  90 02                bcc     @pr
+000A85r 1  A9 2E        @dot:   lda     #'.'
+000A87r 1  20 rr rr     @pr:    jsr     v_out
+000A8Ar 1  B0 08                bcs     @full
+000A8Cr 1  4C rr rr             jmp     @ch
+000A8Fr 1  20 rr rr     @nl:    jsr     v_nl
+000A92r 1  90 A4                bcc     @ch
+000A94r 1  20 rr rr     @full:  jsr     v_atend         ; (the page ended at the end of the text)
+000A97r 1  60                   rts
+000A98r 1               
+000A98r 1               ; C=1 (and veof = 1) when vpos has reached vend
+000A98r 1               v_atend:
+000A98r 1  AD rr rr             lda     vpos
+000A9Br 1  CD rr rr             cmp     vend
+000A9Er 1  AD rr rr             lda     vpos+1
+000AA1r 1  ED rr rr             sbc     vend+1
+000AA4r 1  90 05                bcc     @r
+000AA6r 1  A9 01                lda     #1
+000AA8r 1  8D rr rr             sta     veof
+000AABr 1  60           @r:     rts
+000AACr 1               
+000AACr 1               ; A = the byte at vpos, vpos + 1
+000AACr 1  AD rr rr     v_next: lda     vpos
+000AAFr 1  8D rr rr             sta     @rd+1
+000AB2r 1  AD rr rr             lda     vpos+1
+000AB5r 1  8D rr rr             sta     @rd+2
+000AB8r 1  AD FF FF     @rd:    lda     $FFFF
+000ABBr 1  EE rr rr             inc     vpos
+000ABEr 1  D0 03                bne     :+
+000AC0r 1  EE rr rr             inc     vpos+1
+000AC3r 1  60           :       rts
+000AC4r 1               
+000AC4r 1               ; print A; a new line after 79 (C=1: the page is full)
+000AC4r 1  20 03 FE     v_out:  jsr     SBC_CHROUT
+000AC7r 1  EE rr rr             inc     vcol
+000ACAr 1  AD rr rr             lda     vcol
+000ACDr 1  C9 4F                cmp     #79
+000ACFr 1  B0 02                bcs     v_nl
+000AD1r 1  18                   clc
+000AD2r 1  60                   rts
+000AD3r 1  A9 0D        v_nl:   lda     #13
+000AD5r 1  20 03 FE             jsr     SBC_CHROUT
+000AD8r 1  A9 0A                lda     #10
+000ADAr 1  20 03 FE             jsr     SBC_CHROUT
+000ADDr 1  A9 00                lda     #0
+000ADFr 1  8D rr rr             sta     vcol
+000AE2r 1  EE rr rr             inc     vlines
+000AE5r 1  AD rr rr             lda     vlines
+000AE8r 1  C9 15                cmp     #PAGE_LINES
+000AEAr 1  60                   rts
+000AEBr 1               
+000AEBr 1               ; A = 0 nothing, 1 next page, 2 the page before, 3 close
+000AEBr 1               v_input:
+000AEBr 1  AD rr rr             lda     m_click
+000AEEr 1  F0 08                beq     @mr
+000AF0r 1  A9 00                lda     #0
+000AF2r 1  8D rr rr             sta     m_click
+000AF5r 1  A9 01                lda     #1
+000AF7r 1  60                   rts
+000AF8r 1  AD rr rr     @mr:    lda     m_rclick
+000AFBr 1  F0 08                beq     @pad
+000AFDr 1  A9 00                lda     #0
+000AFFr 1  8D rr rr             sta     m_rclick
+000B02r 1  A9 03                lda     #3
+000B04r 1  60                   rts
+000B05r 1  20 12 FE     @pad:   jsr     SBC_PADSTATE    ; B, Select, Start close (the pad's
+000B08r 1  AA                   tax                     ; directions and A come as W A S D space)
+000B09r 1  4D rr rr             eor     pad_old
+000B0Cr 1  8E rr rr             stx     pad_old
+000B0Fr 1  2D rr rr             and     pad_old
+000B12r 1  29 0E                and     #$0E
+000B14r 1  F0 03                beq     @key
+000B16r 1  A9 03                lda     #3
+000B18r 1  60                   rts
+000B19r 1  20 00 FE     @key:   jsr     SBC_CHRIN
+000B1Cr 1  B0 03                bcs     @k
+000B1Er 1  A9 00                lda     #0
+000B20r 1  60                   rts
+000B21r 1  C9 61        @k:     cmp     #'a'
+000B23r 1  90 06                bcc     @u
+000B25r 1  C9 7B                cmp     #'z'+1
+000B27r 1  B0 02                bcs     @u
+000B29r 1  29 DF                and     #$DF
+000B2Br 1  A2 00        @u:     ldx     #0
+000B2Dr 1  BC rr rr     @l:     ldy     vkey_tab,x
+000B30r 1  F0 0D                beq     @none
+000B32r 1  DD rr rr             cmp     vkey_tab,x
+000B35r 1  F0 04                beq     @f
+000B37r 1  E8                   inx
+000B38r 1  E8                   inx
+000B39r 1  D0 F2                bne     @l
+000B3Br 1  BD rr rr     @f:     lda     vkey_tab+1,x
+000B3Er 1  60                   rts
+000B3Fr 1  A9 00        @none:  lda     #0
+000B41r 1  60                   rts
+000B42r 1               
+000B42r 1               ; print the 0-ended string at A/Y
+000B42r 1  8D rr rr     v_puts: sta     @rd+1
+000B45r 1  8C rr rr             sty     @rd+2
+000B48r 1  A2 00                ldx     #0
+000B4Ar 1  BD FF FF     @rd:    lda     $FFFF,x
+000B4Dr 1  F0 06                beq     @r
+000B4Fr 1  20 03 FE             jsr     SBC_CHROUT
+000B52r 1  E8                   inx
+000B53r 1  D0 F5                bne     @rd
+000B55r 1  60           @r:     rts
+000B56r 1               
+000B56r 1               ; print A in decimal
+000B56r 1  20 rr rr     v_dec:  jsr     dec3
+000B59r 1  A2 00                ldx     #0
+000B5Br 1  BD rr rr     @l:     lda     dbuf,x
+000B5Er 1  C9 20                cmp     #' '
+000B60r 1  F0 03                beq     @n
+000B62r 1  20 03 FE             jsr     SBC_CHROUT
+000B65r 1  E8           @n:     inx
+000B66r 1  E0 03                cpx     #3
+000B68r 1  D0 F1                bne     @l
+000B6Ar 1  60                   rts
+000B6Br 1               
+000B6Br 1               ; ============================================================================
+000B6Br 1               ; drawing
+000B6Br 1               ; ============================================================================
+000B6Br 1               draw_all:
+000B6Br 1  20 rr rr             jsr     draw_title
+000B6Er 1  20 rr rr             jsr     draw_head
+000B71r 1  20 rr rr             jsr     draw_list
+000B74r 1  20 rr rr             jsr     st_show
+000B77r 1  4C rr rr             jmp     draw_buttons
+000B7Ar 1               
+000B7Ar 1               ; row 0: "U:\GAMES\SUB" and the drive buttons
+000B7Ar 1               draw_title:
+000B7Ar 1  20 rr rr             jsr     clear_line
+000B7Dr 1  AD rr rr             lda     dev
+000B80r 1  8D rr rr             sta     line+1
+000B83r 1  A9 3A                lda     #':'
+000B85r 1  8D rr rr             sta     line+2
+000B88r 1  A2 03                ldx     #3
+000B8Ar 1  AD rr rr             lda     cwd
+000B8Dr 1  D0 07                bne     @p
+000B8Fr 1  A9 5C                lda     #$5C            ; (backslash)
+000B91r 1  9D rr rr             sta     line,x
+000B94r 1  D0 19                bne     @d
+000B96r 1  A0 00        @p:     ldy     #0
+000B98r 1  B9 rr rr     @pl:    lda     cwd,y
+000B9Br 1  F0 12                beq     @d
+000B9Dr 1  C9 2F                cmp     #'/'
+000B9Fr 1  D0 02                bne     :+
+000BA1r 1  A9 5C                lda     #$5C            ; (backslash)
+000BA3r 1  20 rr rr     :       jsr     map_ch
+000BA6r 1  9D rr rr             sta     line,x
+000BA9r 1  E8                   inx
+000BAAr 1  C8                   iny
+000BABr 1  E0 17                cpx     #23
+000BADr 1  90 E9                bcc     @pl
+000BAFr 1  A9 55        @d:     lda     #'U'
+000BB1r 1  8D rr rr             sta     line+25
+000BB4r 1  A9 43                lda     #'C'
+000BB6r 1  8D rr rr             sta     line+29
+000BB9r 1  A9 3A                lda     #':'
+000BBBr 1  8D rr rr             sta     line+26
+000BBEr 1  8D rr rr             sta     line+30
+000BC1r 1  A9 00                lda     #0
+000BC3r 1  8D rr rr             sta     row
+000BC6r 1  A9 40                lda     #$40
+000BC8r 1  8D rr rr             sta     off
+000BCBr 1  A2 00                ldx     #0
+000BCDr 1  A9 18                lda     #24
+000BCFr 1  8D rr rr             sta     lend
+000BD2r 1  20 rr rr             jsr     put_cells
+000BD5r 1  A9 55                lda     #'U'
+000BD7r 1  20 rr rr             jsr     @btn
+000BDAr 1  8D rr rr             sta     off
+000BDDr 1  A2 18                ldx     #24
+000BDFr 1  A9 1C                lda     #28
+000BE1r 1  8D rr rr             sta     lend
+000BE4r 1  20 rr rr             jsr     put_cells
+000BE7r 1  A9 43                lda     #'C'
+000BE9r 1  20 rr rr             jsr     @btn
+000BECr 1  8D rr rr             sta     off
+000BEFr 1  A2 1C                ldx     #28
+000BF1r 1  A9 20                lda     #32
+000BF3r 1  8D rr rr             sta     lend
+000BF6r 1  4C rr rr             jmp     put_cells
+000BF9r 1  CD rr rr     @btn:   cmp     dev             ; the drive in use: lit
+000BFCr 1  F0 03                beq     :+
+000BFEr 1  A9 40                lda     #$40
+000C00r 1  60                   rts
+000C01r 1  A9 80        :       lda     #$80
+000C03r 1  60                   rts
+000C04r 1               
+000C04r 1               ; row 1: the column titles
+000C04r 1               draw_head:
+000C04r 1  A2 1F                ldx     #31
+000C06r 1  BD rr rr     @c:     lda     s_head,x
+000C09r 1  9D rr rr             sta     line,x
+000C0Cr 1  CA                   dex
+000C0Dr 1  10 F7                bpl     @c
+000C0Fr 1  A9 01                lda     #1
+000C11r 1  8D rr rr             sta     row
+000C14r 1  A9 00                lda     #0
+000C16r 1  8D rr rr             sta     off
+000C19r 1  AA                   tax
+000C1Ar 1  A9 20                lda     #32
+000C1Cr 1  8D rr rr             sta     lend
+000C1Fr 1  4C rr rr             jmp     put_cells
+000C22r 1               
+000C22r 1               ; row 23: the buttons (their columns lit)
+000C22r 1               draw_buttons:
+000C22r 1  A2 00                ldx     #0
+000C24r 1  A0 17                ldy     #23
+000C26r 1  20 rr rr             jsr     vdp_at
+000C29r 1  A9 40        @c:     lda     #$40
+000C2Br 1  8D rr rr             sta     off
+000C2Er 1  A0 00                ldy     #0
+000C30r 1  B9 rr rr     @b:     lda     btn_x0,y
+000C33r 1  C9 FF                cmp     #$FF
+000C35r 1  F0 15                beq     @w
+000C37r 1  8A                   txa
+000C38r 1  D9 rr rr             cmp     btn_x0,y
+000C3Br 1  90 0C                bcc     @nx
+000C3Dr 1  D9 rr rr             cmp     btn_x1,y
+000C40r 1  B0 07                bcs     @nx
+000C42r 1  A9 80                lda     #$80
+000C44r 1  8D rr rr             sta     off
+000C47r 1  D0 03                bne     @w
+000C49r 1  C8           @nx:    iny
+000C4Ar 1  D0 E4                bne     @b
+000C4Cr 1  BD rr rr     @w:     lda     s_btns,x
+000C4Fr 1  18                   clc
+000C50r 1  6D rr rr             adc     off
+000C53r 1  8D 1C 7F             sta     VDP_DATA
+000C56r 1  E8                   inx
+000C57r 1  E0 20                cpx     #32
+000C59r 1  D0 CE                bne     @c
+000C5Br 1  60                   rts
+000C5Cr 1               
+000C5Cr 1               ; the list rows and the scroll bar
+000C5Cr 1               draw_list:
+000C5Cr 1  20 rr rr             jsr     calc_tpos
+000C5Fr 1  A9 00                lda     #0
+000C61r 1  8D rr rr             sta     cr
+000C64r 1  20 rr rr     @r:     jsr     draw_row
+000C67r 1  EE rr rr             inc     cr
+000C6Ar 1  AD rr rr             lda     cr
+000C6Dr 1  C9 14                cmp     #LIST_H
+000C6Fr 1  D0 F3                bne     @r
+000C71r 1  60                   rts
+000C72r 1               
+000C72r 1               ; the scroll bar's thumb: tpos = top * 17 / (n_list - 20), $FF = none
+000C72r 1               calc_tpos:
+000C72r 1  A9 FF                lda     #$FF
+000C74r 1  8D rr rr             sta     tpos
+000C77r 1  AD rr rr             lda     n_list
+000C7Ar 1  38                   sec
+000C7Br 1  E9 15                sbc     #LIST_H+1
+000C7Dr 1  90 48                bcc     @r
+000C7Fr 1  18                   clc
+000C80r 1  69 01                adc     #1
+000C82r 1  8D rr rr             sta     den
+000C85r 1  AD rr rr             lda     top             ; num = top * 17
+000C88r 1  8D rr rr             sta     num
+000C8Br 1  A9 00                lda     #0
+000C8Dr 1  8D rr rr             sta     num+1
+000C90r 1  A2 04                ldx     #4
+000C92r 1  0E rr rr     @m:     asl     num
+000C95r 1  2E rr rr             rol     num+1
+000C98r 1  CA                   dex
+000C99r 1  D0 F7                bne     @m
+000C9Br 1  AD rr rr             lda     num
+000C9Er 1  18                   clc
+000C9Fr 1  6D rr rr             adc     top
+000CA2r 1  8D rr rr             sta     num
+000CA5r 1  90 03                bcc     :+
+000CA7r 1  EE rr rr             inc     num+1
+000CAAr 1  A2 00        :       ldx     #0              ; (the quotient is 17 at most)
+000CACr 1  AD rr rr     @d:     lda     num
+000CAFr 1  38                   sec
+000CB0r 1  ED rr rr             sbc     den
+000CB3r 1  A8                   tay
+000CB4r 1  AD rr rr             lda     num+1
+000CB7r 1  E9 00                sbc     #0
+000CB9r 1  90 09                bcc     @q
+000CBBr 1  8D rr rr             sta     num+1
+000CBEr 1  8C rr rr             sty     num
+000CC1r 1  E8                   inx
+000CC2r 1  D0 E8                bne     @d
+000CC4r 1  8E rr rr     @q:     stx     tpos
+000CC7r 1  60           @r:     rts
+000CC8r 1               
+000CC8r 1               ; list row cr
+000CC8r 1               draw_row:
+000CC8r 1  20 rr rr             jsr     clear_line
+000CCBr 1  A9 00                lda     #0
+000CCDr 1  8D rr rr             sta     off
+000CD0r 1  AD rr rr             lda     top
+000CD3r 1  18                   clc
+000CD4r 1  6D rr rr             adc     cr
+000CD7r 1  8D rr rr             sta     ri
+000CDAr 1  CD rr rr             cmp     n_list
+000CDDr 1  B0 0D                bcs     @sb
+000CDFr 1  CD rr rr             cmp     sel
+000CE2r 1  D0 05                bne     @f
+000CE4r 1  A9 80                lda     #$80
+000CE6r 1  8D rr rr             sta     off
+000CE9r 1  20 rr rr     @f:     jsr     fill_entry
+000CECr 1  AD rr rr     @sb:    lda     cr              ; the scroll bar
+000CEFr 1  D0 04                bne     :+
+000CF1r 1  A9 E0                lda     #$E0
+000CF3r 1  D0 16                bne     @s
+000CF5r 1  C9 13        :       cmp     #LIST_H-1
+000CF7r 1  D0 04                bne     :+
+000CF9r 1  A9 E1                lda     #$E1
+000CFBr 1  D0 0E                bne     @s
+000CFDr 1  38           :       sec
+000CFEr 1  E9 01                sbc     #1
+000D00r 1  CD rr rr             cmp     tpos
+000D03r 1  D0 04                bne     :+
+000D05r 1  A9 E3                lda     #$E3
+000D07r 1  D0 02                bne     @s
+000D09r 1  A9 E2        :       lda     #$E2
+000D0Br 1  8D rr rr     @s:     sta     line+31
+000D0Er 1  AD rr rr             lda     cr
+000D11r 1  18                   clc
+000D12r 1  69 02                adc     #LIST_Y
+000D14r 1  8D rr rr             sta     row
+000D17r 1  A2 00                ldx     #0
+000D19r 1  A9 20                lda     #32
+000D1Br 1  8D rr rr             sta     lend
+000D1Er 1  4C rr rr             jmp     put_cells
+000D21r 1               
+000D21r 1               ; line = list entry ri: icon, name, size, kind
+000D21r 1               fill_entry:
+000D21r 1  AE rr rr             ldx     ri
+000D24r 1  BD rr rr             lda     order,x
+000D27r 1  C9 FF                cmp     #$FF
+000D29r 1  D0 13                bne     @real
+000D2Br 1  A9 02                lda     #2              ; "..": the up icon
+000D2Dr 1  8D rr rr             sta     line+1
+000D30r 1  A9 03                lda     #3
+000D32r 1  8D rr rr             sta     line+2
+000D35r 1  A9 2E                lda     #'.'
+000D37r 1  8D rr rr             sta     line+4
+000D3Ar 1  8D rr rr             sta     line+5
+000D3Dr 1  60                   rts
+000D3Er 1  20 rr rr     @real:  jsr     get_ent
+000D41r 1  20 rr rr             jsr     ent_kind
+000D44r 1  8D rr rr             sta     kind
+000D47r 1  0A                   asl
+000D48r 1  8D rr rr             sta     line+1
+000D4Br 1  09 01                ora     #1
+000D4Dr 1  8D rr rr             sta     line+2
+000D50r 1  20 rr rr             jsr     fmt_name
+000D53r 1  A2 00                ldx     #0
+000D55r 1  BD rr rr     @n:     lda     nbuf,x
+000D58r 1  F0 09                beq     @sz
+000D5Ar 1  20 rr rr             jsr     map_ch
+000D5Dr 1  9D rr rr             sta     line+4,x
+000D60r 1  E8                   inx
+000D61r 1  D0 F2                bne     @n
+000D63r 1  AD rr rr     @sz:    lda     kind
+000D66r 1  D0 0C                bne     @file
+000D68r 1  A2 04                ldx     #4              ; a folder: "<DIR>"
+000D6Ar 1  BD rr rr     @dl:    lda     s_dir,x
+000D6Dr 1  9D rr rr             sta     line+20,x
+000D70r 1  CA                   dex
+000D71r 1  10 F7                bpl     @dl
+000D73r 1  60                   rts
+000D74r 1  20 rr rr     @file:  jsr     dec32           ; the size, 8 columns
+000D77r 1  A2 07                ldx     #7
+000D79r 1  BD rr rr     @sl:    lda     dbuf,x
+000D7Cr 1  9D rr rr             sta     line+17,x
+000D7Fr 1  CA                   dex
+000D80r 1  10 F7                bpl     @sl
+000D82r 1  AD rr rr             lda     kind            ; the kind
+000D85r 1  38                   sec
+000D86r 1  E9 02                sbc     #2
+000D88r 1  C9 03                cmp     #3
+000D8Ar 1  B0 17                bcs     @r
+000D8Cr 1  8D rr rr             sta     t1
+000D8Fr 1  0A                   asl
+000D90r 1  0A                   asl
+000D91r 1  6D rr rr             adc     t1              ; * 5
+000D94r 1  AA                   tax
+000D95r 1  A0 00                ldy     #0
+000D97r 1  BD rr rr     @kl:    lda     s_kinds,x
+000D9Ar 1  99 rr rr             sta     line+26,y
+000D9Dr 1  E8                   inx
+000D9Er 1  C8                   iny
+000D9Fr 1  C0 05                cpy     #5
+000DA1r 1  D0 F4                bne     @kl
+000DA3r 1  60           @r:     rts
+000DA4r 1               
+000DA4r 1               ; a character of a name, for the font ($20-$5F)
+000DA4r 1  C9 61        map_ch: cmp     #'a'
+000DA6r 1  90 0A                bcc     @l
+000DA8r 1  C9 7B                cmp     #'z'+1
+000DAAr 1  B0 03                bcs     @h
+000DACr 1  29 DF                and     #$DF
+000DAEr 1  60                   rts
+000DAFr 1  A9 2D        @h:     lda     #'-'
+000DB1r 1  60                   rts
+000DB2r 1  C9 20        @l:     cmp     #' '
+000DB4r 1  B0 02                bcs     @r
+000DB6r 1  A9 3F                lda     #'?'
+000DB8r 1  60           @r:     rts
+000DB9r 1               
+000DB9r 1               clear_line:
+000DB9r 1  A9 20                lda     #' '
+000DBBr 1  A2 1F                ldx     #31
+000DBDr 1  9D rr rr     @c:     sta     line,x
+000DC0r 1  CA                   dex
+000DC1r 1  10 FA                bpl     @c
+000DC3r 1  60                   rts
+000DC4r 1               
+000DC4r 1               ; line[X .. lend) to the screen at (X, row), the font + off ($00 list,
+000DC4r 1               ; $40 bars, $80 selected); icons ($00-$17) get +$0C on a selected row;
+000DC4r 1               ; $E0 and up as they are
+000DC4r 1               put_cells:
+000DC4r 1  AC rr rr             ldy     row
+000DC7r 1  20 rr rr             jsr     vdp_at
+000DCAr 1  BD rr rr     @l:     lda     line,x
+000DCDr 1  C9 18                cmp     #$18
+000DCFr 1  B0 0C                bcs     @t
+000DD1r 1  AC rr rr             ldy     off
+000DD4r 1  C0 80                cpy     #$80
+000DD6r 1  D0 0D                bne     @w
+000DD8r 1  18                   clc
+000DD9r 1  69 0C                adc     #$0C
+000DDBr 1  D0 08                bne     @w
+000DDDr 1  C9 E0        @t:     cmp     #$E0
+000DDFr 1  B0 04                bcs     @w
+000DE1r 1  18                   clc
+000DE2r 1  6D rr rr             adc     off
+000DE5r 1  8D 1C 7F     @w:     sta     VDP_DATA
+000DE8r 1  E8                   inx
+000DE9r 1  EC rr rr             cpx     lend
+000DECr 1  90 DC                bcc     @l
+000DEEr 1  60                   rts
+000DEFr 1               
+000DEFr 1               ; ============================================================================
+000DEFr 1               ; numbers
+000DEFr 1               ; ============================================================================
+000DEFr 1               
+000DEFr 1               ; the size in ebuf+12 (32 bit) -> dbuf, 8 characters, right-aligned
+000DEFr 1  A2 03        dec32:  ldx     #3
+000DF1r 1  BD rr rr     @c:     lda     ebuf+12,x
+000DF4r 1  9D rr rr             sta     num4,x
+000DF7r 1  CA                   dex
+000DF8r 1  10 F7                bpl     @c
+000DFAr 1  AD rr rr             lda     num4+3          ; 100,000,000 and up: "BIG"
+000DFDr 1  C9 05                cmp     #>(100000000 >> 16)
+000DFFr 1  90 27                bcc     @ok
+000E01r 1  D0 19                bne     @big
+000E03r 1  AD rr rr             lda     num4+2
+000E06r 1  C9 F5                cmp     #<(100000000 >> 16)
+000E08r 1  90 1E                bcc     @ok
+000E0Ar 1  D0 10                bne     @big
+000E0Cr 1  AD rr rr             lda     num4+1
+000E0Fr 1  C9 E1                cmp     #>100000000
+000E11r 1  90 15                bcc     @ok
+000E13r 1  D0 07                bne     @big
+000E15r 1  AD rr rr             lda     num4
+000E18r 1  C9 00                cmp     #<100000000
+000E1Ar 1  90 0C                bcc     @ok
+000E1Cr 1  A2 07        @big:   ldx     #7
+000E1Er 1  BD rr rr     @bl:    lda     s_big,x
+000E21r 1  9D rr rr             sta     dbuf,x
+000E24r 1  CA                   dex
+000E25r 1  10 F7                bpl     @bl
+000E27r 1  60                   rts
+000E28r 1  A9 00        @ok:    lda     #0
+000E2Ar 1  8D rr rr             sta     dlead
+000E2Dr 1  8D rr rr             sta     dpos
+000E30r 1  AD rr rr     @dig:   lda     dpos            ; the power of ten: p10 + 4 dpos
+000E33r 1  0A                   asl
+000E34r 1  0A                   asl
+000E35r 1  A8                   tay
+000E36r 1  A2 00                ldx     #0
+000E38r 1  AD rr rr     @sub:   lda     num4            ; subtract while it fits
+000E3Br 1  38                   sec
+000E3Cr 1  F9 rr rr             sbc     p10,y
+000E3Fr 1  8D rr rr             sta     t4
+000E42r 1  AD rr rr             lda     num4+1
+000E45r 1  F9 rr rr             sbc     p10+1,y
+000E48r 1  8D rr rr             sta     t5
+000E4Br 1  AD rr rr             lda     num4+2
+000E4Er 1  F9 rr rr             sbc     p10+2,y
+000E51r 1  8D rr rr             sta     t6
+000E54r 1  AD rr rr             lda     num4+3
+000E57r 1  F9 rr rr             sbc     p10+3,y
+000E5Ar 1  90 18                bcc     @put
+000E5Cr 1  8D rr rr             sta     num4+3
+000E5Fr 1  AD rr rr             lda     t6
+000E62r 1  8D rr rr             sta     num4+2
+000E65r 1  AD rr rr             lda     t5
+000E68r 1  8D rr rr             sta     num4+1
+000E6Br 1  AD rr rr             lda     t4
+000E6Er 1  8D rr rr             sta     num4
+000E71r 1  E8                   inx
+000E72r 1  D0 C4                bne     @sub
+000E74r 1  AC rr rr     @put:   ldy     dpos
+000E77r 1  C0 07                cpy     #7
+000E79r 1  F0 0D                beq     @dg             ; the last digit always shows
+000E7Br 1  E0 00                cpx     #0
+000E7Dr 1  D0 09                bne     @dg
+000E7Fr 1  AD rr rr             lda     dlead
+000E82r 1  D0 04                bne     @dg
+000E84r 1  A9 20                lda     #' '
+000E86r 1  D0 08                bne     @st
+000E88r 1  A9 01        @dg:    lda     #1
+000E8Ar 1  8D rr rr             sta     dlead
+000E8Dr 1  8A                   txa
+000E8Er 1  09 30                ora     #'0'
+000E90r 1  99 rr rr     @st:    sta     dbuf,y
+000E93r 1  EE rr rr             inc     dpos
+000E96r 1  AD rr rr             lda     dpos
+000E99r 1  C9 08                cmp     #8
+000E9Br 1  D0 93                bne     @dig
+000E9Dr 1  60                   rts
+000E9Er 1               
+000E9Er 1               ; A -> dbuf[0..2], right-aligned (no leading zeros)
+000E9Er 1  A2 2F        dec3:   ldx     #'0'-1
+000EA0r 1  38                   sec
+000EA1r 1  E8           @h:     inx
+000EA2r 1  E9 64                sbc     #100
+000EA4r 1  B0 FB                bcs     @h
+000EA6r 1  69 64                adc     #100
+000EA8r 1  8E rr rr             stx     dbuf
+000EABr 1  A2 2F                ldx     #'0'-1
+000EADr 1  38                   sec
+000EAEr 1  E8           @t:     inx
+000EAFr 1  E9 0A                sbc     #10
+000EB1r 1  B0 FB                bcs     @t
+000EB3r 1  69 3A                adc     #10+'0'
+000EB5r 1  8D rr rr             sta     dbuf+2
+000EB8r 1  8E rr rr             stx     dbuf+1
+000EBBr 1  AD rr rr             lda     dbuf
+000EBEr 1  C9 30                cmp     #'0'
+000EC0r 1  D0 11                bne     @r
+000EC2r 1  A9 20                lda     #' '
+000EC4r 1  8D rr rr             sta     dbuf
+000EC7r 1  AD rr rr             lda     dbuf+1
+000ECAr 1  C9 30                cmp     #'0'
+000ECCr 1  D0 05                bne     @r
+000ECEr 1  A9 20                lda     #' '
+000ED0r 1  8D rr rr             sta     dbuf+1
+000ED3r 1  60           @r:     rts
+000ED4r 1               
+000ED4r 1               ; ============================================================================
+000ED4r 1               ; the message line (row 22)
+000ED4r 1               ; ============================================================================
+000ED4r 1               st_clear:
+000ED4r 1  A9 20                lda     #' '
+000ED6r 1  A2 1F                ldx     #31
+000ED8r 1  9D rr rr     @c:     sta     stat,x
+000EDBr 1  CA                   dex
+000EDCr 1  10 FA                bpl     @c
+000EDEr 1  A9 01                lda     #1
+000EE0r 1  8D rr rr             sta     spos
+000EE3r 1  60                   rts
+000EE4r 1               
+000EE4r 1               ; message = the string at A/Y (shown)
+000EE4r 1               st_text:
+000EE4r 1  48                   pha
+000EE5r 1  20 rr rr             jsr     st_clear
+000EE8r 1  68                   pla
+000EE9r 1  20 rr rr             jsr     st_str
+000EECr 1  4C rr rr             jmp     st_show
+000EEFr 1               
+000EEFr 1               ; add the string at A/Y
+000EEFr 1  8D rr rr     st_str: sta     @rd+1
+000EF2r 1  8C rr rr             sty     @rd+2
+000EF5r 1  A0 00                ldy     #0
+000EF7r 1  B9 FF FF     @rd:    lda     $FFFF,y
+000EFAr 1  F0 06                beq     @r
+000EFCr 1  20 rr rr             jsr     st_chr
+000EFFr 1  C8                   iny
+000F00r 1  D0 F5                bne     @rd
+000F02r 1  60           @r:     rts
+000F03r 1               
+000F03r 1  AE rr rr     st_chr: ldx     spos
+000F06r 1  E0 20                cpx     #32
+000F08r 1  B0 09                bcs     @r
+000F0Ar 1  20 rr rr             jsr     map_ch
+000F0Dr 1  9D rr rr             sta     stat,x
+000F10r 1  EE rr rr             inc     spos
+000F13r 1  60           @r:     rts
+000F14r 1               
+000F14r 1               ; add nbuf
+000F14r 1               st_name:
+000F14r 1  A9 rr                lda     #<nbuf
+000F16r 1  A0 rr                ldy     #>nbuf
+000F18r 1  4C rr rr             jmp     st_str
+000F1Br 1               
+000F1Br 1               st_show:
+000F1Br 1  A2 1F                ldx     #31
+000F1Dr 1  BD rr rr     @c:     lda     stat,x
+000F20r 1  9D rr rr             sta     line,x
+000F23r 1  CA                   dex
+000F24r 1  10 F7                bpl     @c
+000F26r 1  A9 16                lda     #22
+000F28r 1  8D rr rr             sta     row
+000F2Br 1  A9 00                lda     #0
+000F2Dr 1  8D rr rr             sta     off
+000F30r 1  AA                   tax
+000F31r 1  A9 20                lda     #32
+000F33r 1  8D rr rr             sta     lend
+000F36r 1  4C rr rr             jmp     put_cells
+000F39r 1               
+000F39r 1               ; " 12 ITEMS"
+000F39r 1               st_count:
+000F39r 1  20 rr rr             jsr     st_clear
+000F3Cr 1  AD rr rr             lda     n_ent
+000F3Fr 1  D0 0A                bne     @n
+000F41r 1  A9 rr                lda     #<s_empty
+000F43r 1  A0 rr                ldy     #>s_empty
+000F45r 1  20 rr rr             jsr     st_str
+000F48r 1  4C rr rr             jmp     st_show
+000F4Br 1  20 rr rr     @n:     jsr     dec3
+000F4Er 1  A2 00                ldx     #0
+000F50r 1  BD rr rr     @d:     lda     dbuf,x
+000F53r 1  C9 20                cmp     #' '
+000F55r 1  F0 09                beq     :+
+000F57r 1  8E rr rr             stx     t3
+000F5Ar 1  20 rr rr             jsr     st_chr
+000F5Dr 1  AE rr rr             ldx     t3
+000F60r 1  E8           :       inx
+000F61r 1  E0 03                cpx     #3
+000F63r 1  D0 EB                bne     @d
+000F65r 1  A9 rr                lda     #<s_items
+000F67r 1  A0 rr                ldy     #>s_items
+000F69r 1  20 rr rr             jsr     st_str
+000F6Cr 1  4C rr rr             jmp     st_show
+000F6Fr 1               
+000F6Fr 1               ; an error code A, in words
+000F6Fr 1               st_error:
+000F6Fr 1  8D rr rr             sta     errc
+000F72r 1  20 rr rr             jsr     st_clear
+000F75r 1  A2 00                ldx     #0
+000F77r 1  BD rr rr     @l:     lda     err_tab,x
+000F7Ar 1  F0 16                beq     @gen
+000F7Cr 1  CD rr rr             cmp     errc
+000F7Fr 1  F0 05                beq     @f
+000F81r 1  E8                   inx
+000F82r 1  E8                   inx
+000F83r 1  E8                   inx
+000F84r 1  D0 F1                bne     @l
+000F86r 1  BD rr rr     @f:     lda     err_tab+1,x
+000F89r 1  BC rr rr             ldy     err_tab+2,x
+000F8Cr 1  20 rr rr             jsr     st_str
+000F8Fr 1  4C rr rr             jmp     st_show
+000F92r 1  A9 rr        @gen:   lda     #<s_err
+000F94r 1  A0 rr                ldy     #>s_err
+000F96r 1  20 rr rr             jsr     st_str
+000F99r 1  AD rr rr             lda     errc
+000F9Cr 1  4A                   lsr
+000F9Dr 1  4A                   lsr
+000F9Er 1  4A                   lsr
+000F9Fr 1  4A                   lsr
+000FA0r 1  20 rr rr             jsr     @hex
+000FA3r 1  AD rr rr             lda     errc
+000FA6r 1  29 0F                and     #15
+000FA8r 1  20 rr rr             jsr     @hex
+000FABr 1  4C rr rr             jmp     st_show
+000FAEr 1  C9 0A        @hex:   cmp     #10
+000FB0r 1  90 02                bcc     :+
+000FB2r 1  69 06                adc     #6
+000FB4r 1  69 30        :       adc     #'0'
+000FB6r 1  4C rr rr             jmp     st_chr
+000FB9r 1               
+000FB9r 1               ; ============================================================================
+000FB9r 1               ; the display
+000FB9r 1               ; ============================================================================
+000FB9r 1               gfx_init:
+000FB9r 1  A9 rr                lda     #<vdp_regs
+000FBBr 1  A0 rr                ldy     #>vdp_regs
+000FBDr 1  20 rr rr             jsr     vdp_setup       ; (VRAM cleared)
+000FC0r 1  A9 00                lda     #<V_TP0
+000FC2r 1  A0 00                ldy     #>V_TP0
+000FC4r 1  20 rr rr             jsr     vdp_waddr
+000FC7r 1  A9 rr                lda     #<tile_p0
+000FC9r 1  A2 rr                ldx     #>tile_p0
+000FCBr 1  A0 08                ldy     #8
+000FCDr 1  20 rr rr             jsr     copy_pages
+000FD0r 1  A9 00                lda     #<V_TP1
+000FD2r 1  A0 08                ldy     #>V_TP1
+000FD4r 1  20 rr rr             jsr     vdp_waddr
+000FD7r 1  A9 rr                lda     #<tile_p1
+000FD9r 1  A2 rr                ldx     #>tile_p1
+000FDBr 1  A0 08                ldy     #8
+000FDDr 1  20 rr rr             jsr     copy_pages
+000FE0r 1  A9 00                lda     #<V_ATT
+000FE2r 1  A0 24                ldy     #>V_ATT
+000FE4r 1  20 rr rr             jsr     vdp_waddr
+000FE7r 1  A9 rr                lda     #<tile_attr
+000FE9r 1  A2 rr                ldx     #>tile_attr
+000FEBr 1  A0 01                ldy     #1
+000FEDr 1  20 rr rr             jsr     copy_pages
+000FF0r 1  A9 00                lda     #<V_SP0
+000FF2r 1  A0 10                ldy     #>V_SP0
+000FF4r 1  20 rr rr             jsr     vdp_waddr
+000FF7r 1  A9 rr                lda     #<spr_p0
+000FF9r 1  A2 rr                ldx     #>spr_p0
+000FFBr 1  20 rr rr             jsr     copy8
+000FFEr 1  A9 00                lda     #<V_SP1
+001000r 1  A0 18                ldy     #>V_SP1
+001002r 1  20 rr rr             jsr     vdp_waddr
+001005r 1  A9 rr                lda     #<spr_p1
+001007r 1  A2 rr                ldx     #>spr_p1
+001009r 1  20 rr rr             jsr     copy8
+00100Cr 1  A9 D0                lda     #$C0 | 16       ; palette entries 16-63 (R47: the data port
+00100Er 1  A2 2F                ldx     #47             ; writes the palette, counting up)
+001010r 1  20 rr rr             jsr     vdp_reg
+001013r 1  A2 00                ldx     #0
+001015r 1  BD rr rr     @pl:    lda     pal_gui,x
+001018r 1  8D 1C 7F             sta     VDP_DATA
+00101Br 1  E8                   inx
+00101Cr 1  E0 60                cpx     #96
+00101Er 1  D0 F5                bne     @pl
+001020r 1  A9 00                lda     #0
+001022r 1  A2 2F                ldx     #47
+001024r 1  20 rr rr             jsr     vdp_reg
+001027r 1  A2 00                ldx     #0              ; the F18A's registers
+001029r 1  8E rr rr     @fr:    stx     t1
+00102Cr 1  BD rr rr             lda     f18a_regs+1,x
+00102Fr 1  48                   pha
+001030r 1  BD rr rr             lda     f18a_regs,x
+001033r 1  AA                   tax
+001034r 1  68                   pla
+001035r 1  20 rr rr             jsr     vdp_reg
+001038r 1  AE rr rr             ldx     t1
+00103Br 1  E8                   inx
+00103Cr 1  E8                   inx
+00103Dr 1  E0 0A                cpx     #F18A_N * 2
+00103Fr 1  D0 E8                bne     @fr
+001041r 1  A9 00                lda     #<V_SAT         ; the pointer (hidden until placed), the end
+001043r 1  A0 26                ldy     #>V_SAT
+001045r 1  20 rr rr             jsr     vdp_waddr
+001048r 1  A9 C0                lda     #$C0
+00104Ar 1  8D 1C 7F             sta     VDP_DATA
+00104Dr 1  A9 00                lda     #0
+00104Fr 1  8D 1C 7F             sta     VDP_DATA
+001052r 1  8D 1C 7F             sta     VDP_DATA
+001055r 1  A9 0F                lda     #15
+001057r 1  8D 1C 7F             sta     VDP_DATA
+00105Ar 1  A9 D0                lda     #$D0
+00105Cr 1  8D 1C 7F             sta     VDP_DATA
+00105Fr 1  A9 01                lda     #1
+001061r 1  8D rr rr             sta     gfx_on
+001064r 1  AD rr rr             lda     mouse_ok
+001067r 1  F0 03                beq     :+
+001069r 1  20 rr rr             jsr     put_pointer
+00106Cr 1  A9 C0        :       lda     #$C0            ; R1: display on, 16K, 8 x 8 sprites, no
+00106Er 1  A2 01                ldx     #1              ; VDP interrupt
+001070r 1  4C rr rr             jmp     vdp_reg
+001073r 1               
+001073r 1               ; the display back to the console's (the PICO9918 reset: registers, palette)
+001073r 1               leave_gfx:
+001073r 1  A9 00                lda     #0
+001075r 1  8D rr rr             sta     gfx_on
+001078r 1  A9 C0                lda     #$C0
+00107Ar 1  A2 32                ldx     #50
+00107Cr 1  4C rr rr             jmp     vdp_reg
+00107Fr 1               
+00107Fr 1               ; copy Y pages from A (lo) / X (hi) to VRAM (the address set)
+00107Fr 1               copy_pages:
+00107Fr 1  8D rr rr             sta     vdp_src
+001082r 1  8E rr rr             stx     vdp_src+1
+001085r 1  A9 00                lda     #0
+001087r 1  8D rr rr             sta     vdp_n
+00108Ar 1  8C rr rr             sty     vdp_n+1
+00108Dr 1  4C rr rr             jmp     vdp_copy
+001090r 1  8D rr rr     copy8:  sta     vdp_src
+001093r 1  8E rr rr             stx     vdp_src+1
+001096r 1  A9 08                lda     #8
+001098r 1  8D rr rr             sta     vdp_n
+00109Br 1  A9 00                lda     #0
+00109Dr 1  8D rr rr             sta     vdp_n+1
+0010A0r 1  4C rr rr             jmp     vdp_copy
+0010A3r 1               
+0010A3r 1               ; ============================================================================
+0010A3r 1               ; the mouse (SBC_MOUSEON / SBC_MOUSE)
+0010A3r 1               ; ============================================================================
+0010A3r 1               mouse_init:
+0010A3r 1  A9 00                lda     #0
+0010A5r 1  8D rr rr             sta     mouse_ok
+0010A8r 1  8D rr rr             sta     m_old
+0010ABr 1  AD 21 FE             lda     SBC_MOUSEON
+0010AEr 1  C9 4C                cmp     #$4C
+0010B0r 1  D0 15                bne     @r
+0010B2r 1  A9 01                lda     #1
+0010B4r 1  20 21 FE             jsr     SBC_MOUSEON
+0010B7r 1  B0 0E                bcs     @r
+0010B9r 1  A9 01                lda     #1
+0010BBr 1  8D rr rr             sta     mouse_ok
+0010BEr 1  20 24 FE             jsr     SBC_MOUSE       ; (the buttons as they are now)
+0010C1r 1  8D rr rr             sta     m_old
+0010C4r 1  20 rr rr             jsr     put_pointer
+0010C7r 1  60           @r:     rts
+0010C8r 1               
+0010C8r 1               mouse_off:
+0010C8r 1  AD rr rr             lda     mouse_ok
+0010CBr 1  F0 05                beq     @r
+0010CDr 1  A9 00                lda     #0
+0010CFr 1  20 21 FE             jsr     SBC_MOUSEON
+0010D2r 1  60           @r:     rts
+0010D3r 1               
+0010D3r 1               mouse_flush:
+0010D3r 1  20 rr rr             jsr     mouse_poll
+0010D6r 1  A9 00                lda     #0
+0010D8r 1  8D rr rr             sta     m_click
+0010DBr 1  8D rr rr             sta     m_rclick
+0010DEr 1  60                   rts
+0010DFr 1               
+0010DFr 1               ; move the pointer; m_click / m_rclick = a button pressed
+0010DFr 1               mouse_poll:
+0010DFr 1  AD rr rr             lda     mouse_ok
+0010E2r 1  D0 01                bne     @go
+0010E4r 1  60                   rts
+0010E5r 1  20 24 FE     @go:    jsr     SBC_MOUSE
+0010E8r 1  B0 01                bcs     @rep
+0010EAr 1  60                   rts
+0010EBr 1  8D rr rr     @rep:   sta     m_btn
+0010EEr 1  8C rr rr             sty     m_dy
+0010F1r 1  8A                   txa                     ; x: 0 .. 252
+0010F2r 1  F0 1B                beq     @y
+0010F4r 1  30 0E                bmi     @xn
+0010F6r 1  18                   clc
+0010F7r 1  6D rr rr             adc     m_x
+0010FAr 1  B0 04                bcs     @xmax
+0010FCr 1  C9 FD                cmp     #253
+0010FEr 1  90 0C                bcc     @xs
+001100r 1  A9 FC        @xmax:  lda     #252
+001102r 1  D0 08                bne     @xs
+001104r 1  18           @xn:    clc
+001105r 1  6D rr rr             adc     m_x
+001108r 1  B0 02                bcs     @xs
+00110Ar 1  A9 00                lda     #0
+00110Cr 1  8D rr rr     @xs:    sta     m_x
+00110Fr 1  AD rr rr     @y:     lda     m_dy            ; y: 0 .. 190
+001112r 1  F0 1B                beq     @b
+001114r 1  30 0E                bmi     @yn
+001116r 1  18                   clc
+001117r 1  6D rr rr             adc     m_y
+00111Ar 1  B0 04                bcs     @ymax
+00111Cr 1  C9 BF                cmp     #191
+00111Er 1  90 0C                bcc     @ys
+001120r 1  A9 BE        @ymax:  lda     #190
+001122r 1  D0 08                bne     @ys
+001124r 1  18           @yn:    clc
+001125r 1  6D rr rr             adc     m_y
+001128r 1  B0 02                bcs     @ys
+00112Ar 1  A9 00                lda     #0
+00112Cr 1  8D rr rr     @ys:    sta     m_y
+00112Fr 1  AD rr rr     @b:     lda     m_old           ; pressed now and not before
+001132r 1  49 FF                eor     #$FF
+001134r 1  2D rr rr             and     m_btn
+001137r 1  4A                   lsr
+001138r 1  90 05                bcc     @nl
+00113Ar 1  A2 01                ldx     #1
+00113Cr 1  8E rr rr             stx     m_click
+00113Fr 1  4A           @nl:    lsr
+001140r 1  90 05                bcc     @nr
+001142r 1  A2 01                ldx     #1
+001144r 1  8E rr rr             stx     m_rclick
+001147r 1  AD rr rr     @nr:    lda     m_btn
+00114Ar 1  8D rr rr             sta     m_old
+00114Dr 1               put_pointer:
+00114Dr 1  AD rr rr             lda     gfx_on
+001150r 1  F0 14                beq     @r
+001152r 1  A9 00                lda     #<V_SAT
+001154r 1  A0 26                ldy     #>V_SAT
+001156r 1  20 rr rr             jsr     vdp_waddr
+001159r 1  AE rr rr             ldx     m_y
+00115Cr 1  CA                   dex
+00115Dr 1  8E 1C 7F             stx     VDP_DATA
+001160r 1  AD rr rr             lda     m_x
+001163r 1  8D 1C 7F             sta     VDP_DATA
+001166r 1  60           @r:     rts
+001167r 1               
+001167r 1                       .include "lib/vdp.s"
+001167r 2               ; ============================================================================
+001167r 2               ; vdp.s - PICO9918 / TMS9918A routines shared by the SBC games (CPU Rev2)
+001167r 2               ;
+001167r 2               ; Include it after setting VDP_NAME (the name table's VRAM address):
+001167r 2               ;           VDP_NAME = $1800
+001167r 2               ;           .include "lib/vdp.s"
+001167r 2               ; No zero page is used: the copy routines patch their own addresses.
+001167r 2               ;
+001167r 2               ;   vdp_setup   A/Y -> 8 bytes: R0-R7.  Puts a PICO9918 (F18A mode) back to
+001167r 2               ;               plain TMS9918A behaviour first (24 rows, all 32 sprites, no
+001167r 2               ;               scrolling, no second tile layer; the unlock leaves VR30 at
+001167r 2               ;               31 sprites a line),
+001167r 2               ;               clears the 16K of VRAM, then loads R0-R7.  Interrupts from
+001167r 2               ;               the VDP should be off in R1 (bit 5): the games poll.
+001167r 2               ;   vdp_reg     register X = A
+001167r 2               ;   vdp_waddr   VRAM write address = A (low) / Y (high)
+001167r 2               ;   vdp_fill    write A to VRAM vdp_n (16 bit) times, from the address set
+001167r 2               ;   vdp_copy    copy vdp_n bytes from RAM vdp_src to VRAM (from the address set)
+001167r 2               ;   vdp_at      write address = the name table cell at column X, row Y
+001167r 2               ;   vdp_puts    write the 0-ended string at A/Y from there (names = ASCII)
+001167r 2               ;   vdp_bcd     write A as two digits
+001167r 2               ;   vdp_frame   wait for the next frame (60 a second), calling frame_idle
+001167r 2               ;               (the game's: sound, random numbers) while it waits
+001167r 2               ;
+001167r 2               ; The VDP's ports: data $7F1C, control/status $7F1D.  Reading the status
+001167r 2               ; clears the frame flag, so nothing else should read it while a game runs
+001167r 2               ; (the ROM doesn't, with PICO_IRQ = 0 in its config.inc, the default).
+001167r 2               ; ============================================================================
+001167r 2               
+001167r 2               VDP_DATA        = $7F1C
+001167r 2               VDP_CTRL        = $7F1D
+001167r 2               
+001167r 2               ; register X = A.  Keeps A, X, Y.
+001167r 2               vdp_reg:
+001167r 2  8D 1D 7F             sta     VDP_CTRL
+00116Ar 2  48                   pha
+00116Br 2  8A                   txa
+00116Cr 2  09 80                ora     #$80
+00116Er 2  8D 1D 7F             sta     VDP_CTRL
+001171r 2  68                   pla
+001172r 2  60                   rts
+001173r 2               
+001173r 2               ; VRAM write address = A (low) / Y (high).  Keeps A, X, Y.
+001173r 2               vdp_waddr:
+001173r 2  8D 1D 7F             sta     VDP_CTRL
+001176r 2  48                   pha
+001177r 2  98                   tya
+001178r 2  29 3F                and     #$3F
+00117Ar 2  09 40                ora     #$40
+00117Cr 2  8D 1D 7F             sta     VDP_CTRL
+00117Fr 2  68                   pla
+001180r 2  60                   rts
+001181r 2               
+001181r 2               ; write A, vdp_n times.  Keeps A.
+001181r 2               vdp_fill:
+001181r 2  AE rr rr             ldx     vdp_n           ; the odd bytes first
+001184r 2  F0 06                beq     @pg
+001186r 2  8D 1C 7F     @lo:    sta     VDP_DATA
+001189r 2  CA                   dex
+00118Ar 2  D0 FA                bne     @lo
+00118Cr 2  AC rr rr     @pg:    ldy     vdp_n+1         ; then whole pages
+00118Fr 2  F0 0B                beq     @done
+001191r 2  A2 00        @p:     ldx     #0
+001193r 2  8D 1C 7F     @pp:    sta     VDP_DATA
+001196r 2  CA                   dex
+001197r 2  D0 FA                bne     @pp
+001199r 2  88                   dey
+00119Ar 2  D0 F5                bne     @p
+00119Cr 2  60           @done:  rts
+00119Dr 2               
+00119Dr 2               ; copy vdp_n bytes from vdp_src to VRAM
+00119Dr 2               vdp_copy:
+00119Dr 2  AD rr rr             lda     vdp_src
+0011A0r 2  8D rr rr             sta     @rd+1
+0011A3r 2  AD rr rr             lda     vdp_src+1
+0011A6r 2  8D rr rr             sta     @rd+2
+0011A9r 2  AD rr rr             lda     vdp_n
+0011ACr 2  8D rr rr             sta     vdp_t
+0011AFr 2  AD rr rr             lda     vdp_n+1
+0011B2r 2  8D rr rr             sta     vdp_t+1
+0011B5r 2  AD rr rr     @l:     lda     vdp_t
+0011B8r 2  0D rr rr             ora     vdp_t+1
+0011BBr 2  F0 1C                beq     @done
+0011BDr 2  AD FF FF     @rd:    lda     $FFFF
+0011C0r 2  8D 1C 7F             sta     VDP_DATA
+0011C3r 2  EE rr rr             inc     @rd+1
+0011C6r 2  D0 03                bne     :+
+0011C8r 2  EE rr rr             inc     @rd+2
+0011CBr 2  AD rr rr     :       lda     vdp_t
+0011CEr 2  D0 03                bne     :+
+0011D0r 2  CE rr rr             dec     vdp_t+1
+0011D3r 2  CE rr rr     :       dec     vdp_t
+0011D6r 2  4C rr rr             jmp     @l
+0011D9r 2  60           @done:  rts
+0011DAr 2               
+0011DAr 2               ; A/Y -> 8 register values.  Clears VRAM.
+0011DAr 2               vdp_setup:
+0011DAr 2  8D rr rr             sta     @rr+1
+0011DDr 2  8C rr rr             sty     @rr+2
+0011E0r 2  AD 1D 7F             lda     VDP_CTRL        ; (resets the register write latch)
+0011E3r 2  A9 80                lda     #$80            ; R1 = $80: display off while we work
+0011E5r 2  A2 01                ldx     #1
+0011E7r 2  20 rr rr             jsr     vdp_reg
+0011EAr 2  A9 1C                lda     #$1C            ; F18A unlock (a PICO9918): $1C twice to VR57
+0011ECr 2  A2 39                ldx     #57
+0011EEr 2  20 rr rr             jsr     vdp_reg
+0011F1r 2  20 rr rr             jsr     vdp_reg
+0011F4r 2  A9 00                lda     #0              ; VR49: 24 rows, no 80 columns, no layer 2
+0011F6r 2  A2 31                ldx     #49
+0011F8r 2  20 rr rr             jsr     vdp_reg
+0011FBr 2  A2 32                ldx     #50             ; VR50: plain TMS9918A behaviour
+0011FDr 2  20 rr rr             jsr     vdp_reg
+001200r 2  A2 13                ldx     #19             ; VR19: no line interrupt
+001202r 2  20 rr rr             jsr     vdp_reg
+001205r 2  A2 19                ldx     #25             ; VR25-VR29: no scrolling, one page
+001207r 2  20 rr rr     @sc:    jsr     vdp_reg
+00120Ar 2  E8                   inx
+00120Br 2  E0 1E                cpx     #30
+00120Dr 2  D0 F8                bne     @sc
+00120Fr 2  A9 20                lda     #32             ; VR51: all 32 sprites
+001211r 2  A2 33                ldx     #51
+001213r 2  20 rr rr             jsr     vdp_reg
+001216r 2                       ; (on a real TMS9918A those writes land in R0-R7: all set below)
+001216r 2  A9 80                lda     #$80            ; R1 again: display off
+001218r 2  A2 01                ldx     #1
+00121Ar 2  20 rr rr             jsr     vdp_reg
+00121Dr 2  A9 00                lda     #0              ; clear the 16K
+00121Fr 2  A8                   tay
+001220r 2  20 rr rr             jsr     vdp_waddr
+001223r 2  A9 00                lda     #$00
+001225r 2  8D rr rr             sta     vdp_n
+001228r 2  A9 40                lda     #$40
+00122Ar 2  8D rr rr             sta     vdp_n+1
+00122Dr 2  A9 00                lda     #0
+00122Fr 2  20 rr rr             jsr     vdp_fill
+001232r 2  A2 00                ldx     #0
+001234r 2  BD FF FF     @rr:    lda     $FFFF,x
+001237r 2  20 rr rr             jsr     vdp_reg
+00123Ar 2  E8                   inx
+00123Br 2  E0 08                cpx     #8
+00123Dr 2  D0 F5                bne     @rr
+00123Fr 2  60                   rts
+001240r 2               
+001240r 2               ; write address = name table cell X (column), Y (row).  Keeps X and Y.
+001240r 2               vdp_at:
+001240r 2  8E rr rr             stx     vdp_t
+001243r 2  98                   tya
+001244r 2  4A                   lsr                     ; row * 32: high byte = row / 8
+001245r 2  4A                   lsr
+001246r 2  4A                   lsr
+001247r 2  8D rr rr             sta     vdp_t+1
+00124Ar 2  98                   tya
+00124Br 2  0A                   asl
+00124Cr 2  0A                   asl
+00124Dr 2  0A                   asl
+00124Er 2  0A                   asl
+00124Fr 2  0A                   asl                     ; low byte = (row & 7) * 32
+001250r 2  18                   clc
+001251r 2  6D rr rr             adc     vdp_t
+001254r 2  18                   clc
+001255r 2  69 00                adc     #<VDP_NAME
+001257r 2  8D 1D 7F             sta     VDP_CTRL
+00125Ar 2  AD rr rr             lda     vdp_t+1
+00125Dr 2  69 20                adc     #>VDP_NAME
+00125Fr 2  29 3F                and     #$3F
+001261r 2  09 40                ora     #$40
+001263r 2  8D 1D 7F             sta     VDP_CTRL
+001266r 2  60                   rts
+001267r 2               
+001267r 2               ; write the 0-ended string at A/Y.  Keeps X.
+001267r 2               vdp_puts:
+001267r 2  8D rr rr             sta     @rd+1
+00126Ar 2  8C rr rr             sty     @rd+2
+00126Dr 2  A0 00                ldy     #0
+00126Fr 2  B9 FF FF     @rd:    lda     $FFFF,y
+001272r 2  F0 06                beq     @done
+001274r 2  8D 1C 7F             sta     VDP_DATA
+001277r 2  C8                   iny
+001278r 2  D0 F5                bne     @rd
+00127Ar 2  60           @done:  rts
+00127Br 2               
+00127Br 2               ; A as two BCD digits.  Keeps X, Y.
+00127Br 2               vdp_bcd:
+00127Br 2  48                   pha
+00127Cr 2  4A                   lsr
+00127Dr 2  4A                   lsr
+00127Er 2  4A                   lsr
+00127Fr 2  4A                   lsr
+001280r 2  09 30                ora     #'0'
+001282r 2  8D 1C 7F             sta     VDP_DATA
+001285r 2  68                   pla
+001286r 2  48                   pha
+001287r 2  29 0F                and     #$0F
+001289r 2  09 30                ora     #'0'
+00128Br 2  8D 1C 7F             sta     VDP_DATA
+00128Er 2  68                   pla
+00128Fr 2  60                   rts
+001290r 2               
+001290r 2               ; wait for the next frame
+001290r 2               vdp_frame:
+001290r 2  20 rr rr     @w:     jsr     frame_idle
+001293r 2  AD 1D 7F             lda     VDP_CTRL
+001296r 2  10 F8                bpl     @w
+001298r 2  60                   rts
+001299r 2               
+001299r 2                       .segment "BSS"
+000000r 2  xx xx        vdp_n:          .res 2
+000002r 2  xx xx        vdp_src:        .res 2
+000004r 2  xx xx        vdp_t:          .res 2
+000006r 2                       .segment "CODE"
+001299r 2               
+001299r 1               
+001299r 1               ; ============================================================================
+001299r 1               ; data
+001299r 1               ; ============================================================================
+001299r 1                       .segment "RODATA"
+000000r 1               
+000000r 1               ; R0-R7: Graphics I, display off, names $2000, attributes $2400, tile
+000000r 1               ; patterns $0000, sprite attributes $2600, sprite patterns $1000
+000000r 1               vdp_regs:
+000000r 1  00 80 08 90          .byte   $00, $80, VDP_NAME / $400, V_ATT / $40, V_TP0 / $800, V_SAT / $80, V_SP0 / $800, $01
+000004r 1  00 4C 02 01  
+000008r 1               f18a_regs:
+000008r 1  18 00                .byte   24, 0                   ; palette selects (ECM: unused)
+00000Ar 1  1D 00                .byte   29, 0                   ; 2K plane offsets, one page
+00000Cr 1  1E 1F                .byte   30, 31                  ; sprites a line
+00000Er 1  32 00                .byte   50, $00
+000010r 1  31 22                .byte   49, $22                 ; ECM2 tiles, ECM2 sprites, one layer
+000012r 1               F18A_N          = (* - f18a_regs) / 2
+000012r 1               
+000012r 1               ; the extensions: 3 letters and the kind (2 program, 3 BASIC, 4 text)
+000012r 1               ext_tab:
+000012r 1  42 49 4E 02          .byte   "BIN", 2, "BAS", 3
+000016r 1  42 41 53 03  
+00001Ar 1  54 58 54 04          .byte   "TXT", 4, "DOC", 4, "ME ", 4, "MD ", 4, "INC", 4, "S  ", 4
+00001Er 1  44 4F 43 04  
+000022r 1  4D 45 20 04  
+000032r 1  41 53 4D 04          .byte   "ASM", 4, "LST", 4, "CFG", 4, "BAT", 4, "LOG", 4, "INI", 4
+000036r 1  4C 53 54 04  
+00003Ar 1  43 46 47 04  
+00004Ar 1  43 20 20 04          .byte   "C  ", 4, "H  ", 4, "PY ", 4, "CSV", 4, "LBL", 4, "MAP", 4
+00004Er 1  48 20 20 04  
+000052r 1  50 59 20 04  
+000062r 1  00                   .byte   0
+000063r 1               
+000063r 1               ; keys and what they do
+000063r 1               key_tab:
+000063r 1  05 18 10 08          .byte   KEY_UP, KEY_DOWN, KEY_LEFT, K_BS, K_DEL, KEY_ESC
+000067r 1  7F 03        
+000069r 1  04 0D 55 43          .byte   KEY_RIGHT, K_CR, 'U', 'C', 'B', 'M', 'Q', 'R', '<', '>', $2C, '.'   ; ($2C = comma)
+00006Dr 1  42 4D 51 52  
+000071r 1  3C 3E 2C 2E  
+000075r 1  85 86 88 4B          .byte   KEY_F1+4, KEY_F1+5, KEY_F1+7, 'K', 'P', 'X'
+000079r 1  50 58        
+00007Br 1  00                   .byte   0
+00007Cr 1  rr rr rr rr  key_go: .word   sel_up-1, sel_dn-1, go_up-1, go_up-1, go_up-1, go_up-1
+000080r 1  rr rr rr rr  
+000084r 1  rr rr rr rr  
+000088r 1  rr rr rr rr          .word   open_sel-1, open_sel-1, drive_u-1, drive_c-1, act_basic-1
+00008Cr 1  rr rr rr rr  
+000090r 1  rr rr        
+000092r 1  rr rr rr rr          .word   act_monitor-1, act_menu-1, refresh-1, page_up-1, page_down-1
+000096r 1  rr rr rr rr  
+00009Ar 1  rr rr        
+00009Cr 1  rr rr rr rr          .word   page_up-1, page_down-1
+0000A0r 1  rr rr rr rr          .word   act_copy-1, act_paste-1, act_delete-1, act_copy-1, act_paste-1, act_delete-1
+0000A4r 1  rr rr rr rr  
+0000A8r 1  rr rr rr rr  
+0000ACr 1               
+0000ACr 1               ; the viewer's keys: key, 1 next / 2 back / 3 close
+0000ACr 1               vkey_tab:
+0000ACr 1  20 01 0D 01          .byte   ' ', 1, K_CR, 1, KEY_DOWN, 1, 'S', 1, 'D', 1, KEY_RIGHT, 1
+0000B0r 1  18 01 53 01  
+0000B4r 1  44 01 04 01  
+0000B8r 1  05 02 57 02          .byte   KEY_UP, 2, 'W', 2, 'A', 2
+0000BCr 1  41 02        
+0000BEr 1  51 03 03 03          .byte   'Q', 3, KEY_ESC, 3, K_ESC, 3, K_BS, 3, K_DEL, 3, KEY_LEFT, 3
+0000C2r 1  1B 03 08 03  
+0000C6r 1  7F 03 10 03  
+0000CAr 1  00                   .byte   0
+0000CBr 1               
+0000CBr 1               ; the buttons on row 23: first column, after the last, what they do
+0000CBr 1  00 05 0B 0F  btn_x0: .byte   0, 5, 11, 15, 18, 24, 28, $FF
+0000CFr 1  12 18 1C FF  
+0000D3r 1  04 0A 0E 11  btn_x1: .byte   4, 10, 14, 17, 23, 27, 32
+0000D7r 1  17 1B 20     
+0000DAr 1  rr rr rr rr  btn_go: .word   act_copy-1, act_paste-1, act_delete-1, go_up-1
+0000DEr 1  rr rr rr rr  
+0000E2r 1  rr rr rr rr          .word   act_basic-1, act_monitor-1, act_menu-1
+0000E6r 1  rr rr        
+0000E8r 1               
+0000E8r 1  43 4F 50 59  s_btns: .byte   "COPY PASTE DEL UP BASIC MON MENU"
+0000ECr 1  20 50 41 53  
+0000F0r 1  54 45 20 44  
+000108r 1  20 20 20 20  s_head: .byte   "    NAME             SIZE TYPE  "
+00010Cr 1  4E 41 4D 45  
+000110r 1  20 20 20 20  
+000128r 1  3C 44 49 52  s_dir:  .byte   "<DIR>"
+00012Cr 1  3E           
+00012Dr 1               s_kinds:
+00012Dr 1  50 52 4F 47          .byte   "PROG BASICTEXT "
+000131r 1  20 42 41 53  
+000135r 1  49 43 54 45  
+00013Cr 1  20 20 20 20  s_big:  .byte   "     BIG"
+000140r 1  20 42 49 47  
+000144r 1               s_reading:
+000144r 1  52 45 41 44          .byte   "READING THE FOLDER...", 0
+000148r 1  49 4E 47 20  
+00014Cr 1  54 48 45 20  
+00015Ar 1               s_start:
+00015Ar 1  53 54 41 52          .byte   "STARTING ", 0
+00015Er 1  54 49 4E 47  
+000162r 1  20 00        
+000164r 1  52 45 41 44  s_read: .byte   "READING ", 0
+000168r 1  49 4E 47 20  
+00016Cr 1  00           
+00016Dr 1  3F 46 4F 4C  s_long: .byte   "?FOLDER PATH TOO LONG", 0
+000171r 1  44 45 52 20  
+000175r 1  50 41 54 48  
+000183r 1               s_empty:
+000183r 1  20 45 4D 50          .byte   " EMPTY FOLDER", 0
+000187r 1  54 59 20 46  
+00018Br 1  4F 4C 44 45  
+000191r 1               s_items:
+000191r 1  20 49 54 45          .byte   " ITEMS", 0
+000195r 1  4D 53 00     
+000198r 1  3F 44 49 53  s_err:  .byte   "?DISK ERROR $", 0
+00019Cr 1  4B 20 45 52  
+0001A0r 1  52 4F 52 20  
+0001A6r 1               s_nodisk:
+0001A6r 1  3F 4E 4F 20          .byte   "?NO DISK", 0
+0001AAr 1  44 49 53 4B  
+0001AEr 1  00           
+0001AFr 1  3F 4E 4F 54  s_nf:   .byte   "?NOT FOUND", 0
+0001B3r 1  20 46 4F 55  
+0001B7r 1  4E 44 00     
+0001BAr 1               s_nodrv:
+0001BAr 1  3F 4E 4F 20          .byte   "?NO SUCH DRIVE", 0
+0001BEr 1  53 55 43 48  
+0001C2r 1  20 44 52 49  
+0001C9r 1               s_ready:
+0001C9r 1  54 4F 20 50          .byte   "TO PASTE: ", 0
+0001CDr 1  41 53 54 45  
+0001D1r 1  3A 20 00     
+0001D4r 1               s_noclip:
+0001D4r 1  3F 4E 4F 54          .byte   "?NOTHING TO PASTE (COPY FIRST)", 0
+0001D8r 1  48 49 4E 47  
+0001DCr 1  20 54 4F 20  
+0001F3r 1  3F 49 54 20  s_same: .byte   "?IT IS ALREADY IN THIS FOLDER", 0
+0001F7r 1  49 53 20 41  
+0001FBr 1  4C 52 45 41  
+000211r 1               s_isdir:
+000211r 1  3F 41 20 46          .byte   "?A FOLDER HAS THAT NAME", 0
+000215r 1  4F 4C 44 45  
+000219r 1  52 20 48 41  
+000229r 1               s_replace:
+000229r 1  52 45 50 4C          .byte   "REPLACE ", 0
+00022Dr 1  41 43 45 20  
+000231r 1  00           
+000232r 1               s_delete:
+000232r 1  44 45 4C 45          .byte   "DELETE ", 0
+000236r 1  54 45 20 00  
+00023Ar 1               s_copying:
+00023Ar 1  43 4F 50 59          .byte   "COPYING ", 0
+00023Er 1  49 4E 47 20  
+000242r 1  00           
+000243r 1               s_copied:
+000243r 1  43 4F 50 49          .byte   "COPIED ", 0
+000247r 1  45 44 20 00  
+00024Br 1               s_deleted:
+00024Br 1  44 45 4C 45          .byte   "DELETED", 0
+00024Fr 1  54 45 44 00  
+000253r 1               s_onlyf:
+000253r 1  3F 53 45 4C          .byte   "?SELECT A FILE (NOT A FOLDER)", 0
+000257r 1  45 43 54 20  
+00025Br 1  41 20 46 49  
+000271r 1               s_yesno:
+000271r 1  59 45 53 20          .byte   "YES  NO"
+000275r 1  20 4E 4F     
+000278r 1               s_toobig:
+000278r 1  3F 54 4F 4F          .byte   "?TOO BIG TO COPY", 0
+00027Cr 1  20 42 49 47  
+000280r 1  20 54 4F 20  
+000289r 1               s_nodel:
+000289r 1  3F 54 48 49          .byte   "?THIS DRIVE CANNOT DELETE YET", 0
+00028Dr 1  53 20 44 52  
+000291r 1  49 56 45 20  
+0002A7r 1               err_tab:
+0002A7r 1  F2                   .byte   $F2
+0002A8r 1  rr rr                .word   s_nodisk
+0002AAr 1  42                   .byte   $42
+0002ABr 1  rr rr                .word   s_nf
+0002ADr 1  FE                   .byte   $FE
+0002AEr 1  rr rr                .word   s_nodrv
+0002B0r 1  F0                   .byte   $F0
+0002B1r 1  rr rr                .word   s_toobig
+0002B3r 1  FD                   .byte   $FD
+0002B4r 1  rr rr                .word   s_nodel
+0002B6r 1  00                   .byte   0
+0002B7r 1  20 20 20 20  s_page: .byte   "     page ", 0
+0002BBr 1  20 70 61 67  
+0002BFr 1  65 20 00     
+0002C2r 1               s_vmore:
+0002C2r 1  2D 2D 20 53          .byte   "-- Space: next page   Up: back   Q / Esc: close --", 0
+0002C6r 1  70 61 63 65  
+0002CAr 1  3A 20 6E 65  
+0002F5r 1  2D 2D 20 65  s_vend: .byte   "-- end --   Up: back   Q / Esc: close", 0
+0002F9r 1  6E 64 20 2D  
+0002FDr 1  2D 20 20 20  
+00031Br 1               
+00031Br 1               ; powers of ten for dec32 (10,000,000 .. 1)
+00031Br 1               p10:
+00031Br 1  80 96 98 00          .byte   $80, $96, $98, $00   ; 10000000
+00031Fr 1  40 42 0F 00          .byte   $40, $42, $0F, $00   ; 1000000
+000323r 1  A0 86 01 00          .byte   $A0, $86, $01, $00   ; 100000
+000327r 1  10 27 00 00          .byte   $10, $27, $00, $00   ; 10000
+00032Br 1  E8 03 00 00          .byte   $E8, $03, $00, $00   ; 1000
+00032Fr 1  64 00 00 00          .byte   $64, $00, $00, $00   ; 100
+000333r 1  0A 00 00 00          .byte   $0A, $00, $00, $00   ; 10
+000337r 1  01 00 00 00          .byte   $01, $00, $00, $00   ; 1
+00033Br 1               
+00033Br 1  rr rr        dirblk: .word   table
+00033Dr 1  C8 55                .byte   MAXENT, 'U'
+00033Fr 1  rr rr        ldblk:  .word   viewbuf
+000341r 1  rr rr                .word   VIEW_END - viewbuf
+000343r 1  xx xx xx xx          .res    13
+000347r 1  xx xx xx xx  
+00034Br 1  xx xx xx xx  
+000350r 1               
+000350r 1                       .include "gui_gfx.inc"
+000350r 2               ; gui_gfx.inc - made by gen_gui.py (do not edit)
+000350r 2               tile_p0:
+000350r 2  00 78 7F 7F          .byte   $00, $78, $7F, $7F, $7F, $7F, $00, $00, $00, $00, $F0, $F0, $F0, $F0, $00, $00
+000354r 2  7F 7F 00 00  
+000358r 2  00 00 F0 F0  
+000360r 2  00 78 7F 7F          .byte   $00, $78, $7F, $7F, $7F, $7F, $00, $00, $00, $00, $F0, $F0, $F0, $F0, $00, $00
+000364r 2  7F 7F 00 00  
+000368r 2  00 00 F0 F0  
+000370r 2  00 7F 7F 7F          .byte   $00, $7F, $7F, $7F, $7F, $7F, $7F, $00, $00, $F0, $F0, $F0, $F0, $F0, $F0, $00
+000374r 2  7F 7F 7F 00  
+000378r 2  00 F0 F0 F0  
+000380r 2  00 7C 7F 7F          .byte   $00, $7C, $7F, $7F, $7F, $7F, $7F, $00, $00, $00, $00, $00, $00, $00, $00, $00
+000384r 2  7F 7F 7F 00  
+000388r 2  00 00 00 00  
+000390r 2  00 7C 7F 7F          .byte   $00, $7C, $7F, $7F, $7F, $7F, $7F, $00, $00, $00, $00, $00, $00, $00, $00, $00
+000394r 2  7F 7F 7F 00  
+000398r 2  00 00 00 00  
+0003A0r 2  00 7C 7F 7F          .byte   $00, $7C, $7F, $7F, $7F, $7F, $7F, $00, $00, $00, $00, $00, $00, $00, $00, $00
+0003A4r 2  7F 7F 7F 00  
+0003A8r 2  00 00 00 00  
+0003B0r 2  00 78 7F 7F          .byte   $00, $78, $7F, $7F, $7F, $7F, $00, $00, $00, $00, $F0, $F0, $F0, $F0, $00, $00
+0003B4r 2  7F 7F 00 00  
+0003B8r 2  00 00 F0 F0  
+0003C0r 2  00 78 7F 7F          .byte   $00, $78, $7F, $7F, $7F, $7F, $00, $00, $00, $00, $F0, $F0, $F0, $F0, $00, $00
+0003C4r 2  7F 7F 00 00  
+0003C8r 2  00 00 F0 F0  
+0003D0r 2  00 7F 7F 7F          .byte   $00, $7F, $7F, $7F, $7F, $7F, $7F, $00, $00, $F0, $F0, $F0, $F0, $F0, $F0, $00
+0003D4r 2  7F 7F 7F 00  
+0003D8r 2  00 F0 F0 F0  
+0003E0r 2  00 7C 7F 7F          .byte   $00, $7C, $7F, $7F, $7F, $7F, $7F, $00, $00, $00, $00, $00, $00, $00, $00, $00
+0003E4r 2  7F 7F 7F 00  
+0003E8r 2  00 00 00 00  
+0003F0r 2  00 7C 7F 7F          .byte   $00, $7C, $7F, $7F, $7F, $7F, $7F, $00, $00, $00, $00, $00, $00, $00, $00, $00
+0003F4r 2  7F 7F 7F 00  
+0003F8r 2  00 00 00 00  
+000400r 2  00 7C 7F 7F          .byte   $00, $7C, $7F, $7F, $7F, $7F, $7F, $00, $00, $00, $00, $00, $00, $00, $00, $00
+000404r 2  7F 7F 7F 00  
+000408r 2  00 00 00 00  
+000410r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+000414r 2  00 00 00 00  
+000418r 2  00 00 00 00  
+000420r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+000424r 2  00 00 00 00  
+000428r 2  00 00 00 00  
+000430r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+000434r 2  00 00 00 00  
+000438r 2  00 00 00 00  
+000440r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+000444r 2  00 00 00 00  
+000448r 2  00 00 00 00  
+000450r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $18, $18, $18, $18, $00, $18, $00
+000454r 2  00 00 00 00  
+000458r 2  00 18 18 18  
+000460r 2  00 2C 2C 2C          .byte   $00, $2C, $2C, $2C, $00, $00, $00, $00, $2C, $2C, $7E, $2C, $7E, $2C, $2C, $00
+000464r 2  00 00 00 00  
+000468r 2  2C 2C 7E 2C  
+000470r 2  18 3C 58 3C          .byte   $18, $3C, $58, $3C, $16, $3C, $18, $00, $00, $30, $2C, $18, $2C, $0C, $00, $00
+000474r 2  16 3C 18 00  
+000478r 2  00 30 2C 18  
+000480r 2  30 58 58 30          .byte   $30, $58, $58, $30, $58, $58, $2C, $00, $00, $18, $18, $18, $00, $00, $00, $00
+000484r 2  58 58 2C 00  
+000488r 2  00 18 18 18  
+000490r 2  00 18 30 30          .byte   $00, $18, $30, $30, $30, $30, $18, $00, $00, $30, $18, $18, $18, $18, $30, $00
+000494r 2  30 30 18 00  
+000498r 2  00 30 18 18  
+0004A0r 2  00 00 6C 38          .byte   $00, $00, $6C, $38, $7C, $38, $6C, $00, $00, $00, $18, $18, $7E, $18, $18, $00
+0004A4r 2  7C 38 6C 00  
+0004A8r 2  00 00 18 18  
+0004B0r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $1C, $18, $30, $00, $00, $00, $00, $7C, $00, $00, $00
+0004B4r 2  00 1C 18 30  
+0004B8r 2  00 00 00 00  
+0004C0r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $18, $3C, $18, $00, $0C, $0C, $18, $30, $60, $60, $00
+0004C4r 2  00 18 3C 18  
+0004C8r 2  00 0C 0C 18  
+0004D0r 2  00 3C 66 66          .byte   $00, $3C, $66, $66, $66, $66, $3C, $00, $00, $18, $38, $18, $18, $18, $3C, $00
+0004D4r 2  66 66 3C 00  
+0004D8r 2  00 18 38 18  
+0004E0r 2  00 38 6C 0C          .byte   $00, $38, $6C, $0C, $38, $60, $7C, $00, $00, $7C, $18, $38, $0C, $6C, $38, $00
+0004E4r 2  38 60 7C 00  
+0004E8r 2  00 7C 18 38  
+0004F0r 2  00 18 38 58          .byte   $00, $18, $38, $58, $7C, $18, $18, $00, $00, $7C, $60, $78, $0C, $6C, $38, $00
+0004F4r 2  7C 18 18 00  
+0004F8r 2  00 7C 60 78  
+000500r 2  00 38 60 78          .byte   $00, $38, $60, $78, $6C, $6C, $38, $00, $00, $7C, $0C, $18, $18, $30, $30, $00
+000504r 2  6C 6C 38 00  
+000508r 2  00 7C 0C 18  
+000510r 2  00 38 6C 38          .byte   $00, $38, $6C, $38, $6C, $6C, $38, $00, $00, $38, $6C, $6C, $3C, $0C, $38, $00
+000514r 2  6C 6C 38 00  
+000518r 2  00 38 6C 6C  
+000520r 2  00 00 38 38          .byte   $00, $00, $38, $38, $00, $38, $38, $00, $00, $00, $1C, $1C, $00, $1C, $18, $30
+000524r 2  00 38 38 00  
+000528r 2  00 00 1C 1C  
+000530r 2  00 0C 18 30          .byte   $00, $0C, $18, $30, $30, $18, $0C, $00, $00, $00, $00, $7C, $00, $7C, $00, $00
+000534r 2  30 18 0C 00  
+000538r 2  00 00 00 7C  
+000540r 2  00 30 18 0C          .byte   $00, $30, $18, $0C, $0C, $18, $30, $00, $00, $18, $2C, $0C, $18, $00, $18, $00
+000544r 2  0C 18 30 00  
+000548r 2  00 18 2C 0C  
+000550r 2  1C 36 6E 56          .byte   $1C, $36, $6E, $56, $56, $6C, $30, $1C, $00, $38, $6C, $6C, $7C, $6C, $6C, $00
+000554r 2  56 6C 30 1C  
+000558r 2  00 38 6C 6C  
+000560r 2  00 78 6C 78          .byte   $00, $78, $6C, $78, $6C, $6C, $78, $00, $00, $38, $6C, $60, $60, $6C, $38, $00
+000564r 2  6C 6C 78 00  
+000568r 2  00 38 6C 60  
+000570r 2  00 78 6C 6C          .byte   $00, $78, $6C, $6C, $6C, $6C, $78, $00, $00, $7C, $60, $78, $60, $60, $7C, $00
+000574r 2  6C 6C 78 00  
+000578r 2  00 7C 60 78  
+000580r 2  00 7C 60 78          .byte   $00, $7C, $60, $78, $60, $60, $60, $00, $00, $38, $6C, $60, $5C, $6C, $38, $00
+000584r 2  60 60 60 00  
+000588r 2  00 38 6C 60  
+000590r 2  00 6C 6C 7C          .byte   $00, $6C, $6C, $7C, $6C, $6C, $6C, $00, $00, $3C, $18, $18, $18, $18, $3C, $00
+000594r 2  6C 6C 6C 00  
+000598r 2  00 3C 18 18  
+0005A0r 2  00 3C 18 18          .byte   $00, $3C, $18, $18, $18, $58, $30, $00, $00, $6C, $58, $70, $58, $58, $6C, $00
+0005A4r 2  18 58 30 00  
+0005A8r 2  00 6C 58 70  
+0005B0r 2  00 60 60 60          .byte   $00, $60, $60, $60, $60, $60, $7C, $00, $00, $66, $6E, $56, $56, $66, $66, $00
+0005B4r 2  60 60 7C 00  
+0005B8r 2  00 66 6E 56  
+0005C0r 2  00 66 76 56          .byte   $00, $66, $76, $56, $6E, $66, $66, $00, $00, $38, $6C, $6C, $6C, $6C, $38, $00
+0005C4r 2  6E 66 66 00  
+0005C8r 2  00 38 6C 6C  
+0005D0r 2  00 78 6C 6C          .byte   $00, $78, $6C, $6C, $78, $60, $60, $00, $00, $38, $6C, $6C, $6C, $5C, $38, $0C
+0005D4r 2  78 60 60 00  
+0005D8r 2  00 38 6C 6C  
+0005E0r 2  00 78 6C 6C          .byte   $00, $78, $6C, $6C, $78, $6C, $6C, $00, $00, $38, $6C, $30, $18, $6C, $38, $00
+0005E4r 2  78 6C 6C 00  
+0005E8r 2  00 38 6C 30  
+0005F0r 2  00 3C 18 18          .byte   $00, $3C, $18, $18, $18, $18, $18, $00, $00, $6C, $6C, $6C, $6C, $6C, $38, $00
+0005F4r 2  18 18 18 00  
+0005F8r 2  00 6C 6C 6C  
+000600r 2  00 6C 6C 6C          .byte   $00, $6C, $6C, $6C, $6C, $38, $38, $00, $00, $66, $66, $56, $56, $6E, $66, $00
+000604r 2  6C 38 38 00  
+000608r 2  00 66 66 56  
+000610r 2  00 6C 6C 38          .byte   $00, $6C, $6C, $38, $38, $6C, $6C, $00, $00, $66, $66, $2C, $18, $18, $18, $00
+000614r 2  38 6C 6C 00  
+000618r 2  00 66 66 2C  
+000620r 2  00 7C 0C 18          .byte   $00, $7C, $0C, $18, $30, $60, $7C, $00, $00, $3C, $30, $30, $30, $30, $3C, $00
+000624r 2  30 60 7C 00  
+000628r 2  00 3C 30 30  
+000630r 2  00 60 60 30          .byte   $00, $60, $60, $30, $18, $0C, $0C, $00, $00, $3C, $0C, $0C, $0C, $0C, $3C, $00
+000634r 2  18 0C 0C 00  
+000638r 2  00 3C 0C 0C  
+000640r 2  00 18 2C 00          .byte   $00, $18, $2C, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $7C
+000644r 2  00 00 00 00  
+000648r 2  00 00 00 00  
+000650r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $18, $18, $18, $18, $00, $18, $00
+000654r 2  00 00 00 00  
+000658r 2  00 18 18 18  
+000660r 2  00 2C 2C 2C          .byte   $00, $2C, $2C, $2C, $00, $00, $00, $00, $2C, $2C, $7E, $2C, $7E, $2C, $2C, $00
+000664r 2  00 00 00 00  
+000668r 2  2C 2C 7E 2C  
+000670r 2  18 3C 58 3C          .byte   $18, $3C, $58, $3C, $16, $3C, $18, $00, $00, $30, $2C, $18, $2C, $0C, $00, $00
+000674r 2  16 3C 18 00  
+000678r 2  00 30 2C 18  
+000680r 2  30 58 58 30          .byte   $30, $58, $58, $30, $58, $58, $2C, $00, $00, $18, $18, $18, $00, $00, $00, $00
+000684r 2  58 58 2C 00  
+000688r 2  00 18 18 18  
+000690r 2  00 18 30 30          .byte   $00, $18, $30, $30, $30, $30, $18, $00, $00, $30, $18, $18, $18, $18, $30, $00
+000694r 2  30 30 18 00  
+000698r 2  00 30 18 18  
+0006A0r 2  00 00 6C 38          .byte   $00, $00, $6C, $38, $7C, $38, $6C, $00, $00, $00, $18, $18, $7E, $18, $18, $00
+0006A4r 2  7C 38 6C 00  
+0006A8r 2  00 00 18 18  
+0006B0r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $1C, $18, $30, $00, $00, $00, $00, $7C, $00, $00, $00
+0006B4r 2  00 1C 18 30  
+0006B8r 2  00 00 00 00  
+0006C0r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $18, $3C, $18, $00, $0C, $0C, $18, $30, $60, $60, $00
+0006C4r 2  00 18 3C 18  
+0006C8r 2  00 0C 0C 18  
+0006D0r 2  00 3C 66 66          .byte   $00, $3C, $66, $66, $66, $66, $3C, $00, $00, $18, $38, $18, $18, $18, $3C, $00
+0006D4r 2  66 66 3C 00  
+0006D8r 2  00 18 38 18  
+0006E0r 2  00 38 6C 0C          .byte   $00, $38, $6C, $0C, $38, $60, $7C, $00, $00, $7C, $18, $38, $0C, $6C, $38, $00
+0006E4r 2  38 60 7C 00  
+0006E8r 2  00 7C 18 38  
+0006F0r 2  00 18 38 58          .byte   $00, $18, $38, $58, $7C, $18, $18, $00, $00, $7C, $60, $78, $0C, $6C, $38, $00
+0006F4r 2  7C 18 18 00  
+0006F8r 2  00 7C 60 78  
+000700r 2  00 38 60 78          .byte   $00, $38, $60, $78, $6C, $6C, $38, $00, $00, $7C, $0C, $18, $18, $30, $30, $00
+000704r 2  6C 6C 38 00  
+000708r 2  00 7C 0C 18  
+000710r 2  00 38 6C 38          .byte   $00, $38, $6C, $38, $6C, $6C, $38, $00, $00, $38, $6C, $6C, $3C, $0C, $38, $00
+000714r 2  6C 6C 38 00  
+000718r 2  00 38 6C 6C  
+000720r 2  00 00 38 38          .byte   $00, $00, $38, $38, $00, $38, $38, $00, $00, $00, $1C, $1C, $00, $1C, $18, $30
+000724r 2  00 38 38 00  
+000728r 2  00 00 1C 1C  
+000730r 2  00 0C 18 30          .byte   $00, $0C, $18, $30, $30, $18, $0C, $00, $00, $00, $00, $7C, $00, $7C, $00, $00
+000734r 2  30 18 0C 00  
+000738r 2  00 00 00 7C  
+000740r 2  00 30 18 0C          .byte   $00, $30, $18, $0C, $0C, $18, $30, $00, $00, $18, $2C, $0C, $18, $00, $18, $00
+000744r 2  0C 18 30 00  
+000748r 2  00 18 2C 0C  
+000750r 2  1C 36 6E 56          .byte   $1C, $36, $6E, $56, $56, $6C, $30, $1C, $00, $38, $6C, $6C, $7C, $6C, $6C, $00
+000754r 2  56 6C 30 1C  
+000758r 2  00 38 6C 6C  
+000760r 2  00 78 6C 78          .byte   $00, $78, $6C, $78, $6C, $6C, $78, $00, $00, $38, $6C, $60, $60, $6C, $38, $00
+000764r 2  6C 6C 78 00  
+000768r 2  00 38 6C 60  
+000770r 2  00 78 6C 6C          .byte   $00, $78, $6C, $6C, $6C, $6C, $78, $00, $00, $7C, $60, $78, $60, $60, $7C, $00
+000774r 2  6C 6C 78 00  
+000778r 2  00 7C 60 78  
+000780r 2  00 7C 60 78          .byte   $00, $7C, $60, $78, $60, $60, $60, $00, $00, $38, $6C, $60, $5C, $6C, $38, $00
+000784r 2  60 60 60 00  
+000788r 2  00 38 6C 60  
+000790r 2  00 6C 6C 7C          .byte   $00, $6C, $6C, $7C, $6C, $6C, $6C, $00, $00, $3C, $18, $18, $18, $18, $3C, $00
+000794r 2  6C 6C 6C 00  
+000798r 2  00 3C 18 18  
+0007A0r 2  00 3C 18 18          .byte   $00, $3C, $18, $18, $18, $58, $30, $00, $00, $6C, $58, $70, $58, $58, $6C, $00
+0007A4r 2  18 58 30 00  
+0007A8r 2  00 6C 58 70  
+0007B0r 2  00 60 60 60          .byte   $00, $60, $60, $60, $60, $60, $7C, $00, $00, $66, $6E, $56, $56, $66, $66, $00
+0007B4r 2  60 60 7C 00  
+0007B8r 2  00 66 6E 56  
+0007C0r 2  00 66 76 56          .byte   $00, $66, $76, $56, $6E, $66, $66, $00, $00, $38, $6C, $6C, $6C, $6C, $38, $00
+0007C4r 2  6E 66 66 00  
+0007C8r 2  00 38 6C 6C  
+0007D0r 2  00 78 6C 6C          .byte   $00, $78, $6C, $6C, $78, $60, $60, $00, $00, $38, $6C, $6C, $6C, $5C, $38, $0C
+0007D4r 2  78 60 60 00  
+0007D8r 2  00 38 6C 6C  
+0007E0r 2  00 78 6C 6C          .byte   $00, $78, $6C, $6C, $78, $6C, $6C, $00, $00, $38, $6C, $30, $18, $6C, $38, $00
+0007E4r 2  78 6C 6C 00  
+0007E8r 2  00 38 6C 30  
+0007F0r 2  00 3C 18 18          .byte   $00, $3C, $18, $18, $18, $18, $18, $00, $00, $6C, $6C, $6C, $6C, $6C, $38, $00
+0007F4r 2  18 18 18 00  
+0007F8r 2  00 6C 6C 6C  
+000800r 2  00 6C 6C 6C          .byte   $00, $6C, $6C, $6C, $6C, $38, $38, $00, $00, $66, $66, $56, $56, $6E, $66, $00
+000804r 2  6C 38 38 00  
+000808r 2  00 66 66 56  
+000810r 2  00 6C 6C 38          .byte   $00, $6C, $6C, $38, $38, $6C, $6C, $00, $00, $66, $66, $2C, $18, $18, $18, $00
+000814r 2  38 6C 6C 00  
+000818r 2  00 66 66 2C  
+000820r 2  00 7C 0C 18          .byte   $00, $7C, $0C, $18, $30, $60, $7C, $00, $00, $3C, $30, $30, $30, $30, $3C, $00
+000824r 2  30 60 7C 00  
+000828r 2  00 3C 30 30  
+000830r 2  00 60 60 30          .byte   $00, $60, $60, $30, $18, $0C, $0C, $00, $00, $3C, $0C, $0C, $0C, $0C, $3C, $00
+000834r 2  18 0C 0C 00  
+000838r 2  00 3C 0C 0C  
+000840r 2  00 18 2C 00          .byte   $00, $18, $2C, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $7C
+000844r 2  00 00 00 00  
+000848r 2  00 00 00 00  
+000850r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $18, $18, $18, $18, $00, $18, $00
+000854r 2  00 00 00 00  
+000858r 2  00 18 18 18  
+000860r 2  00 2C 2C 2C          .byte   $00, $2C, $2C, $2C, $00, $00, $00, $00, $2C, $2C, $7E, $2C, $7E, $2C, $2C, $00
+000864r 2  00 00 00 00  
+000868r 2  2C 2C 7E 2C  
+000870r 2  18 3C 58 3C          .byte   $18, $3C, $58, $3C, $16, $3C, $18, $00, $00, $30, $2C, $18, $2C, $0C, $00, $00
+000874r 2  16 3C 18 00  
+000878r 2  00 30 2C 18  
+000880r 2  30 58 58 30          .byte   $30, $58, $58, $30, $58, $58, $2C, $00, $00, $18, $18, $18, $00, $00, $00, $00
+000884r 2  58 58 2C 00  
+000888r 2  00 18 18 18  
+000890r 2  00 18 30 30          .byte   $00, $18, $30, $30, $30, $30, $18, $00, $00, $30, $18, $18, $18, $18, $30, $00
+000894r 2  30 30 18 00  
+000898r 2  00 30 18 18  
+0008A0r 2  00 00 6C 38          .byte   $00, $00, $6C, $38, $7C, $38, $6C, $00, $00, $00, $18, $18, $7E, $18, $18, $00
+0008A4r 2  7C 38 6C 00  
+0008A8r 2  00 00 18 18  
+0008B0r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $1C, $18, $30, $00, $00, $00, $00, $7C, $00, $00, $00
+0008B4r 2  00 1C 18 30  
+0008B8r 2  00 00 00 00  
+0008C0r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $18, $3C, $18, $00, $0C, $0C, $18, $30, $60, $60, $00
+0008C4r 2  00 18 3C 18  
+0008C8r 2  00 0C 0C 18  
+0008D0r 2  00 3C 66 66          .byte   $00, $3C, $66, $66, $66, $66, $3C, $00, $00, $18, $38, $18, $18, $18, $3C, $00
+0008D4r 2  66 66 3C 00  
+0008D8r 2  00 18 38 18  
+0008E0r 2  00 38 6C 0C          .byte   $00, $38, $6C, $0C, $38, $60, $7C, $00, $00, $7C, $18, $38, $0C, $6C, $38, $00
+0008E4r 2  38 60 7C 00  
+0008E8r 2  00 7C 18 38  
+0008F0r 2  00 18 38 58          .byte   $00, $18, $38, $58, $7C, $18, $18, $00, $00, $7C, $60, $78, $0C, $6C, $38, $00
+0008F4r 2  7C 18 18 00  
+0008F8r 2  00 7C 60 78  
+000900r 2  00 38 60 78          .byte   $00, $38, $60, $78, $6C, $6C, $38, $00, $00, $7C, $0C, $18, $18, $30, $30, $00
+000904r 2  6C 6C 38 00  
+000908r 2  00 7C 0C 18  
+000910r 2  00 38 6C 38          .byte   $00, $38, $6C, $38, $6C, $6C, $38, $00, $00, $38, $6C, $6C, $3C, $0C, $38, $00
+000914r 2  6C 6C 38 00  
+000918r 2  00 38 6C 6C  
+000920r 2  00 00 38 38          .byte   $00, $00, $38, $38, $00, $38, $38, $00, $00, $00, $1C, $1C, $00, $1C, $18, $30
+000924r 2  00 38 38 00  
+000928r 2  00 00 1C 1C  
+000930r 2  00 0C 18 30          .byte   $00, $0C, $18, $30, $30, $18, $0C, $00, $00, $00, $00, $7C, $00, $7C, $00, $00
+000934r 2  30 18 0C 00  
+000938r 2  00 00 00 7C  
+000940r 2  00 30 18 0C          .byte   $00, $30, $18, $0C, $0C, $18, $30, $00, $00, $18, $2C, $0C, $18, $00, $18, $00
+000944r 2  0C 18 30 00  
+000948r 2  00 18 2C 0C  
+000950r 2  1C 36 6E 56          .byte   $1C, $36, $6E, $56, $56, $6C, $30, $1C, $00, $38, $6C, $6C, $7C, $6C, $6C, $00
+000954r 2  56 6C 30 1C  
+000958r 2  00 38 6C 6C  
+000960r 2  00 78 6C 78          .byte   $00, $78, $6C, $78, $6C, $6C, $78, $00, $00, $38, $6C, $60, $60, $6C, $38, $00
+000964r 2  6C 6C 78 00  
+000968r 2  00 38 6C 60  
+000970r 2  00 78 6C 6C          .byte   $00, $78, $6C, $6C, $6C, $6C, $78, $00, $00, $7C, $60, $78, $60, $60, $7C, $00
+000974r 2  6C 6C 78 00  
+000978r 2  00 7C 60 78  
+000980r 2  00 7C 60 78          .byte   $00, $7C, $60, $78, $60, $60, $60, $00, $00, $38, $6C, $60, $5C, $6C, $38, $00
+000984r 2  60 60 60 00  
+000988r 2  00 38 6C 60  
+000990r 2  00 6C 6C 7C          .byte   $00, $6C, $6C, $7C, $6C, $6C, $6C, $00, $00, $3C, $18, $18, $18, $18, $3C, $00
+000994r 2  6C 6C 6C 00  
+000998r 2  00 3C 18 18  
+0009A0r 2  00 3C 18 18          .byte   $00, $3C, $18, $18, $18, $58, $30, $00, $00, $6C, $58, $70, $58, $58, $6C, $00
+0009A4r 2  18 58 30 00  
+0009A8r 2  00 6C 58 70  
+0009B0r 2  00 60 60 60          .byte   $00, $60, $60, $60, $60, $60, $7C, $00, $00, $66, $6E, $56, $56, $66, $66, $00
+0009B4r 2  60 60 7C 00  
+0009B8r 2  00 66 6E 56  
+0009C0r 2  00 66 76 56          .byte   $00, $66, $76, $56, $6E, $66, $66, $00, $00, $38, $6C, $6C, $6C, $6C, $38, $00
+0009C4r 2  6E 66 66 00  
+0009C8r 2  00 38 6C 6C  
+0009D0r 2  00 78 6C 6C          .byte   $00, $78, $6C, $6C, $78, $60, $60, $00, $00, $38, $6C, $6C, $6C, $5C, $38, $0C
+0009D4r 2  78 60 60 00  
+0009D8r 2  00 38 6C 6C  
+0009E0r 2  00 78 6C 6C          .byte   $00, $78, $6C, $6C, $78, $6C, $6C, $00, $00, $38, $6C, $30, $18, $6C, $38, $00
+0009E4r 2  78 6C 6C 00  
+0009E8r 2  00 38 6C 30  
+0009F0r 2  00 3C 18 18          .byte   $00, $3C, $18, $18, $18, $18, $18, $00, $00, $6C, $6C, $6C, $6C, $6C, $38, $00
+0009F4r 2  18 18 18 00  
+0009F8r 2  00 6C 6C 6C  
+000A00r 2  00 6C 6C 6C          .byte   $00, $6C, $6C, $6C, $6C, $38, $38, $00, $00, $66, $66, $56, $56, $6E, $66, $00
+000A04r 2  6C 38 38 00  
+000A08r 2  00 66 66 56  
+000A10r 2  00 6C 6C 38          .byte   $00, $6C, $6C, $38, $38, $6C, $6C, $00, $00, $66, $66, $2C, $18, $18, $18, $00
+000A14r 2  38 6C 6C 00  
+000A18r 2  00 66 66 2C  
+000A20r 2  00 7C 0C 18          .byte   $00, $7C, $0C, $18, $30, $60, $7C, $00, $00, $3C, $30, $30, $30, $30, $3C, $00
+000A24r 2  30 60 7C 00  
+000A28r 2  00 3C 30 30  
+000A30r 2  00 60 60 30          .byte   $00, $60, $60, $30, $18, $0C, $0C, $00, $00, $3C, $0C, $0C, $0C, $0C, $3C, $00
+000A34r 2  18 0C 0C 00  
+000A38r 2  00 3C 0C 0C  
+000A40r 2  00 18 2C 00          .byte   $00, $18, $2C, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $7C
+000A44r 2  00 00 00 00  
+000A48r 2  00 00 00 00  
+000A50r 2  00 18 3C 7E          .byte   $00, $18, $3C, $7E, $18, $18, $18, $00, $00, $18, $18, $18, $7E, $3C, $18, $00
+000A54r 2  18 18 18 00  
+000A58r 2  00 18 18 18  
+000A60r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $3C, $3C, $3C, $3C, $3C, $3C, $00
+000A64r 2  00 00 00 00  
+000A68r 2  00 3C 3C 3C  
+000A70r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+000A74r 2  00 00 00 00  
+000A78r 2  00 00 00 00  
+000A80r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+000A84r 2  00 00 00 00  
+000A88r 2  00 00 00 00  
+000A90r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+000A94r 2  00 00 00 00  
+000A98r 2  00 00 00 00  
+000AA0r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+000AA4r 2  00 00 00 00  
+000AA8r 2  00 00 00 00  
+000AB0r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+000AB4r 2  00 00 00 00  
+000AB8r 2  00 00 00 00  
+000AC0r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+000AC4r 2  00 00 00 00  
+000AC8r 2  00 00 00 00  
+000AD0r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+000AD4r 2  00 00 00 00  
+000AD8r 2  00 00 00 00  
+000AE0r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+000AE4r 2  00 00 00 00  
+000AE8r 2  00 00 00 00  
+000AF0r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+000AF4r 2  00 00 00 00  
+000AF8r 2  00 00 00 00  
+000B00r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+000B04r 2  00 00 00 00  
+000B08r 2  00 00 00 00  
+000B10r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+000B14r 2  00 00 00 00  
+000B18r 2  00 00 00 00  
+000B20r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+000B24r 2  00 00 00 00  
+000B28r 2  00 00 00 00  
+000B30r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+000B34r 2  00 00 00 00  
+000B38r 2  00 00 00 00  
+000B40r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+000B44r 2  00 00 00 00  
+000B48r 2  00 00 00 00  
+000B50r 2               tile_p1:
+000B50r 2  78 FF 80 80          .byte   $78, $FF, $80, $80, $80, $80, $FF, $00, $00, $F8, $08, $08, $08, $08, $F8, $00
+000B54r 2  80 80 FF 00  
+000B58r 2  00 F8 08 08  
+000B60r 2  78 FF 82 87          .byte   $78, $FF, $82, $87, $8F, $82, $FF, $00, $00, $F8, $08, $08, $88, $08, $F8, $00
+000B64r 2  8F 82 FF 00  
+000B68r 2  00 F8 08 08  
+000B70r 2  FF FF 80 A0          .byte   $FF, $FF, $80, $A0, $90, $A7, $80, $FF, $F8, $F8, $08, $08, $08, $08, $08, $F8
+000B74r 2  90 A7 80 FF  
+000B78r 2  F8 F8 08 08  
+000B80r 2  FE 83 A8 80          .byte   $FE, $83, $A8, $80, $AE, $80, $B6, $FF, $00, $00, $80, $80, $80, $80, $80, $80
+000B84r 2  AE 80 B6 FF  
+000B88r 2  00 00 80 80  
+000B90r 2  FE 83 BC 80          .byte   $FE, $83, $BC, $80, $BE, $80, $BE, $FF, $00, $00, $80, $80, $80, $80, $80, $80
+000B94r 2  BE 80 BE FF  
+000B98r 2  00 00 80 80  
+000BA0r 2  FE 83 80 80          .byte   $FE, $83, $80, $80, $80, $80, $80, $FF, $00, $00, $80, $80, $80, $80, $80, $80
+000BA4r 2  80 80 80 FF  
+000BA8r 2  00 00 80 80  
+000BB0r 2  78 FF 80 80          .byte   $78, $FF, $80, $80, $80, $80, $FF, $00, $00, $F8, $08, $08, $08, $08, $F8, $00
+000BB4r 2  80 80 FF 00  
+000BB8r 2  00 F8 08 08  
+000BC0r 2  78 FF 82 87          .byte   $78, $FF, $82, $87, $8F, $82, $FF, $00, $00, $F8, $08, $08, $88, $08, $F8, $00
+000BC4r 2  8F 82 FF 00  
+000BC8r 2  00 F8 08 08  
+000BD0r 2  FF FF 80 A0          .byte   $FF, $FF, $80, $A0, $90, $A7, $80, $FF, $F8, $F8, $08, $08, $08, $08, $08, $F8
+000BD4r 2  90 A7 80 FF  
+000BD8r 2  F8 F8 08 08  
+000BE0r 2  FE 83 A8 80          .byte   $FE, $83, $A8, $80, $AE, $80, $B6, $FF, $00, $00, $80, $80, $80, $80, $80, $80
+000BE4r 2  AE 80 B6 FF  
+000BE8r 2  00 00 80 80  
+000BF0r 2  FE 83 BC 80          .byte   $FE, $83, $BC, $80, $BE, $80, $BE, $FF, $00, $00, $80, $80, $80, $80, $80, $80
+000BF4r 2  BE 80 BE FF  
+000BF8r 2  00 00 80 80  
+000C00r 2  FE 83 80 80          .byte   $FE, $83, $80, $80, $80, $80, $80, $FF, $00, $00, $80, $80, $80, $80, $80, $80
+000C04r 2  80 80 80 FF  
+000C08r 2  00 00 80 80  
+000C10r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+000C14r 2  00 00 00 00  
+000C18r 2  00 00 00 00  
+000C20r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+000C24r 2  00 00 00 00  
+000C28r 2  00 00 00 00  
+000C30r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+000C34r 2  00 00 00 00  
+000C38r 2  00 00 00 00  
+000C40r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+000C44r 2  00 00 00 00  
+000C48r 2  00 00 00 00  
+000C50r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+000C54r 2  00 00 00 00  
+000C58r 2  00 00 00 00  
+000C60r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+000C64r 2  00 00 00 00  
+000C68r 2  00 00 00 00  
+000C70r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+000C74r 2  00 00 00 00  
+000C78r 2  00 00 00 00  
+000C80r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+000C84r 2  00 00 00 00  
+000C88r 2  00 00 00 00  
+000C90r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+000C94r 2  00 00 00 00  
+000C98r 2  00 00 00 00  
+000CA0r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+000CA4r 2  00 00 00 00  
+000CA8r 2  00 00 00 00  
+000CB0r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+000CB4r 2  00 00 00 00  
+000CB8r 2  00 00 00 00  
+000CC0r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+000CC4r 2  00 00 00 00  
+000CC8r 2  00 00 00 00  
+000CD0r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+000CD4r 2  00 00 00 00  
+000CD8r 2  00 00 00 00  
+000CE0r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+000CE4r 2  00 00 00 00  
+000CE8r 2  00 00 00 00  
+000CF0r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+000CF4r 2  00 00 00 00  
+000CF8r 2  00 00 00 00  
+000D00r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+000D04r 2  00 00 00 00  
+000D08r 2  00 00 00 00  
+000D10r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+000D14r 2  00 00 00 00  
+000D18r 2  00 00 00 00  
+000D20r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+000D24r 2  00 00 00 00  
+000D28r 2  00 00 00 00  
+000D30r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+000D34r 2  00 00 00 00  
+000D38r 2  00 00 00 00  
+000D40r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+000D44r 2  00 00 00 00  
+000D48r 2  00 00 00 00  
+000D50r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+000D54r 2  00 00 00 00  
+000D58r 2  00 00 00 00  
+000D60r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+000D64r 2  00 00 00 00  
+000D68r 2  00 00 00 00  
+000D70r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+000D74r 2  00 00 00 00  
+000D78r 2  00 00 00 00  
+000D80r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+000D84r 2  00 00 00 00  
+000D88r 2  00 00 00 00  
+000D90r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+000D94r 2  00 00 00 00  
+000D98r 2  00 00 00 00  
+000DA0r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+000DA4r 2  00 00 00 00  
+000DA8r 2  00 00 00 00  
+000DB0r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+000DB4r 2  00 00 00 00  
+000DB8r 2  00 00 00 00  
+000DC0r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+000DC4r 2  00 00 00 00  
+000DC8r 2  00 00 00 00  
+000DD0r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+000DD4r 2  00 00 00 00  
+000DD8r 2  00 00 00 00  
+000DE0r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+000DE4r 2  00 00 00 00  
+000DE8r 2  00 00 00 00  
+000DF0r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+000DF4r 2  00 00 00 00  
+000DF8r 2  00 00 00 00  
+000E00r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+000E04r 2  00 00 00 00  
+000E08r 2  00 00 00 00  
+000E10r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+000E14r 2  00 00 00 00  
+000E18r 2  00 00 00 00  
+000E20r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+000E24r 2  00 00 00 00  
+000E28r 2  00 00 00 00  
+000E30r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+000E34r 2  00 00 00 00  
+000E38r 2  00 00 00 00  
+000E40r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+000E44r 2  00 00 00 00  
+000E48r 2  00 00 00 00  
+000E50r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+000E54r 2  00 00 00 00  
+000E58r 2  00 00 00 00  
+000E60r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+000E64r 2  00 00 00 00  
+000E68r 2  00 00 00 00  
+000E70r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+000E74r 2  00 00 00 00  
+000E78r 2  00 00 00 00  
+000E80r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+000E84r 2  00 00 00 00  
+000E88r 2  00 00 00 00  
+000E90r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+000E94r 2  00 00 00 00  
+000E98r 2  00 00 00 00  
+000EA0r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+000EA4r 2  00 00 00 00  
+000EA8r 2  00 00 00 00  
+000EB0r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+000EB4r 2  00 00 00 00  
+000EB8r 2  00 00 00 00  
+000EC0r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+000EC4r 2  00 00 00 00  
+000EC8r 2  00 00 00 00  
+000ED0r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+000ED4r 2  00 00 00 00  
+000ED8r 2  00 00 00 00  
+000EE0r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+000EE4r 2  00 00 00 00  
+000EE8r 2  00 00 00 00  
+000EF0r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+000EF4r 2  00 00 00 00  
+000EF8r 2  00 00 00 00  
+000F00r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+000F04r 2  00 00 00 00  
+000F08r 2  00 00 00 00  
+000F10r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+000F14r 2  00 00 00 00  
+000F18r 2  00 00 00 00  
+000F20r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+000F24r 2  00 00 00 00  
+000F28r 2  00 00 00 00  
+000F30r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+000F34r 2  00 00 00 00  
+000F38r 2  00 00 00 00  
+000F40r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+000F44r 2  00 00 00 00  
+000F48r 2  00 00 00 00  
+000F50r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+000F54r 2  00 00 00 00  
+000F58r 2  00 00 00 00  
+000F60r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+000F64r 2  00 00 00 00  
+000F68r 2  00 00 00 00  
+000F70r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+000F74r 2  00 00 00 00  
+000F78r 2  00 00 00 00  
+000F80r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+000F84r 2  00 00 00 00  
+000F88r 2  00 00 00 00  
+000F90r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+000F94r 2  00 00 00 00  
+000F98r 2  00 00 00 00  
+000FA0r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+000FA4r 2  00 00 00 00  
+000FA8r 2  00 00 00 00  
+000FB0r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+000FB4r 2  00 00 00 00  
+000FB8r 2  00 00 00 00  
+000FC0r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+000FC4r 2  00 00 00 00  
+000FC8r 2  00 00 00 00  
+000FD0r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+000FD4r 2  00 00 00 00  
+000FD8r 2  00 00 00 00  
+000FE0r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+000FE4r 2  00 00 00 00  
+000FE8r 2  00 00 00 00  
+000FF0r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+000FF4r 2  00 00 00 00  
+000FF8r 2  00 00 00 00  
+001000r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+001004r 2  00 00 00 00  
+001008r 2  00 00 00 00  
+001010r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+001014r 2  00 00 00 00  
+001018r 2  00 00 00 00  
+001020r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+001024r 2  00 00 00 00  
+001028r 2  00 00 00 00  
+001030r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+001034r 2  00 00 00 00  
+001038r 2  00 00 00 00  
+001040r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+001044r 2  00 00 00 00  
+001048r 2  00 00 00 00  
+001050r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+001054r 2  00 00 00 00  
+001058r 2  00 00 00 00  
+001060r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+001064r 2  00 00 00 00  
+001068r 2  00 00 00 00  
+001070r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+001074r 2  00 00 00 00  
+001078r 2  00 00 00 00  
+001080r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+001084r 2  00 00 00 00  
+001088r 2  00 00 00 00  
+001090r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+001094r 2  00 00 00 00  
+001098r 2  00 00 00 00  
+0010A0r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+0010A4r 2  00 00 00 00  
+0010A8r 2  00 00 00 00  
+0010B0r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+0010B4r 2  00 00 00 00  
+0010B8r 2  00 00 00 00  
+0010C0r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+0010C4r 2  00 00 00 00  
+0010C8r 2  00 00 00 00  
+0010D0r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+0010D4r 2  00 00 00 00  
+0010D8r 2  00 00 00 00  
+0010E0r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+0010E4r 2  00 00 00 00  
+0010E8r 2  00 00 00 00  
+0010F0r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+0010F4r 2  00 00 00 00  
+0010F8r 2  00 00 00 00  
+001100r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+001104r 2  00 00 00 00  
+001108r 2  00 00 00 00  
+001110r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+001114r 2  00 00 00 00  
+001118r 2  00 00 00 00  
+001120r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+001124r 2  00 00 00 00  
+001128r 2  00 00 00 00  
+001130r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+001134r 2  00 00 00 00  
+001138r 2  00 00 00 00  
+001140r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+001144r 2  00 00 00 00  
+001148r 2  00 00 00 00  
+001150r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+001154r 2  00 00 00 00  
+001158r 2  00 00 00 00  
+001160r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+001164r 2  00 00 00 00  
+001168r 2  00 00 00 00  
+001170r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+001174r 2  00 00 00 00  
+001178r 2  00 00 00 00  
+001180r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+001184r 2  00 00 00 00  
+001188r 2  00 00 00 00  
+001190r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+001194r 2  00 00 00 00  
+001198r 2  00 00 00 00  
+0011A0r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+0011A4r 2  00 00 00 00  
+0011A8r 2  00 00 00 00  
+0011B0r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+0011B4r 2  00 00 00 00  
+0011B8r 2  00 00 00 00  
+0011C0r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+0011C4r 2  00 00 00 00  
+0011C8r 2  00 00 00 00  
+0011D0r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+0011D4r 2  00 00 00 00  
+0011D8r 2  00 00 00 00  
+0011E0r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+0011E4r 2  00 00 00 00  
+0011E8r 2  00 00 00 00  
+0011F0r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+0011F4r 2  00 00 00 00  
+0011F8r 2  00 00 00 00  
+001200r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+001204r 2  00 00 00 00  
+001208r 2  00 00 00 00  
+001210r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+001214r 2  00 00 00 00  
+001218r 2  00 00 00 00  
+001220r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+001224r 2  00 00 00 00  
+001228r 2  00 00 00 00  
+001230r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+001234r 2  00 00 00 00  
+001238r 2  00 00 00 00  
+001240r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+001244r 2  00 00 00 00  
+001248r 2  00 00 00 00  
+001250r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+001254r 2  00 00 00 00  
+001258r 2  00 00 00 00  
+001260r 2  18 18 18 18          .byte   $18, $18, $18, $18, $18, $18, $18, $18, $7E, $42, $42, $42, $42, $42, $42, $7E
+001264r 2  18 18 18 18  
+001268r 2  7E 42 42 42  
+001270r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+001274r 2  00 00 00 00  
+001278r 2  00 00 00 00  
+001280r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+001284r 2  00 00 00 00  
+001288r 2  00 00 00 00  
+001290r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+001294r 2  00 00 00 00  
+001298r 2  00 00 00 00  
+0012A0r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+0012A4r 2  00 00 00 00  
+0012A8r 2  00 00 00 00  
+0012B0r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+0012B4r 2  00 00 00 00  
+0012B8r 2  00 00 00 00  
+0012C0r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+0012C4r 2  00 00 00 00  
+0012C8r 2  00 00 00 00  
+0012D0r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+0012D4r 2  00 00 00 00  
+0012D8r 2  00 00 00 00  
+0012E0r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+0012E4r 2  00 00 00 00  
+0012E8r 2  00 00 00 00  
+0012F0r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+0012F4r 2  00 00 00 00  
+0012F8r 2  00 00 00 00  
+001300r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+001304r 2  00 00 00 00  
+001308r 2  00 00 00 00  
+001310r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+001314r 2  00 00 00 00  
+001318r 2  00 00 00 00  
+001320r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+001324r 2  00 00 00 00  
+001328r 2  00 00 00 00  
+001330r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+001334r 2  00 00 00 00  
+001338r 2  00 00 00 00  
+001340r 2  00 00 00 00          .byte   $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+001344r 2  00 00 00 00  
+001348r 2  00 00 00 00  
+001350r 2               tile_attr:
+001350r 2  07 07 07 07          .byte   $07, $07, $07, $07, $08, $08, $09, $09, $0A, $0A, $0A, $0A, $0B, $0B, $0B, $0B
+001354r 2  08 08 09 09  
+001358r 2  0A 0A 0A 0A  
+001360r 2  0C 0C 0D 0D          .byte   $0C, $0C, $0D, $0D, $0E, $0E, $0E, $0E, $04, $04, $04, $04, $04, $04, $04, $04
+001364r 2  0E 0E 0E 0E  
+001368r 2  04 04 04 04  
+001370r 2  04 04 04 04          .byte   $04, $04, $04, $04, $04, $04, $04, $04, $04, $04, $04, $04, $04, $04, $04, $04
+001374r 2  04 04 04 04  
+001378r 2  04 04 04 04  
+001380r 2  04 04 04 04          .byte   $04, $04, $04, $04, $04, $04, $04, $04, $04, $04, $04, $04, $04, $04, $04, $04
+001384r 2  04 04 04 04  
+001388r 2  04 04 04 04  
+001390r 2  04 04 04 04          .byte   $04, $04, $04, $04, $04, $04, $04, $04, $04, $04, $04, $04, $04, $04, $04, $04
+001394r 2  04 04 04 04  
+001398r 2  04 04 04 04  
+0013A0r 2  04 04 04 04          .byte   $04, $04, $04, $04, $04, $04, $04, $04, $04, $04, $04, $04, $04, $04, $04, $04
+0013A4r 2  04 04 04 04  
+0013A8r 2  04 04 04 04  
+0013B0r 2  06 06 06 06          .byte   $06, $06, $06, $06, $06, $06, $06, $06, $06, $06, $06, $06, $06, $06, $06, $06
+0013B4r 2  06 06 06 06  
+0013B8r 2  06 06 06 06  
+0013C0r 2  06 06 06 06          .byte   $06, $06, $06, $06, $06, $06, $06, $06, $06, $06, $06, $06, $06, $06, $06, $06
+0013C4r 2  06 06 06 06  
+0013C8r 2  06 06 06 06  
+0013D0r 2  06 06 06 06          .byte   $06, $06, $06, $06, $06, $06, $06, $06, $06, $06, $06, $06, $06, $06, $06, $06
+0013D4r 2  06 06 06 06  
+0013D8r 2  06 06 06 06  
+0013E0r 2  06 06 06 06          .byte   $06, $06, $06, $06, $06, $06, $06, $06, $06, $06, $06, $06, $06, $06, $06, $06
+0013E4r 2  06 06 06 06  
+0013E8r 2  06 06 06 06  
+0013F0r 2  05 05 05 05          .byte   $05, $05, $05, $05, $05, $05, $05, $05, $05, $05, $05, $05, $05, $05, $05, $05
+0013F4r 2  05 05 05 05  
+0013F8r 2  05 05 05 05  
+001400r 2  05 05 05 05          .byte   $05, $05, $05, $05, $05, $05, $05, $05, $05, $05, $05, $05, $05, $05, $05, $05
+001404r 2  05 05 05 05  
+001408r 2  05 05 05 05  
+001410r 2  05 05 05 05          .byte   $05, $05, $05, $05, $05, $05, $05, $05, $05, $05, $05, $05, $05, $05, $05, $05
+001414r 2  05 05 05 05  
+001418r 2  05 05 05 05  
+001420r 2  05 05 05 05          .byte   $05, $05, $05, $05, $05, $05, $05, $05, $05, $05, $05, $05, $05, $05, $05, $05
+001424r 2  05 05 05 05  
+001428r 2  05 05 05 05  
+001430r 2  06 06 06 06          .byte   $06, $06, $06, $06, $04, $04, $04, $04, $04, $04, $04, $04, $04, $04, $04, $04
+001434r 2  04 04 04 04  
+001438r 2  04 04 04 04  
+001440r 2  04 04 04 04          .byte   $04, $04, $04, $04, $04, $04, $04, $04, $04, $04, $04, $04, $04, $04, $04, $04
+001444r 2  04 04 04 04  
+001448r 2  04 04 04 04  
+001450r 2               spr_p0:
+001450r 2  C0 A0 90 88          .byte   $C0, $A0, $90, $88, $84, $8E, $B0, $C0
+001454r 2  84 8E B0 C0  
+001458r 2               spr_p1:
+001458r 2  00 40 60 70          .byte   $00, $40, $60, $70, $78, $70, $40, $00
+00145Cr 2  78 70 40 00  
+001460r 2               pal_gui:
+001460r 2  01 13 0E EE          .byte   $01, $13, $0E, $EE, $09, $9B, $0F, $D4, $03, $6B, $0F, $FF, $0C, $CE, $0F, $D4
+001464r 2  09 9B 0F D4  
+001468r 2  03 6B 0F FF  
+001470r 2  02 44 0E EE          .byte   $02, $44, $0E, $EE, $05, $AA, $0F, $D4, $01, $13, $0E, $B3, $08, $50, $0F, $E9
+001474r 2  05 AA 0F D4  
+001478r 2  01 13 0E B3  
+001480r 2  01 13 03 B4          .byte   $01, $13, $03, $B4, $01, $52, $0E, $FE, $01, $13, $0E, $EF, $04, $5A, $02, $BE
+001484r 2  01 52 0E FE  
+001488r 2  01 13 0E EF  
+001490r 2  01 13 0D DD          .byte   $01, $13, $0D, $DD, $07, $78, $09, $9A, $03, $6B, $0E, $B3, $08, $50, $0F, $E9
+001494r 2  07 78 09 9A  
+001498r 2  03 6B 0E B3  
+0014A0r 2  03 6B 03 B4          .byte   $03, $6B, $03, $B4, $01, $52, $0E, $FE, $03, $6B, $0E, $EF, $04, $5A, $02, $BE
+0014A4r 2  01 52 0E FE  
+0014A8r 2  03 6B 0E EF  
+0014B0r 2  03 6B 0D DD          .byte   $03, $6B, $0D, $DD, $07, $78, $09, $9A, $00, $00, $00, $00, $0F, $FF, $0F, $D4
+0014B4r 2  07 78 09 9A  
+0014B8r 2  00 00 00 00  
+0014C0r 2               
+0014C0r 1               gui_end:
+0014C0r 1               
+0014C0r 1               ; ============================================================================
+0014C0r 1               ; variables (in the shell's own bank; kept while programs run)
+0014C0r 1               ; ============================================================================
+0014C0r 1                       .segment "BSS"
+000006r 1  xx           dev:    .res    1               ; 'U' or 'C'
+000007r 1  xx xx xx xx  cwd:    .res    32              ; the folder: "" or "/A/B"
+00000Br 1  xx xx xx xx  
+00000Fr 1  xx xx xx xx  
+000027r 1               up_name:
+000027r 1  xx xx xx xx          .res    13
+00002Br 1  xx xx xx xx  
+00002Fr 1  xx xx xx xx  
+000034r 1  xx           n_ent:  .res    1               ; entries read
+000035r 1  xx           n_list: .res    1               ; rows in the list (+ "..")
+000036r 1  xx           k0:     .res    1               ; the first real entry's row (0 or 1)
+000037r 1  xx           sel:    .res    1
+000038r 1  xx           top:    .res    1
+000039r 1  xx           osel:   .res    1
+00003Ar 1  xx           otop:   .res    1
+00003Br 1  xx           tpos:   .res    1
+00003Cr 1  xx xx xx xx  order:  .res    MAXENT + 1      ; list row -> table entry ($FF = "..")
+000040r 1  xx xx xx xx  
+000044r 1  xx xx xx xx  
+000105r 1  xx xx xx xx  ebuf:   .res    16
+000109r 1  xx xx xx xx  
+00010Dr 1  xx xx xx xx  
+000115r 1  xx xx xx xx  nbuf:   .res    13
+000119r 1  xx xx xx xx  
+00011Dr 1  xx xx xx xx  
+000122r 1  xx           nlen:   .res    1
+000123r 1  xx           kind:   .res    1
+000124r 1  xx xx        ea:     .res    2
+000126r 1  xx           si:     .res    1
+000127r 1  xx           sj:     .res    1
+000128r 1  xx           sv:     .res    1
+000129r 1  xx           t1:     .res    1
+00012Ar 1  xx           t2:     .res    1
+00012Br 1  xx           t3:     .res    1
+00012Cr 1  xx           t4:     .res    1
+00012Dr 1  xx           t5:     .res    1
+00012Er 1  xx           t6:     .res    1
+00012Fr 1  xx xx        num:    .res    2
+000131r 1  xx           den:    .res    1
+000132r 1  xx xx xx xx  num4:   .res    4
+000136r 1  xx xx xx xx  dbuf:   .res    8
+00013Ar 1  xx xx xx xx  
+00013Er 1  xx           dlead:  .res    1
+00013Fr 1  xx           dpos:   .res    1
+000140r 1  xx           cx:     .res    1
+000141r 1  xx           cy:     .res    1
+000142r 1  xx           cr:     .res    1
+000143r 1  xx           ri:     .res    1
+000144r 1  xx           row:    .res    1
+000145r 1  xx           off:    .res    1
+000146r 1  xx           lend:   .res    1
+000147r 1  xx xx xx xx  line:   .res    32
+00014Br 1  xx xx xx xx  
+00014Fr 1  xx xx xx xx  
+000167r 1  xx xx xx xx  stat:   .res    32
+00016Br 1  xx xx xx xx  
+00016Fr 1  xx xx xx xx  
+000187r 1  xx           spos:   .res    1
+000188r 1  xx           errc:   .res    1
+000189r 1  xx           frames: .res    1
+00018Ar 1               click_t:
+00018Ar 1  xx                   .res    1
+00018Br 1  xx           esc_st: .res    1
+00018Cr 1               pad_now:
+00018Cr 1  xx                   .res    1
+00018Dr 1               pad_old:
+00018Dr 1  xx                   .res    1
+00018Er 1               pad_new:
+00018Er 1  xx                   .res    1
+00018Fr 1               pad_rep:
+00018Fr 1  xx                   .res    1
+000190r 1  xx           gfx_on: .res    1
+000191r 1               mouse_ok:
+000191r 1  xx                   .res    1
+000192r 1  xx           m_x:    .res    1
+000193r 1  xx           m_y:    .res    1
+000194r 1  xx           m_dy:   .res    1
+000195r 1  xx           m_btn:  .res    1
+000196r 1  xx           m_old:  .res    1
+000197r 1               m_click:
+000197r 1  xx                   .res    1
+000198r 1               m_rclick:
+000198r 1  xx                   .res    1
+000199r 1  xx xx xx xx  runblk: .res    16
+00019Dr 1  xx xx xx xx  
+0001A1r 1  xx xx xx xx  
+0001A9r 1               clip_dev:
+0001A9r 1  xx                   .res    1
+0001AAr 1               clip_path:
+0001AAr 1  xx xx xx xx          .res    46
+0001AEr 1  xx xx xx xx  
+0001B2r 1  xx xx xx xx  
+0001D8r 1               clip_name:
+0001D8r 1  xx xx xx xx          .res    13
+0001DCr 1  xx xx xx xx  
+0001E0r 1  xx xx xx xx  
+0001E5r 1  xx xx xx xx  pbuf:   .res    46
+0001E9r 1  xx xx xx xx  
+0001EDr 1  xx xx xx xx  
+000213r 1  xx xx xx xx  cpblk:  .res    6
+000217r 1  xx xx        
+000219r 1  xx xx xx     delblk: .res    3
+00021Cr 1  xx           errc2:  .res    1
+00021Dr 1  xx xx        vpos:   .res    2
+00021Fr 1  xx xx        vend:   .res    2
+000221r 1  xx xx        vstart: .res    2
+000223r 1  xx           vpn:    .res    1
+000224r 1               VSTK    = 64
+000224r 1               vstk_lo:
+000224r 1  xx xx xx xx          .res    VSTK
+000228r 1  xx xx xx xx  
+00022Cr 1  xx xx xx xx  
+000264r 1               vstk_hi:
+000264r 1  xx xx xx xx          .res    VSTK
+000268r 1  xx xx xx xx  
+00026Cr 1  xx xx xx xx  
+0002A4r 1  xx           vlines: .res    1
+0002A5r 1  xx           vcol:   .res    1
+0002A6r 1  xx           veof:   .res    1
+0002A7r 1  xx xx xx xx  table:  .res    MAXENT * 16     ; the folder (SBC_DIR)
+0002ABr 1  xx xx xx xx  
+0002AFr 1  xx xx xx xx  
+000F27r 1               viewbuf:                        ; the text viewer's file, to $7EFF
+000F27r 1               VIEW_END        = $7F00
+000F27r 1               

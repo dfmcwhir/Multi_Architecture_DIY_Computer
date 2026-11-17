@@ -1,0 +1,33 @@
+Modules list:
+-------------
+install.o:
+    INSTALL           Offs=000000  Size=00026F  Align=00001  Fill=0000
+gui.o:
+    CODE              Offs=000000  Size=001299  Align=00001  Fill=0000
+    RODATA            Offs=000000  Size=0014C0  Align=00001  Fill=0000
+    BSS               Offs=000000  Size=000F27  Align=00001  Fill=0000
+
+
+Segment list:
+-------------
+Name                   Start     End    Size  Align
+----------------------------------------------------
+INSTALL               000800  000A6E  00026F  00001
+CODE                  001000  002298  001299  00001
+RODATA                002299  003758  0014C0  00001
+BSS                   003759  00467F  000F27  00001
+
+
+Exports list by name:
+---------------------
+
+
+
+Exports list by value:
+----------------------
+
+
+
+Imports list:
+-------------
+

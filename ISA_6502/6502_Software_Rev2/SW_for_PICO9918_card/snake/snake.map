@@ -1,0 +1,34 @@
+Modules list:
+-------------
+snake.o:
+    CODE              Offs=000000  Size=000DC8  Align=00001  Fill=0000
+    RODATA            Offs=000000  Size=000488  Align=00001  Fill=0000
+    BSS               Offs=000000  Size=0000B9  Align=00001  Fill=0000
+    GRID              Offs=000000  Size=000E00  Align=00001  Fill=0000
+    SHADOW            Offs=000000  Size=001800  Align=00001  Fill=0000
+
+
+Segment list:
+-------------
+Name                   Start     End    Size  Align
+----------------------------------------------------
+CODE                  000800  0015C7  000DC8  00001
+RODATA                0015C8  001A4F  000488  00001
+BSS                   001A50  001B08  0000B9  00001
+GRID                  001C00  0029FF  000E00  00001
+SHADOW                002A00  0041FF  001800  00001
+
+
+Exports list by name:
+---------------------
+
+
+
+Exports list by value:
+----------------------
+
+
+
+Imports list:
+-------------
+

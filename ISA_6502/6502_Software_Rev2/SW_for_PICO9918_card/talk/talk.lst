@@ -1,0 +1,3168 @@
+ca65 V2.19 - Git d20d99b
+Main file   : talk.s
+Current file: talk.s
+
+000000r 1               ; ============================================================================
+000000r 1               ; talk.s - text to speech on the SPO256-AL2 (CPU Rev2, any display)
+000000r 1               ;
+000000r 1               ;   build:  make.bat  (TALK.BIN, loads and runs at $0800)
+000000r 1               ;
+000000r 1               ; Type a line and it is spoken.  Commands:
+000000r 1               ;   /F NAME   speak a text file (the current drive and folder); Esc stops
+000000r 1               ;   /P        show the allophones as they are spoken (on / off)
+000000r 1               ;   /A ...    speak allophones by name or number:  /A HH1 EH LL OW
+000000r 1               ;   /?        help
+000000r 1               ;   /Q        quit (back to the file manager or the boot menu)
+000000r 1               ;
+000000r 1               ; How (tts_ref.py is the same thing in Python, and the test's reference):
+000000r 1               ;  1. normalise: upper case; numbers to words (0-65535, longer ones digit by
+000000r 1               ;     digit); , ; : -> ','   . ! -> '.'   ? '-' kept; the rest spaces
+000000r 1               ;  2. xlate: the US Naval Research Lab's letter-to-sound rules (NRL Report
+000000r 1               ;     7948, 1976: 329 rules, public domain) turn letters into phonemes;
+000000r 1               ;     a short word list (words.txt) is checked first
+000000r 1               ;  3. allo: phonemes -> SPO256 allophones, choosing by the sounds around
+000000r 1               ;     (KK1/KK2/KK3, DD1/DD2, R-coloured vowels, ...), short pauses before
+000000r 1               ;     stops, PA3 between words, PA4 at commas, PA5 at full stops
+000000r 1               ;  4. SBC_SAY queues them (the ROM feeds the chip from the VIA interrupt)
+000000r 1               ;
+000000r 1               ; No zero page is used.
+000000r 1               ; ============================================================================
+000000r 1               
+000000r 1                       .include "sbc_api.inc"
+000000r 2               ; sbc_api.inc - fixed ROM entry points of the SBC (see jumptable.s), and the
+000000r 2               ; CPU clock.  Use in your own ca65 programs:  .include "sbc_api.inc"
+000000r 2               ; (the games find it one folder up: their make.bat passes  -I ..  to ca65)
+000000r 2               SBC_CHRIN       = $FE00         ; carry set + A = char, carry clear = none waiting
+000000r 2               SBC_CHROUT      = $FE03         ; print A (A, X, Y preserved)
+000000r 2               SBC_MENU        = $FE06         ; boot menu
+000000r 2               SBC_COLD        = $FE09         ; BASIC cold start
+000000r 2               SBC_WARM        = $FE0C         ; BASIC warm start
+000000r 2               SBC_MONITOR     = $FE0F         ; monitor prompt (or JMP $FF00)
+000000r 2               SBC_PADSTATE    = $FE12         ; A = gamepad buttons held: bit0 A,1 B,2 Select,3 Start,4 Up,5 Down,6 Left,7 Right
+000000r 2               SBC_LOAD        = $FE15         ; load a file from the current device (U: or C:): A/Y = parameter block (.word addr, .word max, "NAME.EXT",0)
+000000r 2                                               ;   carry clear = loaded, X/Y = length; carry set = failed, A = error code
+000000r 2               SBC_CWD         = $FE18         ; A/Y = the monitor's current folder: 0-ended, "" (the top) or "/A/B"
+000000r 2                                               ;   (newer ROMs: check for a JMP ($4C) at $FE18 first)
+000000r 2               
+000000r 2               ; ---- CPU Rev2 ROMs (API version 2).  Check first:  LDA $FE1B / CMP #$4C,
+000000r 2               ;      then JSR SBC_SYSINFO and check Y >= 2.
+000000r 2               SBC_SYSINFO     = $FE1B         ; A = display type (DISP_...), X = device status, Y = API version
+000000r 2               SBC_SEROUT      = $FE1E         ; send A out of the serial console port (A, X, Y preserved)
+000000r 2               SBC_MOUSEON     = $FE21         ; A = 1 mouse reports on, 0 off (off at reset); C=1 = no mouse
+000000r 2               SBC_MOUSE       = $FE24         ; A = buttons (bit0 L, 1 R, 2 M), X/Y = signed movement since
+000000r 2                                               ;   the last call (right/down +); C=1 = a report arrived
+000000r 2               SBC_BANKSET     = $FE27         ; A = RAM bank 0-15 for $1000-$7EFF (X, Y kept).  Your code that
+000000r 2                                               ;   calls it must be in $0000-$0FFF, or it switches itself out!
+000000r 2               SBC_BANKGET     = $FE2A         ; A = bank selected, X = number of banks fitted
+000000r 2               SBC_TICKS       = $FE2D         ; A/X/Y = 60 Hz counter, low/middle/high
+000000r 2               SBC_ACIAIN      = $FE30         ; serial card 6551: C=1 + A = byte, C=0 none
+000000r 2               SBC_ACIAOUT     = $FE33         ; serial card 6551: send A (A, X, Y preserved)
+000000r 2               SBC_VSYNC       = $FE36         ; C=1 if a frame ended since the last call (PICO9918 / ESP32_VGA),
+000000r 2                                               ;   A = the VDP status / ESP32 STATUS
+000000r 2               SBC_CONRESET    = $FE39         ; display back to the text console, cleared (call it when
+000000r 2                                               ;   your game exits after changing the display mode)
+000000r 2               SBC_SNDNOTE     = $FE3C         ; A/Y -> 5 bytes: voice (AY 0-2, ESP32 0-3), note (0-95, 36 = C4),
+000000r 2                                               ;   volume (0-15; AY 16 = envelope), time (16 bit, 1/60 s,
+000000r 2                                               ;   0 = hold).  Doesn't wait.  C=1 = bad values
+000000r 2               SBC_SNDQUIET    = $FE3F         ; all sound off
+000000r 2               SBC_SNDBUSY     = $FE42         ; A = voice: C=1 while its timed note is still playing
+000000r 2               SBC_SAY         = $FE45         ; A/Y -> SPO256 allophones (0-63) ended by $FF; queued
+000000r 2               SBC_SAYBUSY     = $FE48         ; C=1 while the SPO256 is speaking
+000000r 2               SBC_AYREAD      = $FE4B         ; X = AY register (14/15 = I/O ports A/B) -> A
+000000r 2               SBC_AYWRITE     = $FE4E         ; AY register X = A (register 7 bits 6/7 = ports A/B output)
+000000r 2               SBC_TIME        = $FE51         ; A/Y -> 18 byte buffer <- "mm/dd/yy hh:mm:ss",0 (CF card's DS1302);
+000000r 2                                               ;   C=1 = no clock
+000000r 2               SBC_SETTIME     = $FE54         ; A/Y -> 14 characters "dwyymmddHHMMSS" (dw 01 = Sunday)
+000000r 2               SBC_DIR         = $FE57         ; stage 6: A/Y -> block: .word table, .byte most entries, .byte device
+000000r 2                                               ;   ('U', 'C' or 0 = as it is): the current folder (SBC_CWD) into the
+000000r 2                                               ;   table, 16 bytes an entry: name 8, ext 3 (space padded), attributes
+000000r 2                                               ;   ($10 = folder), size 4.  C=0: A = entries; C=1: A = error code
+000000r 2               SBC_RUN         = $FE5A         ; stage 6: A/Y -> block: .byte 0 = .BIN (bank 0, $0800) / 1 = BASIC
+000000r 2                                               ;   program, .byte device, "NAME.EXT",0 (in the current folder).
+000000r 2                                               ;   Returns only on an error: C=1, A = code
+000000r 2               SBC_SHELL       = $FE5D         ; stage 6: A = the RAM bank of a shell ($1000 JMP, $1003 "SH65"):
+000000r 2                                               ;   SBC_MENU then goes back to it.  A = 0: none.  C=1: no shell there
+000000r 2               SBC_COPY        = $FE60         ; stage 6b: A/Y -> block: .byte source device ('U'/'C'), .word -> source
+000000r 2                                               ;   path "/A/NAME.EXT",0, .byte destination device, .word -> its path.
+000000r 2                                               ;   Uses every RAM bank but yours as the buffer (bank 0 is lost).
+000000r 2                                               ;   C=0 copied; C=1, A = error ($F0 too big)
+000000r 2               SBC_DELETE      = $FE63         ; stage 6b: A/Y -> block: .byte device, .word -> path.  C=1, A = error
+000000r 2                                               ;   ($42 not found, $FD the drive can't delete)
+000000r 2               SBC_DISPTYPE    = $FEFF         ; a byte: the display type (DISP_...)
+000000r 2               
+000000r 2               ; SBC_SYSINFO display types
+000000r 2               DISP_NONE       = 0
+000000r 2               DISP_TERM       = 1             ; KB_MONITOR_TERM (PIC32 terminal)
+000000r 2               DISP_PICO       = 2             ; PICO9918
+000000r 2               DISP_ESP32      = 3             ; ESP32_VGA
+000000r 2               
+000000r 2               ; SBC_SYSINFO device status bits (X)
+000000r 2               DEV_VIA         = $01
+000000r 2               DEV_ACIA        = $02
+000000r 2               DEV_DISPLAY     = $04
+000000r 2               DEV_AVRKBD      = $08
+000000r 2               
+000000r 2               ; Key codes from the AVR keyboard interface (Serial Rev3 / PICO9918 card)
+000000r 2               KEY_UP          = $05           ; ^E  (WordStar)
+000000r 2               KEY_DOWN        = $18           ; ^X
+000000r 2               KEY_LEFT        = $10           ; ^P
+000000r 2               KEY_RIGHT       = $04           ; ^D
+000000r 2               KEY_ESC         = $03           ; Esc sends ^C
+000000r 2               KEY_F1          = 129           ; F1-F12 = 129-140, shifted 141-152
+000000r 2               
+000000r 2               ; First RAM address for loaded programs (CPU Rev2 ROM)
+000000r 2               SBC_USER_RAM    = $0800
+000000r 2               
+000000r 2               ; The CPU clock in MHz (whole numbers, 1 to 8).  Programs size their delay
+000000r 2               ; loops from it, so a millisecond stays a millisecond.  To build for another
+000000r 2               ; clock, change it here or give it on the command line:  make.bat 1
+000000r 2               .ifndef CLOCK_MHZ
+000000r 2               CLOCK_MHZ       = 2
+000000r 2               .endif
+000000r 2               
+000000r 1               
+000000r 1               SPO_PORT        = $7F26
+000000r 1               TB_MAX          = 190           ; a chunk of text (numbers may add 60)
+000000r 1               LINE_MAX        = 120
+000000r 1               AB_FLUSH        = 200           ; allophones queued at once (at a pause)
+000000r 1               K_BS            = $08
+000000r 1               K_CR            = $0D
+000000r 1               K_ESC           = $1B
+000000r 1               
+000000r 1               ; character classes (ctab)
+000000r 1               C_VOW           = $01           ; A E I O U Y
+000000r 1               C_CON           = $02           ; the other letters
+000000r 1               C_VCD           = $04           ; B D V G J L M N R W Z
+000000r 1               C_FRN           = $08           ; E I Y
+000000r 1               C_LET           = $10
+000000r 1               C_SIB           = $20           ; S C G Z X J
+000000r 1               C_LNG           = $40           ; T S R D L Z N J
+000000r 1               
+000000r 1                       .segment "CODE"
+000000r 1  D8           start:  cld
+000001r 1  A9 00                lda     #0
+000003r 1  8D rr rr             sta     show
+000006r 1  8D rr rr             sta     spo
+000009r 1  AD 26 7F             lda     SPO_PORT        ; an idle SPO256: STBY = 1, /LRQ = 0
+00000Cr 1  29 03                and     #$03
+00000Er 1  C9 01                cmp     #$01
+000010r 1  D0 03                bne     :+
+000012r 1  EE rr rr             inc     spo
+000015r 1  A9 rr        :       lda     #<s_hello
+000017r 1  A0 rr                ldy     #>s_hello
+000019r 1  20 rr rr             jsr     puts
+00001Cr 1  AD rr rr             lda     spo
+00001Fr 1  D0 0C                bne     main
+000021r 1  A9 rr                lda     #<s_nochip
+000023r 1  A0 rr                ldy     #>s_nochip
+000025r 1  20 rr rr             jsr     puts
+000028r 1  A9 01                lda     #1
+00002Ar 1  8D rr rr             sta     show
+00002Dr 1               
+00002Dr 1  A9 rr        main:   lda     #<s_prompt
+00002Fr 1  A0 rr                ldy     #>s_prompt
+000031r 1  20 rr rr             jsr     puts
+000034r 1  20 rr rr             jsr     getline
+000037r 1  AD rr rr             lda     llen
+00003Ar 1  F0 F1                beq     main
+00003Cr 1  AD rr rr             lda     line
+00003Fr 1  C9 2F                cmp     #'/'
+000041r 1  D0 06                bne     @say
+000043r 1  20 rr rr             jsr     command
+000046r 1  4C rr rr             jmp     main
+000049r 1  A9 rr        @say:   lda     #<line          ; speak the line
+00004Br 1  8D rr rr             sta     src
+00004Er 1  A9 rr                lda     #>line
+000050r 1  8D rr rr             sta     src+1
+000053r 1  AD rr rr             lda     llen
+000056r 1  18                   clc
+000057r 1  69 rr                adc     #<line
+000059r 1  8D rr rr             sta     send
+00005Cr 1  A9 rr                lda     #>line
+00005Er 1  69 00                adc     #0
+000060r 1  8D rr rr             sta     send+1
+000063r 1  A9 00                lda     #0
+000065r 1  8D rr rr             sta     echo
+000068r 1  20 rr rr             jsr     speak
+00006Br 1  4C rr rr             jmp     main
+00006Er 1               
+00006Er 1               ; ----------------------------------------------------------------------------
+00006Er 1               ; commands
+00006Er 1               ; ----------------------------------------------------------------------------
+00006Er 1               command:
+00006Er 1  AD rr rr             lda     line+1
+000071r 1  C9 61                cmp     #'a'
+000073r 1  90 02                bcc     :+
+000075r 1  29 DF                and     #$DF
+000077r 1  C9 51        :       cmp     #'Q'
+000079r 1  D0 06                bne     @nq
+00007Br 1  20 39 FE             jsr     SBC_CONRESET
+00007Er 1  4C 06 FE             jmp     SBC_MENU
+000081r 1  C9 50        @nq:    cmp     #'P'
+000083r 1  D0 18                bne     @np
+000085r 1  AD rr rr             lda     show
+000088r 1  49 01                eor     #1
+00008Ar 1  8D rr rr             sta     show
+00008Dr 1  A9 rr                lda     #<s_showon
+00008Fr 1  A0 rr                ldy     #>s_showon
+000091r 1  AE rr rr             ldx     show
+000094r 1  D0 04                bne     :+
+000096r 1  A9 rr                lda     #<s_showoff
+000098r 1  A0 rr                ldy     #>s_showoff
+00009Ar 1  4C rr rr     :       jmp     puts
+00009Dr 1  C9 46        @np:    cmp     #'F'
+00009Fr 1  D0 03                bne     @nf
+0000A1r 1  4C rr rr             jmp     cmd_file
+0000A4r 1  C9 41        @nf:    cmp     #'A'
+0000A6r 1  D0 03                bne     @na
+0000A8r 1  4C rr rr             jmp     cmd_allo
+0000ABr 1  A9 rr        @na:    lda     #<s_help
+0000ADr 1  A0 rr                ldy     #>s_help
+0000AFr 1  4C rr rr             jmp     puts
+0000B2r 1               
+0000B2r 1               ; /F NAME: load the file and speak it, showing the text
+0000B2r 1               cmd_file:
+0000B2r 1  A2 02                ldx     #2              ; the name (after spaces)
+0000B4r 1  EC rr rr     @sp:    cpx     llen
+0000B7r 1  B0 44                bcs     @noname
+0000B9r 1  BD rr rr             lda     line,x
+0000BCr 1  C9 20                cmp     #' '
+0000BEr 1  D0 03                bne     @nm
+0000C0r 1  E8                   inx
+0000C1r 1  D0 F1                bne     @sp
+0000C3r 1  A0 00        @nm:    ldy     #0
+0000C5r 1  EC rr rr     @cp:    cpx     llen
+0000C8r 1  B0 16                bcs     @e
+0000CAr 1  BD rr rr             lda     line,x
+0000CDr 1  C9 61                cmp     #'a'
+0000CFr 1  90 06                bcc     :+
+0000D1r 1  C9 7B                cmp     #'z'+1
+0000D3r 1  B0 02                bcs     :+
+0000D5r 1  29 DF                and     #$DF
+0000D7r 1  99 rr rr     :       sta     ldblk+4,y
+0000DAr 1  E8                   inx
+0000DBr 1  C8                   iny
+0000DCr 1  C0 0D                cpy     #13
+0000DEr 1  90 E5                bcc     @cp
+0000E0r 1  A9 00        @e:     lda     #0
+0000E2r 1  99 rr rr             sta     ldblk+4,y
+0000E5r 1  A9 rr                lda     #<ldblk
+0000E7r 1  A0 rr                ldy     #>ldblk
+0000E9r 1  20 15 FE             jsr     SBC_LOAD
+0000ECr 1  90 16                bcc     @ok
+0000EEr 1  48                   pha
+0000EFr 1  A9 rr                lda     #<s_ferr
+0000F1r 1  A0 rr                ldy     #>s_ferr
+0000F3r 1  20 rr rr             jsr     puts
+0000F6r 1  68                   pla
+0000F7r 1  20 rr rr             jsr     puthex
+0000FAr 1  4C rr rr             jmp     crlf
+0000FDr 1               @noname:
+0000FDr 1  A9 rr                lda     #<s_help
+0000FFr 1  A0 rr                ldy     #>s_help
+000101r 1  4C rr rr             jmp     puts
+000104r 1  8E rr rr     @ok:    stx     t1              ; X/Y = the length
+000107r 1  A9 rr                lda     #<fbuf
+000109r 1  8D rr rr             sta     src
+00010Cr 1  18                   clc
+00010Dr 1  6D rr rr             adc     t1
+000110r 1  8D rr rr             sta     send
+000113r 1  A9 rr                lda     #>fbuf
+000115r 1  8D rr rr             sta     src+1
+000118r 1  98                   tya
+000119r 1  69 rr                adc     #>fbuf
+00011Br 1  8D rr rr             sta     send+1
+00011Er 1  A9 01                lda     #1
+000120r 1  8D rr rr             sta     echo
+000123r 1  20 rr rr             jsr     crlf
+000126r 1  20 rr rr             jsr     speak
+000129r 1  4C rr rr             jmp     crlf
+00012Cr 1               
+00012Cr 1               ; /A names or numbers: those allophones
+00012Cr 1               cmd_allo:
+00012Cr 1  A9 00                lda     #0
+00012Er 1  8D rr rr             sta     na
+000131r 1  A2 02                ldx     #2
+000133r 1  EC rr rr     @tok:   cpx     llen            ; the next word
+000136r 1  90 03                bcc     :+
+000138r 1  4C rr rr             jmp     @say
+00013Br 1               :       ; (far)
+00013Br 1  BD rr rr             lda     line,x
+00013Er 1  C9 20                cmp     #' '
+000140r 1  D0 03                bne     @w
+000142r 1  E8                   inx
+000143r 1  D0 EE                bne     @tok
+000145r 1  8E rr rr     @w:     stx     t2              ; its start
+000148r 1  EC rr rr     @we:    cpx     llen
+00014Br 1  B0 0A                bcs     @wd
+00014Dr 1  BD rr rr             lda     line,x
+000150r 1  C9 20                cmp     #' '
+000152r 1  F0 03                beq     @wd
+000154r 1  E8                   inx
+000155r 1  D0 F1                bne     @we
+000157r 1  8E rr rr     @wd:    stx     t3              ; its end
+00015Ar 1  AE rr rr             ldx     t2
+00015Dr 1  BD rr rr             lda     line,x
+000160r 1  C9 30                cmp     #'0'
+000162r 1  90 35                bcc     @name
+000164r 1  C9 3A                cmp     #'9'+1
+000166r 1  B0 31                bcs     @name
+000168r 1  A9 00                lda     #0              ; a number
+00016Ar 1  8D rr rr             sta     t4
+00016Dr 1  EC rr rr     @dig:   cpx     t3
+000170r 1  B0 1B                bcs     @num
+000172r 1  AD rr rr             lda     t4              ; t4 = t4 * 10 + digit
+000175r 1  0A                   asl
+000176r 1  0A                   asl
+000177r 1  6D rr rr             adc     t4
+00017Ar 1  0A                   asl
+00017Br 1  8D rr rr             sta     t4
+00017Er 1  BD rr rr             lda     line,x
+000181r 1  29 0F                and     #$0F
+000183r 1  18                   clc
+000184r 1  6D rr rr             adc     t4
+000187r 1  8D rr rr             sta     t4
+00018Ar 1  E8                   inx
+00018Br 1  D0 E0                bne     @dig
+00018Dr 1  AD rr rr     @num:   lda     t4
+000190r 1  C9 40                cmp     #64
+000192r 1  B0 67                bcs     @bad
+000194r 1  B0 03                bcs     :+
+000196r 1  4C rr rr             jmp     @put
+000199r 1               :       ; (far)
+000199r 1  AD rr rr     @name:  lda     t3              ; a name: 1-3 letters against al_name
+00019Cr 1  38                   sec
+00019Dr 1  ED rr rr             sbc     t2
+0001A0r 1  C9 04                cmp     #4
+0001A2r 1  B0 57                bcs     @bad
+0001A4r 1  8D rr rr             sta     t5              ; (its length)
+0001A7r 1  A9 00                lda     #0
+0001A9r 1  8D rr rr             sta     t4
+0001ACr 1  AD rr rr     @try:   lda     t4              ; t6 = 3 * t4
+0001AFr 1  0A                   asl
+0001B0r 1  6D rr rr             adc     t4
+0001B3r 1  8D rr rr             sta     t6
+0001B6r 1  A2 00                ldx     #0
+0001B8r 1  EC rr rr     @c:     cpx     t5
+0001BBr 1  F0 23                beq     @tail
+0001BDr 1  8A                   txa
+0001BEr 1  18                   clc
+0001BFr 1  6D rr rr             adc     t2
+0001C2r 1  A8                   tay
+0001C3r 1  B9 rr rr             lda     line,y
+0001C6r 1  C9 61                cmp     #'a'
+0001C8r 1  90 02                bcc     :+
+0001CAr 1  29 DF                and     #$DF
+0001CCr 1  8D rr rr     :       sta     t1
+0001CFr 1  8A                   txa
+0001D0r 1  18                   clc
+0001D1r 1  6D rr rr             adc     t6
+0001D4r 1  A8                   tay
+0001D5r 1  B9 rr rr             lda     al_name,y
+0001D8r 1  CD rr rr             cmp     t1
+0001DBr 1  D0 14                bne     @next
+0001DDr 1  E8                   inx
+0001DEr 1  D0 D8                bne     @c
+0001E0r 1  E0 03        @tail:  cpx     #3              ; the rest of the name blank?
+0001E2r 1  F0 35                beq     @found
+0001E4r 1  8A                   txa
+0001E5r 1  18                   clc
+0001E6r 1  6D rr rr             adc     t6
+0001E9r 1  A8                   tay
+0001EAr 1  B9 rr rr             lda     al_name,y
+0001EDr 1  C9 20                cmp     #' '
+0001EFr 1  F0 28                beq     @found
+0001F1r 1  EE rr rr     @next:  inc     t4
+0001F4r 1  AD rr rr             lda     t4
+0001F7r 1  C9 40                cmp     #64
+0001F9r 1  90 B1                bcc     @try
+0001FBr 1  A9 3F        @bad:   lda     #'?'            ; not one: shown, skipped
+0001FDr 1  20 03 FE             jsr     SBC_CHROUT
+000200r 1  AE rr rr             ldx     t2
+000203r 1  EC rr rr     @bl:    cpx     t3
+000206r 1  B0 09                bcs     @bn
+000208r 1  BD rr rr             lda     line,x
+00020Br 1  20 03 FE             jsr     SBC_CHROUT
+00020Er 1  E8                   inx
+00020Fr 1  D0 F2                bne     @bl
+000211r 1  A9 20        @bn:    lda     #' '
+000213r 1  20 03 FE             jsr     SBC_CHROUT
+000216r 1  4C rr rr             jmp     @nx
+000219r 1  AD rr rr     @found: lda     t4
+00021Cr 1  AE rr rr     @put:   ldx     na
+00021Fr 1  9D rr rr             sta     abuf,x
+000222r 1  EE rr rr             inc     na
+000225r 1  AE rr rr     @nx:    ldx     t3
+000228r 1  4C rr rr             jmp     @tok
+00022Br 1  20 rr rr     @say:   jsr     crlf
+00022Er 1  4C rr rr             jmp     flush
+000231r 1               
+000231r 1               ; ----------------------------------------------------------------------------
+000231r 1               ; speak src .. send: a chunk at a time (Esc / Q between chunks stops it)
+000231r 1               ; ----------------------------------------------------------------------------
+000231r 1  A9 00        speak:  lda     #0
+000233r 1  8D rr rr             sta     na
+000236r 1  20 rr rr     @ch:    jsr     at_end
+000239r 1  B0 27                bcs     @r
+00023Br 1  20 rr rr             jsr     normalise
+00023Er 1  20 rr rr             jsr     xlate
+000241r 1  20 rr rr             jsr     allo
+000244r 1  20 rr rr             jsr     flush
+000247r 1  AD rr rr             lda     show
+00024Ar 1  F0 03                beq     :+
+00024Cr 1  20 rr rr             jsr     crlf
+00024Fr 1  20 00 FE     :       jsr     SBC_CHRIN       ; stop?
+000252r 1  90 E2                bcc     @ch
+000254r 1  C9 1B                cmp     #K_ESC
+000256r 1  F0 0A                beq     @r
+000258r 1  C9 03                cmp     #KEY_ESC
+00025Ar 1  F0 06                beq     @r
+00025Cr 1  29 DF                and     #$DF
+00025Er 1  C9 51                cmp     #'Q'
+000260r 1  D0 D4                bne     @ch
+000262r 1  60           @r:     rts
+000263r 1               
+000263r 1               ; C=1 at the end of the text
+000263r 1  AD rr rr     at_end: lda     src
+000266r 1  CD rr rr             cmp     send
+000269r 1  AD rr rr             lda     src+1
+00026Cr 1  ED rr rr             sbc     send+1
+00026Fr 1  60                   rts
+000270r 1               
+000270r 1               ; A = the next character of the text (echoed in file mode)
+000270r 1               src_get:
+000270r 1  AD rr rr             lda     src
+000273r 1  8D rr rr             sta     @rd+1
+000276r 1  AD rr rr             lda     src+1
+000279r 1  8D rr rr             sta     @rd+2
+00027Cr 1  AD FF FF     @rd:    lda     $FFFF
+00027Fr 1  EE rr rr             inc     src
+000282r 1  D0 03                bne     :+
+000284r 1  EE rr rr             inc     src+1
+000287r 1  AE rr rr     :       ldx     echo
+00028Ar 1  F0 1E                beq     @r
+00028Cr 1  48                   pha
+00028Dr 1  C9 0D                cmp     #K_CR
+00028Fr 1  F0 15                beq     @e
+000291r 1  C9 0A                cmp     #10
+000293r 1  D0 07                bne     :+
+000295r 1  A9 0D                lda     #K_CR           ; (LF alone: a new line too)
+000297r 1  20 03 FE             jsr     SBC_CHROUT
+00029Ar 1  A9 0A                lda     #10
+00029Cr 1  C9 09        :       cmp     #9
+00029Er 1  D0 02                bne     :+
+0002A0r 1  A9 20                lda     #' '
+0002A2r 1  C9 20        :       cmp     #' '
+0002A4r 1  90 03                bcc     @n
+0002A6r 1  20 03 FE     @e:     jsr     SBC_CHROUT
+0002A9r 1  68           @n:     pla
+0002AAr 1  60           @r:     rts
+0002ABr 1               
+0002ABr 1               ; ----------------------------------------------------------------------------
+0002ABr 1               ; normalise: text -> tbuf (tbuf[0-2] = 0, tbuf[3] = ' ', the words, ' ', 0),
+0002ABr 1               ; up to about TB_MAX characters, stopping between words
+0002ABr 1               ; ----------------------------------------------------------------------------
+0002ABr 1               normalise:
+0002ABr 1  A9 00                lda     #0
+0002ADr 1  8D rr rr             sta     tbuf
+0002B0r 1  8D rr rr             sta     tbuf+1
+0002B3r 1  8D rr rr             sta     tbuf+2
+0002B6r 1  8D rr rr             sta     tbuf+255
+0002B9r 1  A9 20                lda     #' '
+0002BBr 1  8D rr rr             sta     tbuf+3
+0002BEr 1  A9 04                lda     #4
+0002C0r 1  8D rr rr             sta     ti
+0002C3r 1  20 rr rr     @l:     jsr     at_end
+0002C6r 1  B0 66                bcs     @done
+0002C8r 1  AD rr rr             lda     ti
+0002CBr 1  C9 BE                cmp     #TB_MAX
+0002CDr 1  90 0A                bcc     @get
+0002CFr 1  AE rr rr             ldx     ti              ; full: stop after a space
+0002D2r 1  BD rr rr             lda     tbuf-1,x
+0002D5r 1  C9 20                cmp     #' '
+0002D7r 1  F0 55                beq     @done
+0002D9r 1  20 rr rr     @get:   jsr     src_get
+0002DCr 1  C9 61                cmp     #'a'
+0002DEr 1  90 06                bcc     :+
+0002E0r 1  C9 7B                cmp     #'z'+1
+0002E2r 1  B0 02                bcs     :+
+0002E4r 1  29 DF                and     #$DF
+0002E6r 1  C9 41        :       cmp     #'A'
+0002E8r 1  90 0A                bcc     @nl
+0002EAr 1  C9 5B                cmp     #'Z'+1
+0002ECr 1  B0 06                bcs     @nl
+0002EEr 1  20 rr rr     @put:   jsr     tput
+0002F1r 1  4C rr rr             jmp     @l
+0002F4r 1  C9 27        @nl:    cmp     #$27            ; '
+0002F6r 1  F0 F6                beq     @put
+0002F8r 1  C9 30                cmp     #'0'
+0002FAr 1  90 0A                bcc     @punct
+0002FCr 1  C9 3A                cmp     #'9'+1
+0002FEr 1  B0 06                bcs     @punct
+000300r 1  20 rr rr             jsr     number
+000303r 1  4C rr rr             jmp     @l
+000306r 1  A2 00        @punct: ldx     #0
+000308r 1  BC rr rr     @pl:    ldy     p_from,x
+00030Br 1  F0 1B                beq     @sp
+00030Dr 1  DD rr rr             cmp     p_from,x
+000310r 1  F0 03                beq     @pf
+000312r 1  E8                   inx
+000313r 1  D0 F3                bne     @pl
+000315r 1  BD rr rr     @pf:    lda     p_to,x          ; " , "  " . "  " ? "  " - "
+000318r 1  48                   pha
+000319r 1  20 rr rr             jsr     tspace
+00031Cr 1  68                   pla
+00031Dr 1  20 rr rr             jsr     tput
+000320r 1  A9 20                lda     #' '
+000322r 1  20 rr rr             jsr     tput
+000325r 1  4C rr rr             jmp     @l
+000328r 1  20 rr rr     @sp:    jsr     tspace
+00032Br 1  4C rr rr             jmp     @l
+00032Er 1  20 rr rr     @done:  jsr     tspace
+000331r 1  A9 00                lda     #0
+000333r 1  AE rr rr             ldx     ti
+000336r 1  9D rr rr             sta     tbuf,x
+000339r 1  60                   rts
+00033Ar 1               
+00033Ar 1               ; tbuf += A (kept short of the end)
+00033Ar 1  AE rr rr     tput:   ldx     ti
+00033Dr 1  E0 FA                cpx     #250
+00033Fr 1  B0 06                bcs     @r
+000341r 1  9D rr rr             sta     tbuf,x
+000344r 1  EE rr rr             inc     ti
+000347r 1  60           @r:     rts
+000348r 1               
+000348r 1               ; a space, unless there is one
+000348r 1  AE rr rr     tspace: ldx     ti
+00034Br 1  BD rr rr             lda     tbuf-1,x
+00034Er 1  C9 20                cmp     #' '
+000350r 1  F0 05                beq     @r
+000352r 1  A9 20                lda     #' '
+000354r 1  4C rr rr             jmp     tput
+000357r 1  60           @r:     rts
+000358r 1               
+000358r 1               ; a run of digits (the first in A): up to 5 digits and <= 65535 as words,
+000358r 1               ; longer ones digit by digit
+000358r 1  A2 00        number: ldx     #0
+00035Ar 1  8E rr rr             stx     nv
+00035Dr 1  8E rr rr             stx     nv+1
+000360r 1  8E rr rr             stx     nbig
+000363r 1  29 0F        @d:     and     #$0F
+000365r 1  9D rr rr             sta     dg,x
+000368r 1  E0 05                cpx     #5
+00036Ar 1  90 05                bcc     :+
+00036Cr 1  EE rr rr             inc     nbig            ; (6 digits or more)
+00036Fr 1  D0 09                bne     @next
+000371r 1  8E rr rr     :       stx     t5
+000374r 1  20 rr rr             jsr     mul10
+000377r 1  AE rr rr             ldx     t5
+00037Ar 1  E8           @next:  inx
+00037Br 1  E0 10                cpx     #16
+00037Dr 1  B0 14                bcs     @more           ; (very long: the rest is skipped)
+00037Fr 1  8E rr rr             stx     t5
+000382r 1  20 rr rr             jsr     next_dig
+000385r 1  AE rr rr             ldx     t5
+000388r 1  90 14                bcc     @end
+00038Ar 1  20 rr rr             jsr     src_get
+00038Dr 1  AE rr rr             ldx     t5
+000390r 1  4C rr rr             jmp     @d
+000393r 1  20 rr rr     @more:  jsr     next_dig        ; skip the rest of the digits
+000396r 1  90 06                bcc     @end
+000398r 1  20 rr rr             jsr     src_get
+00039Br 1  4C rr rr             jmp     @more
+00039Er 1  8E rr rr     @end:   stx     ndig
+0003A1r 1  AD rr rr             lda     nbig
+0003A4r 1  D0 48                bne     @each
+0003A6r 1  AD rr rr             lda     nv              ; the value in words
+0003A9r 1  0D rr rr             ora     nv+1
+0003ACr 1  D0 05                bne     :+
+0003AEr 1  A9 00                lda     #0
+0003B0r 1  4C rr rr             jmp     word            ; ZERO
+0003B3r 1  AD rr rr     :       lda     nv+1            ; thousands
+0003B6r 1  C9 03                cmp     #>1000
+0003B8r 1  90 2B                bcc     @h
+0003BAr 1  D0 07                bne     @th
+0003BCr 1  AD rr rr             lda     nv
+0003BFr 1  C9 E8                cmp     #<1000
+0003C1r 1  90 22                bcc     @h
+0003C3r 1  A2 00        @th:    ldx     #0              ; nv / 1000 -> X, nv % 1000 -> nv
+0003C5r 1  AD rr rr     @ts:    lda     nv
+0003C8r 1  38                   sec
+0003C9r 1  E9 E8                sbc     #<1000
+0003CBr 1  A8                   tay
+0003CCr 1  AD rr rr             lda     nv+1
+0003CFr 1  E9 03                sbc     #>1000
+0003D1r 1  90 09                bcc     @tq
+0003D3r 1  8D rr rr             sta     nv+1
+0003D6r 1  8C rr rr             sty     nv
+0003D9r 1  E8                   inx
+0003DAr 1  D0 E9                bne     @ts
+0003DCr 1  8A           @tq:    txa
+0003DDr 1  20 rr rr             jsr     words3
+0003E0r 1  A9 1D                lda     #W_THOUSAND
+0003E2r 1  20 rr rr             jsr     word
+0003E5r 1  AD rr rr     @h:     lda     nv              ; (< 1000: nv+1 is 0-3)
+0003E8r 1  AE rr rr             ldx     nv+1
+0003EBr 1  4C rr rr             jmp     words3x
+0003EEr 1  A2 00        @each:  ldx     #0              ; digit by digit
+0003F0r 1  EC rr rr     @el:    cpx     ndig
+0003F3r 1  B0 0F                bcs     @r
+0003F5r 1  8E rr rr             stx     t5
+0003F8r 1  BD rr rr             lda     dg,x
+0003FBr 1  20 rr rr             jsr     word
+0003FEr 1  AE rr rr             ldx     t5
+000401r 1  E8                   inx
+000402r 1  D0 EC                bne     @el
+000404r 1  60           @r:     rts
+000405r 1               
+000405r 1               ; C=1 if the text goes on with a digit
+000405r 1               next_dig:
+000405r 1  20 rr rr             jsr     at_end
+000408r 1  B0 19                bcs     @no
+00040Ar 1  AD rr rr             lda     src
+00040Dr 1  8D rr rr             sta     @pk+1
+000410r 1  AD rr rr             lda     src+1
+000413r 1  8D rr rr             sta     @pk+2
+000416r 1  AD FF FF     @pk:    lda     $FFFF
+000419r 1  C9 30                cmp     #'0'
+00041Br 1  90 06                bcc     @no
+00041Dr 1  C9 3A                cmp     #'9'+1
+00041Fr 1  B0 02                bcs     @no
+000421r 1  38                   sec
+000422r 1  60                   rts
+000423r 1  18           @no:    clc
+000424r 1  60                   rts
+000425r 1               
+000425r 1               ; nv = nv * 10 + A (nbig = 1 past 65535)
+000425r 1  8D rr rr     mul10:  sta     t1
+000428r 1  AD rr rr             lda     nv
+00042Br 1  8D rr rr             sta     t2
+00042Er 1  AD rr rr             lda     nv+1
+000431r 1  8D rr rr             sta     t3
+000434r 1  0E rr rr             asl     nv              ; * 4
+000437r 1  2E rr rr             rol     nv+1
+00043Ar 1  B0 37                bcs     @big
+00043Cr 1  0E rr rr             asl     nv
+00043Fr 1  2E rr rr             rol     nv+1
+000442r 1  B0 2F                bcs     @big
+000444r 1  AD rr rr             lda     nv              ; + itself: * 5
+000447r 1  18                   clc
+000448r 1  6D rr rr             adc     t2
+00044Br 1  8D rr rr             sta     nv
+00044Er 1  AD rr rr             lda     nv+1
+000451r 1  6D rr rr             adc     t3
+000454r 1  8D rr rr             sta     nv+1
+000457r 1  B0 1A                bcs     @big
+000459r 1  0E rr rr             asl     nv              ; * 10
+00045Cr 1  2E rr rr             rol     nv+1
+00045Fr 1  B0 12                bcs     @big
+000461r 1  AD rr rr             lda     nv              ; + the digit
+000464r 1  18                   clc
+000465r 1  6D rr rr             adc     t1
+000468r 1  8D rr rr             sta     nv
+00046Br 1  90 05                bcc     @r
+00046Dr 1  EE rr rr             inc     nv+1
+000470r 1  F0 01                beq     @big
+000472r 1  60           @r:     rts
+000473r 1  A9 01        @big:   lda     #1
+000475r 1  8D rr rr             sta     nbig
+000478r 1  60                   rts
+000479r 1               
+000479r 1               ; A (0-255) in words; words3x: X/A (0-999)
+000479r 1  A2 00        words3: ldx     #0
+00047Br 1               words3x:
+00047Br 1  8D rr rr             sta     wv
+00047Er 1  8E rr rr             stx     wv+1
+000481r 1  A2 00                ldx     #0              ; hundreds
+000483r 1  AD rr rr     @hs:    lda     wv
+000486r 1  38                   sec
+000487r 1  E9 64                sbc     #100
+000489r 1  A8                   tay
+00048Ar 1  AD rr rr             lda     wv+1
+00048Dr 1  E9 00                sbc     #0
+00048Fr 1  90 09                bcc     @hq
+000491r 1  8D rr rr             sta     wv+1
+000494r 1  8C rr rr             sty     wv
+000497r 1  E8                   inx
+000498r 1  D0 E9                bne     @hs
+00049Ar 1  8A           @hq:    txa
+00049Br 1  F0 08                beq     @t
+00049Dr 1  20 rr rr             jsr     word            ; ONE .. NINE
+0004A0r 1  A9 1C                lda     #W_HUNDRED
+0004A2r 1  20 rr rr             jsr     word
+0004A5r 1  AD rr rr     @t:     lda     wv              ; < 100
+0004A8r 1  C9 14                cmp     #20
+0004AAr 1  90 1A                bcc     @o
+0004ACr 1  A2 00                ldx     #0
+0004AEr 1  C9 0A        @tn:    cmp     #10
+0004B0r 1  90 05                bcc     @tw
+0004B2r 1  E9 0A                sbc     #10
+0004B4r 1  E8                   inx
+0004B5r 1  D0 F7                bne     @tn
+0004B7r 1  8D rr rr     @tw:    sta     wv
+0004BAr 1  8A                   txa                     ; TWENTY .. NINETY = word 18 + tens
+0004BBr 1  18                   clc
+0004BCr 1  69 12                adc     #W_TENS-2
+0004BEr 1  20 rr rr             jsr     word
+0004C1r 1  AD rr rr             lda     wv
+0004C4r 1  F0 08                beq     @r
+0004C6r 1  AD rr rr     @o:     lda     wv
+0004C9r 1  F0 03                beq     @r
+0004CBr 1  4C rr rr             jmp     word
+0004CEr 1  60           @r:     rts
+0004CFr 1               
+0004CFr 1               ; word A (num_w) into tbuf, with spaces round it
+0004CFr 1  0A           word:   asl
+0004D0r 1  AA                   tax
+0004D1r 1  BD rr rr             lda     num_w,x
+0004D4r 1  8D rr rr             sta     @rd+1
+0004D7r 1  BD rr rr             lda     num_w+1,x
+0004DAr 1  8D rr rr             sta     @rd+2
+0004DDr 1  20 rr rr             jsr     tspace
+0004E0r 1  A0 00                ldy     #0
+0004E2r 1  B9 FF FF     @rd:    lda     $FFFF,y
+0004E5r 1  F0 0C                beq     @e
+0004E7r 1  8C rr rr             sty     t6
+0004EAr 1  20 rr rr             jsr     tput
+0004EDr 1  AC rr rr             ldy     t6
+0004F0r 1  C8                   iny
+0004F1r 1  D0 EF                bne     @rd
+0004F3r 1  A9 20        @e:     lda     #' '
+0004F5r 1  4C rr rr             jmp     tput
+0004F8r 1               
+0004F8r 1               ; ----------------------------------------------------------------------------
+0004F8r 1               ; xlate: tbuf -> phonemes in pbuf (pn of them)
+0004F8r 1               ; ----------------------------------------------------------------------------
+0004F8r 1  A9 00        xlate:  lda     #0
+0004FAr 1  8D rr rr             sta     pn
+0004FDr 1  A9 04                lda     #4
+0004FFr 1  8D rr rr             sta     ti
+000502r 1  AE rr rr     @l:     ldx     ti
+000505r 1  BD rr rr             lda     tbuf,x
+000508r 1  F0 54                beq     @r
+00050Ar 1  BD rr rr             lda     tbuf-1,x        ; a word's start: the word list first
+00050Dr 1  C9 20                cmp     #' '
+00050Fr 1  D0 0F                bne     @rules
+000511r 1  BD rr rr             lda     tbuf,x
+000514r 1  20 rr rr             jsr     cls
+000517r 1  29 10                and     #C_LET
+000519r 1  F0 05                beq     @rules
+00051Br 1  20 rr rr             jsr     dict
+00051Er 1  B0 E2                bcs     @l
+000520r 1  AE rr rr     @rules: ldx     ti
+000523r 1  BD rr rr             lda     tbuf,x
+000526r 1  38                   sec
+000527r 1  E9 20                sbc     #$20
+000529r 1  90 2D                bcc     @skip
+00052Br 1  C9 3B                cmp     #$3B
+00052Dr 1  B0 29                bcs     @skip
+00052Fr 1  0A                   asl
+000530r 1  A8                   tay
+000531r 1  B9 rr rr             lda     rg_tab,y
+000534r 1  8D rr rr             sta     rp
+000537r 1  B9 rr rr             lda     rg_tab+1,y
+00053Ar 1  8D rr rr             sta     rp+1
+00053Dr 1  0D rr rr             ora     rp
+000540r 1  F0 16                beq     @skip
+000542r 1  20 rr rr     @rule:  jsr     rule
+000545r 1  B0 BB                bcs     @l              ; (a rule took it)
+000547r 1  AD rr rr             lda     nxt             ; the next rule
+00054Ar 1  8D rr rr             sta     rp
+00054Dr 1  AD rr rr             lda     nxt+1
+000550r 1  8D rr rr             sta     rp+1
+000553r 1  AD rr rr             lda     rend
+000556r 1  F0 EA                beq     @rule
+000558r 1  EE rr rr     @skip:  inc     ti              ; no rule: skipped
+00055Br 1  4C rr rr             jmp     @l
+00055Er 1  60           @r:     rts
+00055Fr 1               
+00055Fr 1               ; rb: A = byte Y of the rule / word at rp
+00055Fr 1  B9 FF FF     rb:     lda     $FFFF,y
+000562r 1  60                   rts
+000563r 1  AD rr rr     set_rb: lda     rp
+000566r 1  8D rr rr             sta     rb+1
+000569r 1  AD rr rr             lda     rp+1
+00056Cr 1  8D rr rr             sta     rb+2
+00056Fr 1  60                   rts
+000570r 1               
+000570r 1               ; try the rule at rp: C=1 if it matched (its phonemes added, ti moved);
+000570r 1               ; C=0: nxt = the next rule, rend = 1 if this was the group's end
+000570r 1  20 rr rr     rule:   jsr     set_rb
+000573r 1  A9 00                lda     #0
+000575r 1  8D rr rr             sta     rend
+000578r 1  A0 00                ldy     #0
+00057Ar 1  20 rr rr             jsr     rb
+00057Dr 1  C9 FF                cmp     #$FF
+00057Fr 1  D0 05                bne     :+
+000581r 1  EE rr rr             inc     rend
+000584r 1  18                   clc
+000585r 1  60                   rts
+000586r 1  A2 00        :       ldx     #0              ; find the parts: left 0 match 0 right 0 ph $FF
+000588r 1  A0 00                ldy     #0
+00058Ar 1  20 rr rr     @f:     jsr     rb
+00058Dr 1  D0 21                bne     @fn
+00058Fr 1  E8                   inx
+000590r 1  E0 01                cpx     #1
+000592r 1  D0 08                bne     :+
+000594r 1  8C rr rr             sty     llen2           ; (the left context's length)
+000597r 1  C8                   iny
+000598r 1  8C rr rr             sty     mofs
+00059Br 1  88                   dey
+00059Cr 1  E0 02        :       cpx     #2
+00059Er 1  D0 05                bne     :+
+0005A0r 1  C8                   iny
+0005A1r 1  8C rr rr             sty     rofs
+0005A4r 1  88                   dey
+0005A5r 1  E0 03        :       cpx     #3
+0005A7r 1  D0 07                bne     @fn
+0005A9r 1  C8                   iny
+0005AAr 1  8C rr rr             sty     pofs
+0005ADr 1  4C rr rr             jmp     @ph
+0005B0r 1  C8           @fn:    iny
+0005B1r 1  D0 D7                bne     @f
+0005B3r 1  20 rr rr     @ph:    jsr     rb              ; to the $FF
+0005B6r 1  C9 FF                cmp     #$FF
+0005B8r 1  F0 03                beq     @pe
+0005BAr 1  C8                   iny
+0005BBr 1  D0 F6                bne     @ph
+0005BDr 1  C8           @pe:    iny
+0005BEr 1  98                   tya
+0005BFr 1  18                   clc
+0005C0r 1  6D rr rr             adc     rp
+0005C3r 1  8D rr rr             sta     nxt
+0005C6r 1  AD rr rr             lda     rp+1
+0005C9r 1  69 00                adc     #0
+0005CBr 1  8D rr rr             sta     nxt+1
+0005CEr 1  AC rr rr             ldy     mofs            ; the text itself
+0005D1r 1  AE rr rr             ldx     ti
+0005D4r 1  20 rr rr     @m:     jsr     rb
+0005D7r 1  F0 09                beq     @me
+0005D9r 1  DD rr rr             cmp     tbuf,x
+0005DCr 1  D0 29                bne     @no
+0005DEr 1  C8                   iny
+0005DFr 1  E8                   inx
+0005E0r 1  D0 F2                bne     @m
+0005E2r 1  8E rr rr     @me:    stx     tend
+0005E5r 1  20 rr rr             jsr     left_ok
+0005E8r 1  90 1D                bcc     @no
+0005EAr 1  20 rr rr             jsr     right_ok
+0005EDr 1  90 18                bcc     @no
+0005EFr 1  AC rr rr             ldy     pofs            ; matched: its phonemes
+0005F2r 1  20 rr rr     @pp:    jsr     rb
+0005F5r 1  C9 FF                cmp     #$FF
+0005F7r 1  F0 06                beq     @pd
+0005F9r 1  20 rr rr             jsr     padd
+0005FCr 1  C8                   iny
+0005FDr 1  D0 F3                bne     @pp
+0005FFr 1  AD rr rr     @pd:    lda     tend
+000602r 1  8D rr rr             sta     ti
+000605r 1  38                   sec
+000606r 1  60                   rts
+000607r 1  18           @no:    clc
+000608r 1  60                   rts
+000609r 1               
+000609r 1  AE rr rr     padd:   ldx     pn
+00060Cr 1  E0 FA                cpx     #250
+00060Er 1  B0 06                bcs     @r
+000610r 1  9D rr rr             sta     pbuf,x
+000613r 1  EE rr rr             inc     pn
+000616r 1  60           @r:     rts
+000617r 1               
+000617r 1               ; the word at ti in the word list?  C=1: its phonemes added, ti moved
+000617r 1  A9 rr        dict:   lda     #<dict_t
+000619r 1  8D rr rr             sta     rp
+00061Cr 1  A9 rr                lda     #>dict_t
+00061Er 1  8D rr rr             sta     rp+1
+000621r 1  20 rr rr     @e:     jsr     set_rb
+000624r 1  A0 00                ldy     #0
+000626r 1  20 rr rr             jsr     rb
+000629r 1  D0 02                bne     :+
+00062Br 1  18                   clc                     ; (the list's end)
+00062Cr 1  60                   rts
+00062Dr 1  AE rr rr     :       ldx     ti
+000630r 1  20 rr rr     @c:     jsr     rb
+000633r 1  F0 09                beq     @we
+000635r 1  DD rr rr             cmp     tbuf,x
+000638r 1  D0 2B                bne     @skip
+00063Ar 1  C8                   iny
+00063Br 1  E8                   inx
+00063Cr 1  D0 F2                bne     @c
+00063Er 1  BD rr rr     @we:    lda     tbuf,x          ; the word must end there too
+000641r 1  C9 27                cmp     #$27
+000643r 1  F0 20                beq     @skip
+000645r 1  20 rr rr             jsr     cls
+000648r 1  29 10                and     #C_LET
+00064Ar 1  D0 19                bne     @skip
+00064Cr 1  8E rr rr             stx     tend
+00064Fr 1  C8                   iny
+000650r 1  20 rr rr     @p:     jsr     rb
+000653r 1  C9 FF                cmp     #$FF
+000655r 1  F0 06                beq     @done
+000657r 1  20 rr rr             jsr     padd
+00065Ar 1  C8                   iny
+00065Br 1  D0 F3                bne     @p
+00065Dr 1  AD rr rr     @done:  lda     tend
+000660r 1  8D rr rr             sta     ti
+000663r 1  38                   sec
+000664r 1  60                   rts
+000665r 1  20 rr rr     @skip:  jsr     rb              ; to the entry's $FF
+000668r 1  C9 FF                cmp     #$FF
+00066Ar 1  F0 03                beq     @nx
+00066Cr 1  C8                   iny
+00066Dr 1  D0 F6                bne     @skip
+00066Fr 1  C8           @nx:    iny
+000670r 1  98                   tya
+000671r 1  18                   clc
+000672r 1  6D rr rr             adc     rp
+000675r 1  8D rr rr             sta     rp
+000678r 1  90 A7                bcc     @e
+00067Ar 1  EE rr rr             inc     rp+1
+00067Dr 1  D0 A2                bne     @e
+00067Fr 1               
+00067Fr 1               ; A = the classes of character A (0 above 'Z')
+00067Fr 1  C9 5B        cls:    cmp     #'Z'+1
+000681r 1  B0 0B                bcs     @z
+000683r 1  8E rr rr             stx     cx
+000686r 1  AA                   tax
+000687r 1  BD rr rr             lda     ctab,x
+00068Ar 1  AE rr rr             ldx     cx
+00068Dr 1  60                   rts
+00068Er 1  A9 00        @z:     lda     #0
+000690r 1  60                   rts
+000691r 1               
+000691r 1               ; ----------------------------------------------------------------------------
+000691r 1               ; the contexts.  left_ok: the pattern (stored reversed) Y = 0 .. llen2-1,
+000691r 1               ; the text from ti-1 going back.  right_ok: from rofs, the text from tend.
+000691r 1               ; C=1 if it fits.
+000691r 1               ; ----------------------------------------------------------------------------
+000691r 1               left_ok:
+000691r 1  A9 FF                lda     #$FF            ; (dir: back)
+000693r 1  8D rr rr             sta     dir
+000696r 1  AE rr rr             ldx     ti
+000699r 1  CA                   dex
+00069Ar 1  A0 00                ldy     #0
+00069Cr 1  CC rr rr     @p:     cpy     llen2
+00069Fr 1  B0 31                bcs     ok
+0006A1r 1  20 rr rr             jsr     rb
+0006A4r 1  C8                   iny
+0006A5r 1  8C rr rr             sty     py
+0006A8r 1  20 rr rr             jsr     ctx
+0006ABr 1  90 27                bcc     no
+0006ADr 1  AC rr rr             ldy     py
+0006B0r 1  4C rr rr             jmp     @p
+0006B3r 1               
+0006B3r 1               right_ok:
+0006B3r 1  A9 01                lda     #1
+0006B5r 1  8D rr rr             sta     dir
+0006B8r 1  AE rr rr             ldx     tend
+0006BBr 1  AC rr rr             ldy     rofs
+0006BEr 1  20 rr rr     @p:     jsr     rb
+0006C1r 1  F0 0F                beq     ok
+0006C3r 1  C8                   iny
+0006C4r 1  8C rr rr             sty     py
+0006C7r 1  20 rr rr             jsr     ctx
+0006CAr 1  90 08                bcc     no
+0006CCr 1  AC rr rr             ldy     py
+0006CFr 1  4C rr rr             jmp     @p
+0006D2r 1  38           ok:     sec
+0006D3r 1  60                   rts
+0006D4r 1  18           no:     clc
+0006D5r 1  60                   rts
+0006D6r 1               
+0006D6r 1               ; one pattern character A against the text at X (moving X by dir): C=1 fits
+0006D6r 1  C9 20        ctx:    cmp     #' '
+0006D8r 1  D0 10                bne     @n1
+0006DAr 1  BD rr rr             lda     tbuf,x          ; not a letter
+0006DDr 1  20 rr rr             jsr     cls
+0006E0r 1  29 10                and     #C_LET
+0006E2r 1  F0 03                beq     :+
+0006E4r 1  4C rr rr             jmp     @no
+0006E7r 1               :       ; (far)
+0006E7r 1  4C rr rr             jmp     step
+0006EAr 1  C9 23        @n1:    cmp     #'#'
+0006ECr 1  D0 04                bne     @n2
+0006EEr 1  A9 01                lda     #1
+0006F0r 1  D0 06                bne     @vow
+0006F2r 1  C9 21        @n2:    cmp     #'!'
+0006F4r 1  D0 27                bne     @n3
+0006F6r 1  A9 02                lda     #2
+0006F8r 1  8D rr rr     @vow:   sta     cnt             ; cnt or more vowels
+0006FBr 1  BD rr rr     @vl:    lda     tbuf,x
+0006FEr 1  20 rr rr             jsr     cls
+000701r 1  29 01                and     #C_VOW
+000703r 1  F0 09                beq     @ve
+000705r 1  20 rr rr             jsr     step
+000708r 1  CE rr rr             dec     cnt
+00070Br 1  4C rr rr             jmp     @vl
+00070Er 1  AD rr rr     @ve:    lda     cnt
+000711r 1  D0 03                bne     :+
+000713r 1  4C rr rr             jmp     @ok
+000716r 1               :       ; (far)
+000716r 1  10 03                bpl     :+
+000718r 1  4C rr rr             jmp     @ok
+00071Br 1               :       ; (far)
+00071Br 1  18                   clc
+00071Cr 1  60                   rts
+00071Dr 1  C9 3A        @n3:    cmp     #':'
+00071Fr 1  D0 04                bne     @n4
+000721r 1  A9 00                lda     #0
+000723r 1  F0 06                beq     @con
+000725r 1  C9 2A        @n4:    cmp     #'*'
+000727r 1  D0 18                bne     @n5
+000729r 1  A9 01                lda     #1
+00072Br 1  8D rr rr     @con:   sta     cnt             ; cnt or more consonants
+00072Er 1  BD rr rr     @cl:    lda     tbuf,x
+000731r 1  20 rr rr             jsr     cls
+000734r 1  29 02                and     #C_CON
+000736r 1  F0 D6                beq     @ve
+000738r 1  20 rr rr             jsr     step
+00073Br 1  CE rr rr             dec     cnt
+00073Er 1  4C rr rr             jmp     @cl
+000741r 1  A0 02        @n5:    ldy     #C_CON
+000743r 1  C9 5E                cmp     #'^'
+000745r 1  F0 20                beq     @one
+000747r 1  A0 04                ldy     #C_VCD
+000749r 1  C9 2E                cmp     #'.'
+00074Br 1  F0 1A                beq     @one
+00074Dr 1  A0 08                ldy     #C_FRN
+00074Fr 1  C9 2B                cmp     #'+'
+000751r 1  F0 14                beq     @one
+000753r 1  C9 25                cmp     #'%'
+000755r 1  F0 21                beq     @pct
+000757r 1  C9 26                cmp     #'&'
+000759r 1  F0 3B                beq     @amp
+00075Br 1  C9 40                cmp     #'@'
+00075Dr 1  F0 3D                beq     @at
+00075Fr 1  DD rr rr             cmp     tbuf,x          ; a letter or '
+000762r 1  D0 57                bne     @no
+000764r 1  4C rr rr             jmp     step
+000767r 1  8C rr rr     @one:   sty     cnt             ; one character of class cnt
+00076Ar 1  BD rr rr             lda     tbuf,x
+00076Dr 1  20 rr rr             jsr     cls
+000770r 1  2D rr rr             and     cnt
+000773r 1  F0 46                beq     @no
+000775r 1  4C rr rr             jmp     step
+000778r 1  BD rr rr     @pct:   lda     tbuf,x          ; (right only) ING, or E...
+00077Br 1  C9 45                cmp     #'E'
+00077Dr 1  F0 3E                beq     step
+00077Fr 1  C9 49                cmp     #'I'
+000781r 1  D0 38                bne     @no
+000783r 1  BD rr rr             lda     tbuf+1,x
+000786r 1  C9 4E                cmp     #'N'
+000788r 1  D0 31                bne     @no
+00078Ar 1  BD rr rr             lda     tbuf+2,x
+00078Dr 1  C9 47                cmp     #'G'
+00078Fr 1  D0 2A                bne     @no
+000791r 1  E8                   inx
+000792r 1  E8                   inx
+000793r 1  E8                   inx
+000794r 1  38                   sec
+000795r 1  60                   rts
+000796r 1  A9 20        @amp:   lda     #C_SIB
+000798r 1  A0 43                ldy     #'C'            ; CH SH, or one of S C G Z X J
+00079Ar 1  D0 04                bne     @two
+00079Cr 1  A9 40        @at:    lda     #C_LNG          ; TH CH SH, or one of T S R D L Z N J
+00079Er 1  A0 54                ldy     #'T'
+0007A0r 1  8D rr rr     @two:   sta     cnt
+0007A3r 1  8C rr rr             sty     t7
+0007A6r 1  20 rr rr             jsr     hpair
+0007A9r 1  B0 0E                bcs     @ok
+0007ABr 1  BD rr rr             lda     tbuf,x
+0007AEr 1  20 rr rr             jsr     cls
+0007B1r 1  2D rr rr             and     cnt
+0007B4r 1  F0 05                beq     @no
+0007B6r 1  4C rr rr             jmp     step
+0007B9r 1  38           @ok:    sec
+0007BAr 1  60                   rts
+0007BBr 1  18           @no:    clc
+0007BCr 1  60                   rts
+0007BDr 1               
+0007BDr 1               ; X += dir (C=1)
+0007BDr 1  8A           step:   txa
+0007BEr 1  18                   clc
+0007BFr 1  6D rr rr             adc     dir
+0007C2r 1  AA                   tax
+0007C3r 1  38                   sec
+0007C4r 1  60                   rts
+0007C5r 1               
+0007C5r 1               ; an "xH" pair at X (CH, SH, or TH when t7 = 'T'), in the direction of
+0007C5r 1               ; travel: C=1 and X past it
+0007C5r 1  AD rr rr     hpair:  lda     dir
+0007C8r 1  30 13                bmi     @back
+0007CAr 1  BD rr rr             lda     tbuf+1,x        ; forwards: x, then H
+0007CDr 1  C9 48                cmp     #'H'
+0007CFr 1  D0 1F                bne     @no
+0007D1r 1  BD rr rr             lda     tbuf,x
+0007D4r 1  20 rr rr             jsr     @first
+0007D7r 1  90 17                bcc     @no
+0007D9r 1  E8                   inx
+0007DAr 1  E8                   inx
+0007DBr 1  38                   sec
+0007DCr 1  60                   rts
+0007DDr 1  BD rr rr     @back:  lda     tbuf,x          ; backwards: H, then x before it
+0007E0r 1  C9 48                cmp     #'H'
+0007E2r 1  D0 0C                bne     @no
+0007E4r 1  BD rr rr             lda     tbuf-1,x
+0007E7r 1  20 rr rr             jsr     @first
+0007EAr 1  90 04                bcc     @no
+0007ECr 1  CA                   dex
+0007EDr 1  CA                   dex
+0007EEr 1  38                   sec
+0007EFr 1  60                   rts
+0007F0r 1  18           @no:    clc
+0007F1r 1  60                   rts
+0007F2r 1  C9 43        @first: cmp     #'C'
+0007F4r 1  F0 0B                beq     @y
+0007F6r 1  C9 53                cmp     #'S'
+0007F8r 1  F0 07                beq     @y
+0007FAr 1  CD rr rr             cmp     t7
+0007FDr 1  F0 02                beq     @y
+0007FFr 1  18                   clc
+000800r 1  60                   rts
+000801r 1  38           @y:     sec
+000802r 1  60                   rts
+000803r 1               
+000803r 1               ; ----------------------------------------------------------------------------
+000803r 1               ; allo: phonemes -> allophones (abuf, queued at the pauses)
+000803r 1               ; ----------------------------------------------------------------------------
+000803r 1  A9 00        allo:   lda     #0
+000805r 1  8D rr rr             sta     k
+000808r 1  AE rr rr     allo_l: ldx     k
+00080Br 1  EC rr rr             cpx     pn
+00080Er 1  90 01                bcc     :+
+000810r 1  60                   rts
+000811r 1  BD rr rr     :       lda     pbuf,x
+000814r 1  8D rr rr             sta     cur
+000817r 1  A9 00                lda     #P_GAP          ; prev, nxt, nxt2 (a gap beyond the ends)
+000819r 1  E0 00                cpx     #0
+00081Br 1  F0 03                beq     :+
+00081Dr 1  BD rr rr             lda     pbuf-1,x
+000820r 1  8D rr rr     :       sta     prev
+000823r 1  20 rr rr             jsr     allo_pk           ; nxt
+000826r 1  8D rr rr             sta     nxt1
+000829r 1  E8                   inx
+00082Ar 1  20 rr rr             jsr     allo_pk
+00082Dr 1  8D rr rr             sta     nxt2
+000830r 1  AD rr rr             lda     cur
+000833r 1  C9 04                cmp     #4
+000835r 1  B0 0A                bcs     @snd
+000837r 1  AA                   tax                     ; a pause: PA3 / PA4 / PA5
+000838r 1  BD rr rr             lda     gap_al,x
+00083Br 1  20 rr rr             jsr     apause
+00083Er 1  4C rr rr             jmp     allo_n
+000841r 1  AA           @snd:   tax                     ; PP -> P
+000842r 1  BD rr rr             lda     ph_kind,x
+000845r 1  29 01                and     #1
+000847r 1  D0 0B                bne     :+
+000849r 1  AD rr rr             lda     cur
+00084Cr 1  CD rr rr             cmp     prev
+00084Fr 1  D0 03                bne     :+
+000851r 1  4C rr rr             jmp     allo_n
+000854r 1               :       ; (far)
+000854r 1  AD rr rr     :       lda     prev            ; start of a word?
+000857r 1  C9 04                cmp     #4
+000859r 1  A9 00                lda     #0
+00085Br 1  2A                   rol
+00085Cr 1  49 01                eor     #1
+00085Er 1  8D rr rr             sta     wstart          ; (1 = the first sound of a word)
+000861r 1  D0 23                bne     @nost
+000863r 1  AE rr rr             ldx     cur             ; a stop in a word: a short pause first
+000866r 1  BD rr rr             lda     ph_kind,x
+000869r 1  29 0C                and     #$0C
+00086Br 1  F0 19                beq     @nost
+00086Dr 1  20 rr rr             jsr     last_pa
+000870r 1  B0 14                bcs     @nost
+000872r 1  AE rr rr             ldx     cur
+000875r 1  BD rr rr             lda     ph_kind,x
+000878r 1  29 04                and     #4
+00087Ar 1  F0 05                beq     :+
+00087Cr 1  A9 00                lda     #A_PA1              ; (= 0: no bne)
+00087Er 1  4C rr rr             jmp     @pa
+000881r 1  A9 01        :       lda     #A_PA2
+000883r 1  20 rr rr     @pa:    jsr     aput
+000886r 1  AE rr rr     @nost:  ldx     cur             ; an R-coloured vowel?
+000889r 1  BD rr rr             lda     ph_rcol,x
+00088Cr 1  F0 1B                beq     @nr
+00088Er 1  AC rr rr             ldy     nxt1
+000891r 1  C0 2C                cpy     #P_R
+000893r 1  D0 14                bne     @nr
+000895r 1  AC rr rr             ldy     nxt2
+000898r 1  48                   pha
+000899r 1  B9 rr rr             lda     ph_kind,y
+00089Cr 1  4A                   lsr
+00089Dr 1  68                   pla
+00089Er 1  B0 09                bcs     @nr
+0008A0r 1  20 rr rr             jsr     aput
+0008A3r 1  EE rr rr             inc     k
+0008A6r 1  4C rr rr             jmp     allo_n
+0008A9r 1  AD rr rr     @nr:    lda     cur             ; AX L at a word's end: EL
+0008ACr 1  C9 0F                cmp     #P_AX
+0008AEr 1  D0 19                bne     @ne
+0008B0r 1  AD rr rr             lda     nxt1
+0008B3r 1  C9 29                cmp     #P_L
+0008B5r 1  D0 12                bne     @ne
+0008B7r 1  AD rr rr             lda     nxt2
+0008BAr 1  C9 04                cmp     #4
+0008BCr 1  B0 0B                bcs     @ne
+0008BEr 1  A9 3E                lda     #A_EL
+0008C0r 1  20 rr rr             jsr     aput
+0008C3r 1  EE rr rr             inc     k
+0008C6r 1  4C rr rr             jmp     allo_n
+0008C9r 1  AE rr rr     @ne:    ldx     cur
+0008CCr 1  BD rr rr             lda     ph_map,x
+0008CFr 1  30 09                bmi     allo_sp
+0008D1r 1  20 rr rr             jsr     aput
+0008D4r 1  EE rr rr     allo_n: inc     k
+0008D7r 1  4C rr rr             jmp     allo_l
+0008DAr 1  29 7F        allo_sp:  and     #$7F
+0008DCr 1  0A                   asl
+0008DDr 1  AA                   tax
+0008DEr 1  BD rr rr             lda     spec_go+1,x
+0008E1r 1  48                   pha
+0008E2r 1  BD rr rr             lda     spec_go,x
+0008E5r 1  48                   pha
+0008E6r 1  60                   rts                     ; (the choice ends with jmp put_adv)
+0008E7r 1  E8           allo_pk:  inx                     ; A = pbuf[X+1] or a gap
+0008E8r 1  EC rr rr             cpx     pn
+0008EBr 1  90 04                bcc     :+
+0008EDr 1  CA                   dex
+0008EEr 1  A9 00                lda     #P_GAP
+0008F0r 1  60                   rts
+0008F1r 1  BD rr rr     :       lda     pbuf,x
+0008F4r 1  CA                   dex
+0008F5r 1  60                   rts
+0008F6r 1               
+0008F6r 1               ; the choices by context (nxt1 = the next phoneme)
+0008F6r 1  A9 1F        sp_uw:  lda     #A_UW2          ; UW1 after Y ("you"), else UW2
+0008F8r 1  AE rr rr             ldx     prev
+0008FBr 1  E0 14                cpx     #P_Y
+0008FDr 1  D0 30                bne     put_adv
+0008FFr 1  A9 16                lda     #A_UW1
+000901r 1  D0 2C                bne     put_adv
+000903r 1  A9 31        sp_y:   lda     #A_YY1          ; YY2 starting a word
+000905r 1  AE rr rr             ldx     wstart
+000908r 1  F0 25                beq     put_adv
+00090Ar 1  A9 19                lda     #A_YY2
+00090Cr 1  D0 21                bne     put_adv
+00090Er 1  A9 1C        sp_b:   lda     #A_BB1
+000910r 1  AE rr rr             ldx     wstart
+000913r 1  F0 1A                beq     put_adv
+000915r 1  A9 3F                lda     #A_BB2
+000917r 1  D0 16                bne     put_adv
+000919r 1  A9 15        sp_d:   lda     #A_DD1          ; DD2 before a vowel
+00091Br 1  20 rr rr             jsr     nx_vow
+00091Er 1  F0 0F                beq     put_adv
+000920r 1  A9 21                lda     #A_DD2
+000922r 1  D0 0B                bne     put_adv
+000924r 1  A9 11        sp_t:   lda     #A_TT1          ; TT2 before a vowel
+000926r 1  20 rr rr             jsr     nx_vow
+000929r 1  F0 04                beq     put_adv
+00092Br 1  A9 0D                lda     #A_TT2
+00092Dr 1  D0 00                bne     put_adv
+00092Fr 1               put_adv:
+00092Fr 1  20 rr rr             jsr     aput
+000932r 1  4C rr rr             jmp     allo_n
+000935r 1               
+000935r 1  AE rr rr     sp_k:   ldx     nxt1            ; KK1 front vowel, KK3 other vowel, KK2
+000938r 1  BD rr rr             lda     ph_kind,x
+00093Br 1  4A                   lsr
+00093Cr 1  90 09                bcc     :+
+00093Er 1  4A                   lsr
+00093Fr 1  A9 08                lda     #A_KK3
+000941r 1  90 EC                bcc     put_adv
+000943r 1  A9 2A                lda     #A_KK1
+000945r 1  D0 E8                bne     put_adv
+000947r 1  A9 29        :       lda     #A_KK2
+000949r 1  D0 E4                bne     put_adv
+00094Br 1  AE rr rr     sp_g:   ldx     nxt1            ; GG1 front vowel, GG2 other vowel, GG3
+00094Er 1  BD rr rr             lda     ph_kind,x
+000951r 1  4A                   lsr
+000952r 1  90 09                bcc     :+
+000954r 1  4A                   lsr
+000955r 1  A9 3D                lda     #A_GG2
+000957r 1  90 D6                bcc     put_adv
+000959r 1  A9 24                lda     #A_GG1
+00095Br 1  D0 D2                bne     put_adv
+00095Dr 1  A9 22        :       lda     #A_GG3
+00095Fr 1  D0 CE                bne     put_adv
+000961r 1  A9 0B        sp_n:   lda     #A_NN1          ; NN2 starting a word
+000963r 1  AE rr rr             ldx     wstart
+000966r 1  F0 C7                beq     put_adv
+000968r 1  A9 38                lda     #A_NN2
+00096Ar 1  D0 C3                bne     put_adv
+00096Cr 1  A9 0E        sp_r:   lda     #A_RR1          ; RR2 after a consonant in a word
+00096Er 1  AE rr rr             ldx     wstart
+000971r 1  D0 BC                bne     put_adv
+000973r 1  AE rr rr             ldx     prev
+000976r 1  BC rr rr             ldy     ph_kind,x
+000979r 1  98                   tya
+00097Ar 1  4A                   lsr
+00097Br 1  A9 0E                lda     #A_RR1
+00097Dr 1  B0 B0                bcs     put_adv
+00097Fr 1  A9 27                lda     #A_RR2
+000981r 1  D0 AC                bne     put_adv
+000983r 1  AE rr rr     sp_hh:  ldx     nxt1            ; HH1 before a front vowel
+000986r 1  BD rr rr             lda     ph_kind,x
+000989r 1  29 02                and     #2
+00098Br 1  F0 04                beq     :+
+00098Dr 1  A9 1B                lda     #A_HH1
+00098Fr 1  D0 9E                bne     put_adv
+000991r 1  A9 39        :       lda     #A_HH2
+000993r 1  D0 9A                bne     put_adv
+000995r 1  A9 36        sp_dh:  lda     #A_DH2
+000997r 1  AE rr rr             ldx     wstart
+00099Ar 1  F0 93                beq     put_adv
+00099Cr 1  A9 12                lda     #A_DH1
+00099Er 1  D0 8F                bne     put_adv
+0009A0r 1               
+0009A0r 1               ; Z=0 if the next phoneme is a vowel
+0009A0r 1  AE rr rr     nx_vow: ldx     nxt1
+0009A3r 1  48                   pha
+0009A4r 1  BD rr rr             lda     ph_kind,x
+0009A7r 1  29 01                and     #1
+0009A9r 1  AA                   tax
+0009AAr 1  68                   pla
+0009ABr 1  E0 00                cpx     #0
+0009ADr 1  60                   rts
+0009AEr 1               
+0009AEr 1               ; a pause A: none at the start; it replaces (the longer wins) one just put;
+0009AEr 1               ; a full buffer is queued here
+0009AEr 1  AE rr rr     apause: ldx     na
+0009B1r 1  F0 2C                beq     @r              ; (nothing yet)
+0009B3r 1  8D rr rr             sta     t7
+0009B6r 1  20 rr rr             jsr     last_pa
+0009B9r 1  90 14                bcc     @new
+0009BBr 1  AE rr rr             ldx     na
+0009BEr 1  BD rr rr             lda     abuf-1,x
+0009C1r 1  CD rr rr             cmp     t7
+0009C4r 1  B0 0F                bcs     @q
+0009C6r 1  AD rr rr             lda     t7
+0009C9r 1  9D rr rr             sta     abuf-1,x
+0009CCr 1  4C rr rr             jmp     @q
+0009CFr 1  AD rr rr     @new:   lda     t7
+0009D2r 1  20 rr rr             jsr     aput
+0009D5r 1  AD rr rr     @q:     lda     na
+0009D8r 1  C9 C8                cmp     #AB_FLUSH
+0009DAr 1  90 03                bcc     @r
+0009DCr 1  4C rr rr             jmp     flush
+0009DFr 1  60           @r:     rts
+0009E0r 1               
+0009E0r 1               ; C=1 if the last allophone put is a pause
+0009E0r 1               last_pa:
+0009E0r 1  AE rr rr             ldx     na
+0009E3r 1  F0 09                beq     @y              ; (the start counts as a pause)
+0009E5r 1  BD rr rr             lda     abuf-1,x
+0009E8r 1  C9 05                cmp     #5
+0009EAr 1  90 02                bcc     @y
+0009ECr 1  18                   clc
+0009EDr 1  60                   rts
+0009EEr 1  38           @y:     sec
+0009EFr 1  60                   rts
+0009F0r 1               
+0009F0r 1               ; put allophone A (shown with /P)
+0009F0r 1  AE rr rr     aput:   ldx     na
+0009F3r 1  E0 FA                cpx     #250
+0009F5r 1  B0 2E                bcs     @r
+0009F7r 1  9D rr rr             sta     abuf,x
+0009FAr 1  EE rr rr             inc     na
+0009FDr 1  AE rr rr             ldx     show
+000A00r 1  F0 23                beq     @r
+000A02r 1  8D rr rr             sta     t6              ; its name
+000A05r 1  0A                   asl
+000A06r 1  6D rr rr             adc     t6
+000A09r 1  AA                   tax
+000A0Ar 1  BD rr rr             lda     al_name,x
+000A0Dr 1  20 03 FE             jsr     SBC_CHROUT
+000A10r 1  BD rr rr             lda     al_name+1,x
+000A13r 1  20 03 FE             jsr     SBC_CHROUT
+000A16r 1  BD rr rr             lda     al_name+2,x
+000A19r 1  C9 20                cmp     #' '
+000A1Br 1  F0 03                beq     :+
+000A1Dr 1  20 03 FE             jsr     SBC_CHROUT
+000A20r 1  A9 20        :       lda     #' '
+000A22r 1  4C 03 FE             jmp     SBC_CHROUT
+000A25r 1  60           @r:     rts
+000A26r 1               
+000A26r 1               ; queue what is in abuf
+000A26r 1  AE rr rr     flush:  ldx     na
+000A29r 1  F0 11                beq     @r
+000A2Br 1  A9 FF                lda     #$FF
+000A2Dr 1  9D rr rr             sta     abuf,x
+000A30r 1  A9 rr                lda     #<abuf
+000A32r 1  A0 rr                ldy     #>abuf
+000A34r 1  20 45 FE             jsr     SBC_SAY
+000A37r 1  A9 00                lda     #0
+000A39r 1  8D rr rr             sta     na
+000A3Cr 1  60           @r:     rts
+000A3Dr 1               
+000A3Dr 1               ; ----------------------------------------------------------------------------
+000A3Dr 1               ; the console
+000A3Dr 1               ; ----------------------------------------------------------------------------
+000A3Dr 1               getline:
+000A3Dr 1  A9 00                lda     #0
+000A3Fr 1  8D rr rr             sta     llen
+000A42r 1  20 00 FE     @k:     jsr     SBC_CHRIN
+000A45r 1  90 FB                bcc     @k
+000A47r 1  C9 0D                cmp     #K_CR
+000A49r 1  F0 3D                beq     @cr
+000A4Br 1  C9 08                cmp     #K_BS
+000A4Dr 1  F0 1F                beq     @bs
+000A4Fr 1  C9 7F                cmp     #$7F
+000A51r 1  F0 1B                beq     @bs
+000A53r 1  C9 20                cmp     #' '
+000A55r 1  90 EB                bcc     @k
+000A57r 1  C9 7F                cmp     #$7F
+000A59r 1  B0 E7                bcs     @k
+000A5Br 1  AE rr rr             ldx     llen
+000A5Er 1  E0 78                cpx     #LINE_MAX
+000A60r 1  B0 E0                bcs     @k
+000A62r 1  9D rr rr             sta     line,x
+000A65r 1  EE rr rr             inc     llen
+000A68r 1  20 03 FE             jsr     SBC_CHROUT
+000A6Br 1  4C rr rr             jmp     @k
+000A6Er 1  AD rr rr     @bs:    lda     llen
+000A71r 1  F0 CF                beq     @k
+000A73r 1  CE rr rr             dec     llen
+000A76r 1  A9 08                lda     #K_BS
+000A78r 1  20 03 FE             jsr     SBC_CHROUT
+000A7Br 1  A9 20                lda     #' '
+000A7Dr 1  20 03 FE             jsr     SBC_CHROUT
+000A80r 1  A9 08                lda     #K_BS
+000A82r 1  20 03 FE             jsr     SBC_CHROUT
+000A85r 1  4C rr rr             jmp     @k
+000A88r 1  4C rr rr     @cr:    jmp     crlf
+000A8Br 1               
+000A8Br 1  8D rr rr     puts:   sta     @rd+1
+000A8Er 1  8C rr rr             sty     @rd+2
+000A91r 1  A2 00                ldx     #0
+000A93r 1  BD FF FF     @rd:    lda     $FFFF,x
+000A96r 1  F0 0B                beq     @r
+000A98r 1  20 03 FE             jsr     SBC_CHROUT
+000A9Br 1  E8                   inx
+000A9Cr 1  D0 F5                bne     @rd
+000A9Er 1  EE rr rr             inc     @rd+2
+000AA1r 1  D0 F0                bne     @rd
+000AA3r 1  60           @r:     rts
+000AA4r 1               
+000AA4r 1  A9 0D        crlf:   lda     #K_CR
+000AA6r 1  20 03 FE             jsr     SBC_CHROUT
+000AA9r 1  A9 0A                lda     #10
+000AABr 1  4C 03 FE             jmp     SBC_CHROUT
+000AAEr 1               
+000AAEr 1  48           puthex: pha
+000AAFr 1  4A                   lsr
+000AB0r 1  4A                   lsr
+000AB1r 1  4A                   lsr
+000AB2r 1  4A                   lsr
+000AB3r 1  20 rr rr             jsr     @d
+000AB6r 1  68                   pla
+000AB7r 1  29 0F                and     #15
+000AB9r 1  C9 0A        @d:     cmp     #10
+000ABBr 1  90 02                bcc     :+
+000ABDr 1  69 06                adc     #6
+000ABFr 1  69 30        :       adc     #'0'
+000AC1r 1  4C 03 FE             jmp     SBC_CHROUT
+000AC4r 1               
+000AC4r 1               ; ============================================================================
+000AC4r 1                       .segment "RODATA"
+000000r 1               s_hello:
+000000r 1  0D 0A 54 41          .byte   13, 10, "TALK - text to speech on the SPO256", 13, 10
+000004r 1  4C 4B 20 2D  
+000008r 1  20 74 65 78  
+000027r 1  54 79 70 65          .byte   "Type something and press Enter.  /? for help.", 13, 10, 0
+00002Br 1  20 73 6F 6D  
+00002Fr 1  65 74 68 69  
+000057r 1               s_nochip:
+000057r 1  28 4E 6F 20          .byte   "(No SPO256 found: the allophones are only shown.)", 13, 10, 0
+00005Br 1  53 50 4F 32  
+00005Fr 1  35 36 20 66  
+00008Br 1               s_prompt:
+00008Br 1  0D 0A 3E 20          .byte   13, 10, "> ", 0
+00008Fr 1  00           
+000090r 1  20 20 74 65  s_help: .byte   "  text      speak it", 13, 10
+000094r 1  78 74 20 20  
+000098r 1  20 20 20 20  
+0000A6r 1  20 20 2F 46          .byte   "  /F NAME   speak a text file (Esc stops)", 13, 10
+0000AAr 1  20 4E 41 4D  
+0000AEr 1  45 20 20 20  
+0000D1r 1  20 20 2F 50          .byte   "  /P        show the allophones on / off", 13, 10
+0000D5r 1  20 20 20 20  
+0000D9r 1  20 20 20 20  
+0000FBr 1  20 20 2F 41          .byte   "  /A ...    speak allophones: /A HH1 EH LL OW  (or numbers)", 13, 10
+0000FFr 1  20 2E 2E 2E  
+000103r 1  20 20 20 20  
+000138r 1  20 20 2F 51          .byte   "  /Q        quit", 13, 10, 0
+00013Cr 1  20 20 20 20  
+000140r 1  20 20 20 20  
+00014Br 1               s_showon:
+00014Br 1  41 6C 6C 6F          .byte   "Allophones shown.", 13, 10, 0
+00014Fr 1  70 68 6F 6E  
+000153r 1  65 73 20 73  
+00015Fr 1               s_showoff:
+00015Fr 1  41 6C 6C 6F          .byte   "Allophones not shown.", 13, 10, 0
+000163r 1  70 68 6F 6E  
+000167r 1  65 73 20 6E  
+000177r 1  3F 43 61 6E  s_ferr: .byte   "?Can't read it, error $", 0
+00017Br 1  27 74 20 72  
+00017Fr 1  65 61 64 20  
+00018Fr 1               
+00018Fr 1               ; punctuation: what it becomes
+00018Fr 1  2C 3B 3A 2E  p_from: .byte   ",;:.!?-", 0
+000193r 1  21 3F 2D 00  
+000197r 1  2C 2C 2C 2E  p_to:   .byte   ",,,..?-"
+00019Br 1  2E 3F 2D     
+00019Er 1               
+00019Er 1               ; the pause for each pause phoneme: GAP COMMA STOP ASK
+00019Er 1  02 03 04 04  gap_al: .byte   A_PA3, A_PA4, A_PA5, A_PA5
+0001A2r 1               
+0001A2r 1               spec_go:
+0001A2r 1  rr rr rr rr          .word   sp_uw-1, sp_y-1, sp_b-1, sp_d-1, sp_t-1, sp_k-1, sp_g-1
+0001A6r 1  rr rr rr rr  
+0001AAr 1  rr rr rr rr  
+0001B0r 1  rr rr rr rr          .word   sp_n-1, sp_r-1, sp_hh-1, sp_dh-1
+0001B4r 1  rr rr rr rr  
+0001B8r 1               
+0001B8r 1               ; number words (spelt for the word list)
+0001B8r 1               W_HUNDRED       = 28
+0001B8r 1               W_THOUSAND      = 29
+0001B8r 1               W_TENS          = 20            ; TWENTY is word 20
+0001B8r 1  rr rr rr rr  num_w:  .word   w0, w1, w2, w3, w4, w5, w6, w7, w8, w9, w10, w11, w12, w13
+0001BCr 1  rr rr rr rr  
+0001C0r 1  rr rr rr rr  
+0001D4r 1  rr rr rr rr          .word   w14, w15, w16, w17, w18, w19, w20, w30, w40, w50, w60, w70
+0001D8r 1  rr rr rr rr  
+0001DCr 1  rr rr rr rr  
+0001ECr 1  rr rr rr rr          .word   w80, w90, w100, w1000
+0001F0r 1  rr rr rr rr  
+0001F4r 1  5A 45 52 4F  w0:     .byte   "ZERO", 0
+0001F8r 1  00           
+0001F9r 1  4F 4E 45 00  w1:     .byte   "ONE", 0
+0001FDr 1  54 57 4F 00  w2:     .byte   "TWO", 0
+000201r 1  54 48 52 45  w3:     .byte   "THREE", 0
+000205r 1  45 00        
+000207r 1  46 4F 55 52  w4:     .byte   "FOUR", 0
+00020Br 1  00           
+00020Cr 1  46 49 56 45  w5:     .byte   "FIVE", 0
+000210r 1  00           
+000211r 1  53 49 58 00  w6:     .byte   "SIX", 0
+000215r 1  53 45 56 45  w7:     .byte   "SEVEN", 0
+000219r 1  4E 00        
+00021Br 1  45 49 47 48  w8:     .byte   "EIGHT", 0
+00021Fr 1  54 00        
+000221r 1  4E 49 4E 45  w9:     .byte   "NINE", 0
+000225r 1  00           
+000226r 1  54 45 4E 00  w10:    .byte   "TEN", 0
+00022Ar 1  45 4C 45 56  w11:    .byte   "ELEVEN", 0
+00022Er 1  45 4E 00     
+000231r 1  54 57 45 4C  w12:    .byte   "TWELVE", 0
+000235r 1  56 45 00     
+000238r 1  54 48 49 52  w13:    .byte   "THIRTEEN", 0
+00023Cr 1  54 45 45 4E  
+000240r 1  00           
+000241r 1  46 4F 55 52  w14:    .byte   "FOURTEEN", 0
+000245r 1  54 45 45 4E  
+000249r 1  00           
+00024Ar 1  46 49 46 54  w15:    .byte   "FIFTEEN", 0
+00024Er 1  45 45 4E 00  
+000252r 1  53 49 58 54  w16:    .byte   "SIXTEEN", 0
+000256r 1  45 45 4E 00  
+00025Ar 1  53 45 56 45  w17:    .byte   "SEVENTEEN", 0
+00025Er 1  4E 54 45 45  
+000262r 1  4E 00        
+000264r 1  45 49 47 48  w18:    .byte   "EIGHTEEN", 0
+000268r 1  54 45 45 4E  
+00026Cr 1  00           
+00026Dr 1  4E 49 4E 45  w19:    .byte   "NINETEEN", 0
+000271r 1  54 45 45 4E  
+000275r 1  00           
+000276r 1  54 57 45 4E  w20:    .byte   "TWENTY", 0
+00027Ar 1  54 59 00     
+00027Dr 1  54 48 49 52  w30:    .byte   "THIRTY", 0
+000281r 1  54 59 00     
+000284r 1  46 4F 52 54  w40:    .byte   "FORTY", 0
+000288r 1  59 00        
+00028Ar 1  46 49 46 54  w50:    .byte   "FIFTY", 0
+00028Er 1  59 00        
+000290r 1  53 49 58 54  w60:    .byte   "SIXTY", 0
+000294r 1  59 00        
+000296r 1  53 45 56 45  w70:    .byte   "SEVENTY", 0
+00029Ar 1  4E 54 59 00  
+00029Er 1  45 49 47 48  w80:    .byte   "EIGHTY", 0
+0002A2r 1  54 59 00     
+0002A5r 1  4E 49 4E 45  w90:    .byte   "NINETY", 0
+0002A9r 1  54 59 00     
+0002ACr 1  48 55 4E 44  w100:   .byte   "HUNDRED", 0
+0002B0r 1  52 45 44 00  
+0002B4r 1  54 48 4F 55  w1000:  .byte   "THOUSAND", 0
+0002B8r 1  53 41 4E 44  
+0002BCr 1  00           
+0002BDr 1               
+0002BDr 1               ; character classes, $00-$5A
+0002BDr 1  00 00 00 00  ctab:   .res    $27, 0                  ; $00-$26
+0002C1r 1  00 00 00 00  
+0002C5r 1  00 00 00 00  
+0002E4r 1  00                   .byte   0                       ; '
+0002E5r 1  00 00 00 00          .res    $41 - $28, 0            ; $28-$40
+0002E9r 1  00 00 00 00  
+0002EDr 1  00 00 00 00  
+0002FEr 1  11                   .byte   C_LET|C_VOW                     ; A
+0002FFr 1  16                   .byte   C_LET|C_CON|C_VCD               ; B
+000300r 1  32                   .byte   C_LET|C_CON|C_SIB               ; C
+000301r 1  56                   .byte   C_LET|C_CON|C_VCD|C_LNG         ; D
+000302r 1  19                   .byte   C_LET|C_VOW|C_FRN               ; E
+000303r 1  12                   .byte   C_LET|C_CON                     ; F
+000304r 1  36                   .byte   C_LET|C_CON|C_VCD|C_SIB         ; G
+000305r 1  12                   .byte   C_LET|C_CON                     ; H
+000306r 1  19                   .byte   C_LET|C_VOW|C_FRN               ; I
+000307r 1  76                   .byte   C_LET|C_CON|C_VCD|C_SIB|C_LNG   ; J
+000308r 1  12                   .byte   C_LET|C_CON                     ; K
+000309r 1  56                   .byte   C_LET|C_CON|C_VCD|C_LNG         ; L
+00030Ar 1  16                   .byte   C_LET|C_CON|C_VCD               ; M
+00030Br 1  56                   .byte   C_LET|C_CON|C_VCD|C_LNG         ; N
+00030Cr 1  11                   .byte   C_LET|C_VOW                     ; O
+00030Dr 1  12                   .byte   C_LET|C_CON                     ; P
+00030Er 1  12                   .byte   C_LET|C_CON                     ; Q
+00030Fr 1  56                   .byte   C_LET|C_CON|C_VCD|C_LNG         ; R
+000310r 1  72                   .byte   C_LET|C_CON|C_SIB|C_LNG         ; S
+000311r 1  52                   .byte   C_LET|C_CON|C_LNG               ; T
+000312r 1  11                   .byte   C_LET|C_VOW                     ; U
+000313r 1  16                   .byte   C_LET|C_CON|C_VCD               ; V
+000314r 1  16                   .byte   C_LET|C_CON|C_VCD               ; W
+000315r 1  32                   .byte   C_LET|C_CON|C_SIB               ; X
+000316r 1  19                   .byte   C_LET|C_VOW|C_FRN               ; Y
+000317r 1  76                   .byte   C_LET|C_CON|C_VCD|C_SIB|C_LNG   ; Z
+000318r 1               
+000318r 1  rr rr        ldblk:  .word   fbuf
+00031Ar 1  rr rr                .word   $7F00 - fbuf
+00031Cr 1  xx xx xx xx          .res    14
+000320r 1  xx xx xx xx  
+000324r 1  xx xx xx xx  
+00032Ar 1               
+00032Ar 1                       .include "rules.inc"
+00032Ar 2               ; rules.inc - made by gen_rules.py from nrl_rules.json and words.txt (do not edit)
+00032Ar 2               ; phoneme numbers: 0 GAP 1 COMMA 2 STOP 3 ASK 4 IY 5 IH 6 EY 7 EH 8 AE 9 AA 10 AO 11 OW 12 UH 13 UW 14 ER 15 AX 16 AH 17 AY 18 AW 19 OY 20 Y 21 P 22 B 23 T 24 D 25 K 26 G 27 F 28 V 29 TH 30 DH 31 S 32 Z 33 SH 34 ZH 35 HH 36 CH 37 JH 38 M 39 N 40 NX 41 L 42 W 43 WH 44 R
+00032Ar 2               rg_20:        ; ' '
+00032Ar 2  00 20 00 27          .byte   $00, $20, $00, $27, $00, $FF   ; [ ]'
+00032Er 2  00 FF        
+000330r 2  00 20 2D 20          .byte   $00, $20, $2D, $20, $00, $00, $FF   ; [ - ]
+000334r 2  00 00 FF     
+000337r 2  00 20 00 00          .byte   $00, $20, $00, $00, $00, $FF   ; [ ]
+00033Br 2  00 FF        
+00033Dr 2  FF                   .byte   $FF
+00033Er 2               rg_27:        ; "'"
+00033Er 2  20 2E 00 27          .byte   $20, $2E, $00, $27, $20, $53, $00, $00, $20, $FF   ; . [' S]
+000342r 2  20 53 00 00  
+000346r 2  20 FF        
+000348r 2  20 45 2E 3A          .byte   $20, $45, $2E, $3A, $23, $00, $27, $20, $53, $00, $00, $20, $FF   ; #:.E [' S]
+00034Cr 2  23 00 27 20  
+000350r 2  53 00 00 20  
+000355r 2  20 23 00 27          .byte   $20, $23, $00, $27, $20, $53, $00, $00, $20, $FF   ; # [' S]
+000359r 2  20 53 00 00  
+00035Dr 2  20 FF        
+00035Fr 2  00 27 20 00          .byte   $00, $27, $20, $00, $00, $FF   ; [' ]
+000363r 2  00 FF        
+000365r 2  FF                   .byte   $FF
+000366r 2               rg_2C:        ; ','
+000366r 2  00 2C 00 00          .byte   $00, $2C, $00, $00, $01, $FF   ; [,]
+00036Ar 2  01 FF        
+00036Cr 2  FF                   .byte   $FF
+00036Dr 2               rg_2D:        ; '-'
+00036Dr 2  00 2D 00 00          .byte   $00, $2D, $00, $00, $01, $FF   ; [-]
+000371r 2  01 FF        
+000373r 2  FF                   .byte   $FF
+000374r 2               rg_2E:        ; '.'
+000374r 2  00 2E 00 00          .byte   $00, $2E, $00, $00, $02, $FF   ; [.]
+000378r 2  02 FF        
+00037Ar 2  FF                   .byte   $FF
+00037Br 2               rg_30:        ; '0'
+00037Br 2  00 30 00 00          .byte   $00, $30, $00, $00, $20, $05, $2C, $0B, $FF   ; [0]
+00037Fr 2  20 05 2C 0B  
+000383r 2  FF           
+000384r 2  FF                   .byte   $FF
+000385r 2               rg_31:        ; '1'
+000385r 2  00 31 00 00          .byte   $00, $31, $00, $00, $2A, $10, $27, $FF   ; [1]
+000389r 2  2A 10 27 FF  
+00038Dr 2  FF                   .byte   $FF
+00038Er 2               rg_32:        ; '2'
+00038Er 2  00 32 00 00          .byte   $00, $32, $00, $00, $17, $0D, $FF   ; [2]
+000392r 2  17 0D FF     
+000395r 2  FF                   .byte   $FF
+000396r 2               rg_33:        ; '3'
+000396r 2  00 33 00 00          .byte   $00, $33, $00, $00, $1D, $2C, $04, $FF   ; [3]
+00039Ar 2  1D 2C 04 FF  
+00039Er 2  FF                   .byte   $FF
+00039Fr 2               rg_34:        ; '4'
+00039Fr 2  00 34 00 00          .byte   $00, $34, $00, $00, $1B, $0B, $2C, $FF   ; [4]
+0003A3r 2  1B 0B 2C FF  
+0003A7r 2  FF                   .byte   $FF
+0003A8r 2               rg_35:        ; '5'
+0003A8r 2  00 35 00 00          .byte   $00, $35, $00, $00, $1B, $11, $1C, $FF   ; [5]
+0003ACr 2  1B 11 1C FF  
+0003B0r 2  FF                   .byte   $FF
+0003B1r 2               rg_36:        ; '6'
+0003B1r 2  00 36 00 00          .byte   $00, $36, $00, $00, $1F, $05, $19, $1F, $FF   ; [6]
+0003B5r 2  1F 05 19 1F  
+0003B9r 2  FF           
+0003BAr 2  FF                   .byte   $FF
+0003BBr 2               rg_37:        ; '7'
+0003BBr 2  00 37 00 00          .byte   $00, $37, $00, $00, $1F, $07, $1C, $0F, $27, $FF   ; [7]
+0003BFr 2  1F 07 1C 0F  
+0003C3r 2  27 FF        
+0003C5r 2  FF                   .byte   $FF
+0003C6r 2               rg_38:        ; '8'
+0003C6r 2  00 38 00 00          .byte   $00, $38, $00, $00, $06, $17, $FF   ; [8]
+0003CAr 2  06 17 FF     
+0003CDr 2  FF                   .byte   $FF
+0003CEr 2               rg_39:        ; '9'
+0003CEr 2  00 39 00 00          .byte   $00, $39, $00, $00, $27, $11, $27, $FF   ; [9]
+0003D2r 2  27 11 27 FF  
+0003D6r 2  FF                   .byte   $FF
+0003D7r 2               rg_3F:        ; '?'
+0003D7r 2  00 3F 00 00          .byte   $00, $3F, $00, $00, $03, $FF   ; [?]
+0003DBr 2  03 FF        
+0003DDr 2  FF                   .byte   $FF
+0003DEr 2               rg_41:        ; 'A'
+0003DEr 2  00 41 00 20          .byte   $00, $41, $00, $20, $00, $0F, $FF   ; [A]
+0003E2r 2  00 0F FF     
+0003E5r 2  20 00 41 52          .byte   $20, $00, $41, $52, $45, $00, $20, $00, $09, $2C, $FF   ;  [ARE]
+0003E9r 2  45 00 20 00  
+0003EDr 2  09 2C FF     
+0003F0r 2  20 00 41 52          .byte   $20, $00, $41, $52, $00, $4F, $00, $0F, $2C, $FF   ;  [AR]O
+0003F4r 2  00 4F 00 0F  
+0003F8r 2  2C FF        
+0003FAr 2  00 41 52 00          .byte   $00, $41, $52, $00, $23, $00, $07, $2C, $FF   ; [AR]#
+0003FEr 2  23 00 07 2C  
+000402r 2  FF           
+000403r 2  5E 20 00 41          .byte   $5E, $20, $00, $41, $53, $00, $23, $00, $06, $1F, $FF   ;  ^[AS]#
+000407r 2  53 00 23 00  
+00040Br 2  06 1F FF     
+00040Er 2  00 41 00 57          .byte   $00, $41, $00, $57, $41, $00, $0F, $FF   ; [A]WA
+000412r 2  41 00 0F FF  
+000416r 2  00 41 57 00          .byte   $00, $41, $57, $00, $00, $0A, $FF   ; [AW]
+00041Ar 2  00 0A FF     
+00041Dr 2  3A 20 00 41          .byte   $3A, $20, $00, $41, $4E, $59, $00, $00, $07, $27, $04, $FF   ;  :[ANY]
+000421r 2  4E 59 00 00  
+000425r 2  07 27 04 FF  
+000429r 2  00 41 00 5E          .byte   $00, $41, $00, $5E, $2B, $23, $00, $06, $FF   ; [A]^+#
+00042Dr 2  2B 23 00 06  
+000431r 2  FF           
+000432r 2  3A 23 00 41          .byte   $3A, $23, $00, $41, $4C, $4C, $59, $00, $00, $0F, $29, $04, $FF   ; #:[ALLY]
+000436r 2  4C 4C 59 00  
+00043Ar 2  00 0F 29 04  
+00043Fr 2  20 00 41 4C          .byte   $20, $00, $41, $4C, $00, $23, $00, $0F, $29, $FF   ;  [AL]#
+000443r 2  00 23 00 0F  
+000447r 2  29 FF        
+000449r 2  00 41 47 41          .byte   $00, $41, $47, $41, $49, $4E, $00, $00, $0F, $1A, $07, $27, $FF   ; [AGAIN]
+00044Dr 2  49 4E 00 00  
+000451r 2  0F 1A 07 27  
+000456r 2  3A 23 00 41          .byte   $3A, $23, $00, $41, $47, $00, $45, $00, $05, $25, $FF   ; #:[AG]E
+00045Ar 2  47 00 45 00  
+00045Er 2  05 25 FF     
+000461r 2  00 41 00 5E          .byte   $00, $41, $00, $5E, $2B, $3A, $23, $00, $08, $FF   ; [A]^+:#
+000465r 2  2B 3A 23 00  
+000469r 2  08 FF        
+00046Br 2  3A 20 00 41          .byte   $3A, $20, $00, $41, $00, $5E, $2B, $20, $00, $06, $FF   ;  :[A]^+
+00046Fr 2  00 5E 2B 20  
+000473r 2  00 06 FF     
+000476r 2  00 41 00 5E          .byte   $00, $41, $00, $5E, $25, $00, $06, $FF   ; [A]^%
+00047Ar 2  25 00 06 FF  
+00047Er 2  20 00 41 52          .byte   $20, $00, $41, $52, $52, $00, $00, $0F, $2C, $FF   ;  [ARR]
+000482r 2  52 00 00 0F  
+000486r 2  2C FF        
+000488r 2  00 41 52 52          .byte   $00, $41, $52, $52, $00, $00, $08, $2C, $FF   ; [ARR]
+00048Cr 2  00 00 08 2C  
+000490r 2  FF           
+000491r 2  3A 20 00 41          .byte   $3A, $20, $00, $41, $52, $00, $20, $00, $09, $2C, $FF   ;  :[AR]
+000495r 2  52 00 20 00  
+000499r 2  09 2C FF     
+00049Cr 2  00 41 52 00          .byte   $00, $41, $52, $00, $20, $00, $0E, $FF   ; [AR]
+0004A0r 2  20 00 0E FF  
+0004A4r 2  00 41 52 00          .byte   $00, $41, $52, $00, $00, $09, $2C, $FF   ; [AR]
+0004A8r 2  00 09 2C FF  
+0004ACr 2  00 41 49 52          .byte   $00, $41, $49, $52, $00, $00, $07, $2C, $FF   ; [AIR]
+0004B0r 2  00 00 07 2C  
+0004B4r 2  FF           
+0004B5r 2  00 41 49 00          .byte   $00, $41, $49, $00, $00, $06, $FF   ; [AI]
+0004B9r 2  00 06 FF     
+0004BCr 2  00 41 59 00          .byte   $00, $41, $59, $00, $00, $06, $FF   ; [AY]
+0004C0r 2  00 06 FF     
+0004C3r 2  00 41 55 00          .byte   $00, $41, $55, $00, $00, $0A, $FF   ; [AU]
+0004C7r 2  00 0A FF     
+0004CAr 2  3A 23 00 41          .byte   $3A, $23, $00, $41, $4C, $00, $20, $00, $0F, $29, $FF   ; #:[AL]
+0004CEr 2  4C 00 20 00  
+0004D2r 2  0F 29 FF     
+0004D5r 2  3A 23 00 41          .byte   $3A, $23, $00, $41, $4C, $53, $00, $20, $00, $0F, $29, $20, $FF   ; #:[ALS]
+0004D9r 2  4C 53 00 20  
+0004DDr 2  00 0F 29 20  
+0004E2r 2  00 41 4C 4B          .byte   $00, $41, $4C, $4B, $00, $00, $0A, $19, $FF   ; [ALK]
+0004E6r 2  00 00 0A 19  
+0004EAr 2  FF           
+0004EBr 2  00 41 4C 00          .byte   $00, $41, $4C, $00, $5E, $00, $0A, $29, $FF   ; [AL]^
+0004EFr 2  5E 00 0A 29  
+0004F3r 2  FF           
+0004F4r 2  3A 20 00 41          .byte   $3A, $20, $00, $41, $42, $4C, $45, $00, $00, $06, $16, $0F, $29, $FF   ;  :[ABLE]
+0004F8r 2  42 4C 45 00  
+0004FCr 2  00 06 16 0F  
+000502r 2  00 41 42 4C          .byte   $00, $41, $42, $4C, $45, $00, $00, $0F, $16, $0F, $29, $FF   ; [ABLE]
+000506r 2  45 00 00 0F  
+00050Ar 2  16 0F 29 FF  
+00050Er 2  00 41 4E 47          .byte   $00, $41, $4E, $47, $00, $2B, $00, $06, $27, $25, $FF   ; [ANG]+
+000512r 2  00 2B 00 06  
+000516r 2  27 25 FF     
+000519r 2  00 41 00 00          .byte   $00, $41, $00, $00, $08, $FF   ; [A]
+00051Dr 2  08 FF        
+00051Fr 2  FF                   .byte   $FF
+000520r 2               rg_42:        ; 'B'
+000520r 2  20 00 42 45          .byte   $20, $00, $42, $45, $00, $5E, $23, $00, $16, $05, $FF   ;  [BE]^#
+000524r 2  00 5E 23 00  
+000528r 2  16 05 FF     
+00052Br 2  00 42 45 49          .byte   $00, $42, $45, $49, $4E, $47, $00, $00, $16, $04, $05, $28, $FF   ; [BEING]
+00052Fr 2  4E 47 00 00  
+000533r 2  16 04 05 28  
+000538r 2  20 00 42 4F          .byte   $20, $00, $42, $4F, $54, $48, $00, $20, $00, $16, $0B, $1D, $FF   ;  [BOTH]
+00053Cr 2  54 48 00 20  
+000540r 2  00 16 0B 1D  
+000545r 2  20 00 42 55          .byte   $20, $00, $42, $55, $53, $00, $23, $00, $16, $05, $20, $FF   ;  [BUS]#
+000549r 2  53 00 23 00  
+00054Dr 2  16 05 20 FF  
+000551r 2  00 42 55 49          .byte   $00, $42, $55, $49, $4C, $00, $00, $16, $05, $29, $FF   ; [BUIL]
+000555r 2  4C 00 00 16  
+000559r 2  05 29 FF     
+00055Cr 2  00 42 00 00          .byte   $00, $42, $00, $00, $16, $FF   ; [B]
+000560r 2  16 FF        
+000562r 2  FF                   .byte   $FF
+000563r 2               rg_43:        ; 'C'
+000563r 2  20 00 43 48          .byte   $20, $00, $43, $48, $00, $5E, $00, $19, $FF   ;  [CH]^
+000567r 2  00 5E 00 19  
+00056Br 2  FF           
+00056Cr 2  45 5E 00 43          .byte   $45, $5E, $00, $43, $48, $00, $00, $19, $FF   ; ^E[CH]
+000570r 2  48 00 00 19  
+000574r 2  FF           
+000575r 2  00 43 48 00          .byte   $00, $43, $48, $00, $00, $24, $FF   ; [CH]
+000579r 2  00 24 FF     
+00057Cr 2  53 20 00 43          .byte   $53, $20, $00, $43, $49, $00, $23, $00, $1F, $11, $FF   ;  S[CI]#
+000580r 2  49 00 23 00  
+000584r 2  1F 11 FF     
+000587r 2  00 43 49 00          .byte   $00, $43, $49, $00, $41, $00, $21, $FF   ; [CI]A
+00058Br 2  41 00 21 FF  
+00058Fr 2  00 43 49 00          .byte   $00, $43, $49, $00, $4F, $00, $21, $FF   ; [CI]O
+000593r 2  4F 00 21 FF  
+000597r 2  00 43 49 00          .byte   $00, $43, $49, $00, $45, $4E, $00, $21, $FF   ; [CI]EN
+00059Br 2  45 4E 00 21  
+00059Fr 2  FF           
+0005A0r 2  00 43 00 2B          .byte   $00, $43, $00, $2B, $00, $1F, $FF   ; [C]+
+0005A4r 2  00 1F FF     
+0005A7r 2  00 43 4B 00          .byte   $00, $43, $4B, $00, $00, $19, $FF   ; [CK]
+0005ABr 2  00 19 FF     
+0005AEr 2  00 43 4F 4D          .byte   $00, $43, $4F, $4D, $00, $25, $00, $19, $10, $26, $FF   ; [COM]%
+0005B2r 2  00 25 00 19  
+0005B6r 2  10 26 FF     
+0005B9r 2  00 43 00 00          .byte   $00, $43, $00, $00, $19, $FF   ; [C]
+0005BDr 2  19 FF        
+0005BFr 2  FF                   .byte   $FF
+0005C0r 2               rg_44:        ; 'D'
+0005C0r 2  3A 23 00 44          .byte   $3A, $23, $00, $44, $45, $44, $00, $20, $00, $18, $05, $18, $FF   ; #:[DED]
+0005C4r 2  45 44 00 20  
+0005C8r 2  00 18 05 18  
+0005CDr 2  45 2E 00 44          .byte   $45, $2E, $00, $44, $00, $20, $00, $18, $FF   ; .E[D]
+0005D1r 2  00 20 00 18  
+0005D5r 2  FF           
+0005D6r 2  45 2A 23 00          .byte   $45, $2A, $23, $00, $44, $00, $20, $00, $17, $FF   ; #*E[D]
+0005DAr 2  44 00 20 00  
+0005DEr 2  17 FF        
+0005E0r 2  20 00 44 45          .byte   $20, $00, $44, $45, $00, $5E, $23, $00, $18, $05, $FF   ;  [DE]^#
+0005E4r 2  00 5E 23 00  
+0005E8r 2  18 05 FF     
+0005EBr 2  20 00 44 4F          .byte   $20, $00, $44, $4F, $00, $20, $00, $18, $0D, $FF   ;  [DO]
+0005EFr 2  00 20 00 18  
+0005F3r 2  0D FF        
+0005F5r 2  20 00 44 4F          .byte   $20, $00, $44, $4F, $45, $53, $00, $00, $18, $10, $20, $FF   ;  [DOES]
+0005F9r 2  45 53 00 00  
+0005FDr 2  18 10 20 FF  
+000601r 2  20 00 44 4F          .byte   $20, $00, $44, $4F, $49, $4E, $47, $00, $00, $18, $0D, $05, $28, $FF   ;  [DOING]
+000605r 2  49 4E 47 00  
+000609r 2  00 18 0D 05  
+00060Fr 2  20 00 44 4F          .byte   $20, $00, $44, $4F, $57, $00, $00, $18, $12, $FF   ;  [DOW]
+000613r 2  57 00 00 18  
+000617r 2  12 FF        
+000619r 2  00 44 55 00          .byte   $00, $44, $55, $00, $41, $00, $25, $0D, $FF   ; [DU]A
+00061Dr 2  41 00 25 0D  
+000621r 2  FF           
+000622r 2  00 44 00 00          .byte   $00, $44, $00, $00, $18, $FF   ; [D]
+000626r 2  18 FF        
+000628r 2  FF                   .byte   $FF
+000629r 2               rg_45:        ; 'E'
+000629r 2  3A 23 00 45          .byte   $3A, $23, $00, $45, $00, $20, $00, $FF   ; #:[E]
+00062Dr 2  00 20 00 FF  
+000631r 2  2A 20 27 00          .byte   $2A, $20, $27, $00, $45, $00, $20, $00, $FF   ; ' *[E]
+000635r 2  45 00 20 00  
+000639r 2  FF           
+00063Ar 2  3A 20 00 45          .byte   $3A, $20, $00, $45, $00, $20, $00, $04, $FF   ;  :[E]
+00063Er 2  00 20 00 04  
+000642r 2  FF           
+000643r 2  23 00 45 44          .byte   $23, $00, $45, $44, $00, $20, $00, $18, $FF   ; #[ED]
+000647r 2  00 20 00 18  
+00064Br 2  FF           
+00064Cr 2  3A 23 00 45          .byte   $3A, $23, $00, $45, $00, $44, $20, $00, $FF   ; #:[E]D
+000650r 2  00 44 20 00  
+000654r 2  FF           
+000655r 2  00 45 56 00          .byte   $00, $45, $56, $00, $45, $52, $00, $07, $1C, $FF   ; [EV]ER
+000659r 2  45 52 00 07  
+00065Dr 2  1C FF        
+00065Fr 2  00 45 00 5E          .byte   $00, $45, $00, $5E, $25, $00, $04, $FF   ; [E]^%
+000663r 2  25 00 04 FF  
+000667r 2  00 45 52 49          .byte   $00, $45, $52, $49, $00, $23, $00, $04, $2C, $04, $FF   ; [ERI]#
+00066Br 2  00 23 00 04  
+00066Fr 2  2C 04 FF     
+000672r 2  00 45 52 49          .byte   $00, $45, $52, $49, $00, $00, $07, $2C, $05, $FF   ; [ERI]
+000676r 2  00 00 07 2C  
+00067Ar 2  05 FF        
+00067Cr 2  3A 23 00 45          .byte   $3A, $23, $00, $45, $52, $00, $23, $00, $0E, $FF   ; #:[ER]#
+000680r 2  52 00 23 00  
+000684r 2  0E FF        
+000686r 2  00 45 52 00          .byte   $00, $45, $52, $00, $23, $00, $07, $2C, $FF   ; [ER]#
+00068Ar 2  23 00 07 2C  
+00068Er 2  FF           
+00068Fr 2  00 45 52 00          .byte   $00, $45, $52, $00, $00, $0E, $FF   ; [ER]
+000693r 2  00 0E FF     
+000696r 2  20 00 45 56          .byte   $20, $00, $45, $56, $45, $4E, $00, $00, $04, $1C, $07, $27, $FF   ;  [EVEN]
+00069Ar 2  45 4E 00 00  
+00069Er 2  04 1C 07 27  
+0006A3r 2  3A 23 00 45          .byte   $3A, $23, $00, $45, $00, $57, $00, $FF   ; #:[E]W
+0006A7r 2  00 57 00 FF  
+0006ABr 2  40 00 45 57          .byte   $40, $00, $45, $57, $00, $00, $0D, $FF   ; @[EW]
+0006AFr 2  00 00 0D FF  
+0006B3r 2  00 45 57 00          .byte   $00, $45, $57, $00, $00, $14, $0D, $FF   ; [EW]
+0006B7r 2  00 14 0D FF  
+0006BBr 2  00 45 00 4F          .byte   $00, $45, $00, $4F, $00, $04, $FF   ; [E]O
+0006BFr 2  00 04 FF     
+0006C2r 2  26 3A 23 00          .byte   $26, $3A, $23, $00, $45, $53, $00, $20, $00, $05, $20, $FF   ; #:&[ES]
+0006C6r 2  45 53 00 20  
+0006CAr 2  00 05 20 FF  
+0006CEr 2  3A 23 00 45          .byte   $3A, $23, $00, $45, $00, $53, $20, $00, $FF   ; #:[E]S
+0006D2r 2  00 53 20 00  
+0006D6r 2  FF           
+0006D7r 2  3A 23 00 45          .byte   $3A, $23, $00, $45, $4C, $59, $00, $20, $00, $29, $04, $FF   ; #:[ELY]
+0006DBr 2  4C 59 00 20  
+0006DFr 2  00 29 04 FF  
+0006E3r 2  3A 23 00 45          .byte   $3A, $23, $00, $45, $4D, $45, $4E, $54, $00, $00, $26, $07, $27, $17, $FF   ; #:[EMENT]
+0006E7r 2  4D 45 4E 54  
+0006EBr 2  00 00 26 07  
+0006F2r 2  00 45 46 55          .byte   $00, $45, $46, $55, $4C, $00, $00, $1B, $0C, $29, $FF   ; [EFUL]
+0006F6r 2  4C 00 00 1B  
+0006FAr 2  0C 29 FF     
+0006FDr 2  00 45 45 00          .byte   $00, $45, $45, $00, $00, $04, $FF   ; [EE]
+000701r 2  00 04 FF     
+000704r 2  00 45 41 52          .byte   $00, $45, $41, $52, $4E, $00, $00, $0E, $27, $FF   ; [EARN]
+000708r 2  4E 00 00 0E  
+00070Cr 2  27 FF        
+00070Er 2  20 00 45 41          .byte   $20, $00, $45, $41, $52, $00, $5E, $00, $0E, $FF   ;  [EAR]^
+000712r 2  52 00 5E 00  
+000716r 2  0E FF        
+000718r 2  00 45 41 44          .byte   $00, $45, $41, $44, $00, $00, $07, $18, $FF   ; [EAD]
+00071Cr 2  00 00 07 18  
+000720r 2  FF           
+000721r 2  3A 23 00 45          .byte   $3A, $23, $00, $45, $41, $00, $20, $00, $04, $0F, $FF   ; #:[EA]
+000725r 2  41 00 20 00  
+000729r 2  04 0F FF     
+00072Cr 2  00 45 41 00          .byte   $00, $45, $41, $00, $53, $55, $00, $07, $FF   ; [EA]SU
+000730r 2  53 55 00 07  
+000734r 2  FF           
+000735r 2  00 45 41 00          .byte   $00, $45, $41, $00, $00, $04, $FF   ; [EA]
+000739r 2  00 04 FF     
+00073Cr 2  00 45 49 47          .byte   $00, $45, $49, $47, $48, $00, $00, $06, $FF   ; [EIGH]
+000740r 2  48 00 00 06  
+000744r 2  FF           
+000745r 2  00 45 49 00          .byte   $00, $45, $49, $00, $00, $04, $FF   ; [EI]
+000749r 2  00 04 FF     
+00074Cr 2  20 00 45 59          .byte   $20, $00, $45, $59, $45, $00, $00, $11, $FF   ;  [EYE]
+000750r 2  45 00 00 11  
+000754r 2  FF           
+000755r 2  00 45 59 00          .byte   $00, $45, $59, $00, $00, $04, $FF   ; [EY]
+000759r 2  00 04 FF     
+00075Cr 2  00 45 55 00          .byte   $00, $45, $55, $00, $00, $14, $0D, $FF   ; [EU]
+000760r 2  00 14 0D FF  
+000764r 2  00 45 00 00          .byte   $00, $45, $00, $00, $07, $FF   ; [E]
+000768r 2  07 FF        
+00076Ar 2  FF                   .byte   $FF
+00076Br 2               rg_46:        ; 'F'
+00076Br 2  00 46 55 4C          .byte   $00, $46, $55, $4C, $00, $00, $1B, $0C, $29, $FF   ; [FUL]
+00076Fr 2  00 00 1B 0C  
+000773r 2  29 FF        
+000775r 2  00 46 00 00          .byte   $00, $46, $00, $00, $1B, $FF   ; [F]
+000779r 2  1B FF        
+00077Br 2  FF                   .byte   $FF
+00077Cr 2               rg_47:        ; 'G'
+00077Cr 2  00 47 49 56          .byte   $00, $47, $49, $56, $00, $00, $1A, $05, $1C, $FF   ; [GIV]
+000780r 2  00 00 1A 05  
+000784r 2  1C FF        
+000786r 2  20 00 47 00          .byte   $20, $00, $47, $00, $49, $5E, $00, $1A, $FF   ;  [G]I^
+00078Ar 2  49 5E 00 1A  
+00078Er 2  FF           
+00078Fr 2  00 47 45 00          .byte   $00, $47, $45, $00, $54, $00, $1A, $07, $FF   ; [GE]T
+000793r 2  54 00 1A 07  
+000797r 2  FF           
+000798r 2  55 53 00 47          .byte   $55, $53, $00, $47, $47, $45, $53, $00, $00, $1A, $25, $07, $1F, $FF   ; SU[GGES]
+00079Cr 2  47 45 53 00  
+0007A0r 2  00 1A 25 07  
+0007A6r 2  00 47 47 00          .byte   $00, $47, $47, $00, $00, $1A, $FF   ; [GG]
+0007AAr 2  00 1A FF     
+0007ADr 2  23 42 20 00          .byte   $23, $42, $20, $00, $47, $00, $00, $1A, $FF   ;  B#[G]
+0007B1r 2  47 00 00 1A  
+0007B5r 2  FF           
+0007B6r 2  00 47 00 2B          .byte   $00, $47, $00, $2B, $00, $25, $FF   ; [G]+
+0007BAr 2  00 25 FF     
+0007BDr 2  00 47 52 45          .byte   $00, $47, $52, $45, $41, $54, $00, $00, $1A, $2C, $06, $17, $FF   ; [GREAT]
+0007C1r 2  41 54 00 00  
+0007C5r 2  1A 2C 06 17  
+0007CAr 2  23 00 47 48          .byte   $23, $00, $47, $48, $00, $00, $FF   ; #[GH]
+0007CEr 2  00 00 FF     
+0007D1r 2  00 47 00 00          .byte   $00, $47, $00, $00, $1A, $FF   ; [G]
+0007D5r 2  1A FF        
+0007D7r 2  FF                   .byte   $FF
+0007D8r 2               rg_48:        ; 'H'
+0007D8r 2  20 00 48 41          .byte   $20, $00, $48, $41, $56, $00, $00, $23, $08, $1C, $FF   ;  [HAV]
+0007DCr 2  56 00 00 23  
+0007E0r 2  08 1C FF     
+0007E3r 2  20 00 48 45          .byte   $20, $00, $48, $45, $52, $45, $00, $00, $23, $04, $2C, $FF   ;  [HERE]
+0007E7r 2  52 45 00 00  
+0007EBr 2  23 04 2C FF  
+0007EFr 2  20 00 48 4F          .byte   $20, $00, $48, $4F, $55, $52, $00, $00, $12, $0E, $FF   ;  [HOUR]
+0007F3r 2  55 52 00 00  
+0007F7r 2  12 0E FF     
+0007FAr 2  00 48 4F 57          .byte   $00, $48, $4F, $57, $00, $00, $23, $12, $FF   ; [HOW]
+0007FEr 2  00 00 23 12  
+000802r 2  FF           
+000803r 2  00 48 00 23          .byte   $00, $48, $00, $23, $00, $23, $FF   ; [H]#
+000807r 2  00 23 FF     
+00080Ar 2  00 48 00 00          .byte   $00, $48, $00, $00, $FF   ; [H]
+00080Er 2  FF           
+00080Fr 2  FF                   .byte   $FF
+000810r 2               rg_49:        ; 'I'
+000810r 2  20 00 49 4E          .byte   $20, $00, $49, $4E, $00, $00, $05, $27, $FF   ;  [IN]
+000814r 2  00 00 05 27  
+000818r 2  FF           
+000819r 2  20 00 49 00          .byte   $20, $00, $49, $00, $20, $00, $11, $FF   ;  [I]
+00081Dr 2  20 00 11 FF  
+000821r 2  00 49 4E 00          .byte   $00, $49, $4E, $00, $44, $00, $11, $27, $FF   ; [IN]D
+000825r 2  44 00 11 27  
+000829r 2  FF           
+00082Ar 2  00 49 45 52          .byte   $00, $49, $45, $52, $00, $00, $04, $0E, $FF   ; [IER]
+00082Er 2  00 00 04 0E  
+000832r 2  FF           
+000833r 2  52 3A 23 00          .byte   $52, $3A, $23, $00, $49, $45, $44, $00, $20, $00, $04, $18, $FF   ; #:R[IED]
+000837r 2  49 45 44 00  
+00083Br 2  20 00 04 18  
+000840r 2  00 49 45 44          .byte   $00, $49, $45, $44, $00, $20, $00, $11, $18, $FF   ; [IED]
+000844r 2  00 20 00 11  
+000848r 2  18 FF        
+00084Ar 2  00 49 45 4E          .byte   $00, $49, $45, $4E, $00, $00, $04, $07, $27, $FF   ; [IEN]
+00084Er 2  00 00 04 07  
+000852r 2  27 FF        
+000854r 2  00 49 45 00          .byte   $00, $49, $45, $00, $54, $00, $11, $07, $FF   ; [IE]T
+000858r 2  54 00 11 07  
+00085Cr 2  FF           
+00085Dr 2  3A 20 00 49          .byte   $3A, $20, $00, $49, $00, $25, $00, $11, $FF   ;  :[I]%
+000861r 2  00 25 00 11  
+000865r 2  FF           
+000866r 2  00 49 00 25          .byte   $00, $49, $00, $25, $00, $04, $FF   ; [I]%
+00086Ar 2  00 04 FF     
+00086Dr 2  00 49 45 00          .byte   $00, $49, $45, $00, $00, $04, $FF   ; [IE]
+000871r 2  00 04 FF     
+000874r 2  00 49 00 5E          .byte   $00, $49, $00, $5E, $2B, $3A, $23, $00, $05, $FF   ; [I]^+:#
+000878r 2  2B 3A 23 00  
+00087Cr 2  05 FF        
+00087Er 2  00 49 52 00          .byte   $00, $49, $52, $00, $23, $00, $11, $2C, $FF   ; [IR]#
+000882r 2  23 00 11 2C  
+000886r 2  FF           
+000887r 2  00 49 5A 00          .byte   $00, $49, $5A, $00, $25, $00, $11, $20, $FF   ; [IZ]%
+00088Br 2  25 00 11 20  
+00088Fr 2  FF           
+000890r 2  00 49 53 00          .byte   $00, $49, $53, $00, $25, $00, $11, $20, $FF   ; [IS]%
+000894r 2  25 00 11 20  
+000898r 2  FF           
+000899r 2  00 49 00 44          .byte   $00, $49, $00, $44, $25, $00, $11, $FF   ; [I]D%
+00089Dr 2  25 00 11 FF  
+0008A1r 2  5E 2B 00 49          .byte   $5E, $2B, $00, $49, $00, $5E, $2B, $00, $05, $FF   ; +^[I]^+
+0008A5r 2  00 5E 2B 00  
+0008A9r 2  05 FF        
+0008ABr 2  00 49 00 54          .byte   $00, $49, $00, $54, $25, $00, $11, $FF   ; [I]T%
+0008AFr 2  25 00 11 FF  
+0008B3r 2  2A 23 00 49          .byte   $2A, $23, $00, $49, $00, $5E, $2B, $00, $05, $FF   ; #*[I]^+
+0008B7r 2  00 5E 2B 00  
+0008BBr 2  05 FF        
+0008BDr 2  00 49 00 5E          .byte   $00, $49, $00, $5E, $2B, $00, $11, $FF   ; [I]^+
+0008C1r 2  2B 00 11 FF  
+0008C5r 2  00 49 52 00          .byte   $00, $49, $52, $00, $00, $0E, $FF   ; [IR]
+0008C9r 2  00 0E FF     
+0008CCr 2  00 49 47 48          .byte   $00, $49, $47, $48, $00, $00, $11, $FF   ; [IGH]
+0008D0r 2  00 00 11 FF  
+0008D4r 2  00 49 4C 44          .byte   $00, $49, $4C, $44, $00, $00, $11, $29, $18, $FF   ; [ILD]
+0008D8r 2  00 00 11 29  
+0008DCr 2  18 FF        
+0008DEr 2  00 49 47 4E          .byte   $00, $49, $47, $4E, $00, $20, $00, $11, $27, $FF   ; [IGN]
+0008E2r 2  00 20 00 11  
+0008E6r 2  27 FF        
+0008E8r 2  00 49 47 4E          .byte   $00, $49, $47, $4E, $00, $5E, $00, $11, $27, $FF   ; [IGN]^
+0008ECr 2  00 5E 00 11  
+0008F0r 2  27 FF        
+0008F2r 2  00 49 47 4E          .byte   $00, $49, $47, $4E, $00, $25, $00, $11, $27, $FF   ; [IGN]%
+0008F6r 2  00 25 00 11  
+0008FAr 2  27 FF        
+0008FCr 2  00 49 51 55          .byte   $00, $49, $51, $55, $45, $00, $00, $04, $19, $FF   ; [IQUE]
+000900r 2  45 00 00 04  
+000904r 2  19 FF        
+000906r 2  00 49 00 00          .byte   $00, $49, $00, $00, $05, $FF   ; [I]
+00090Ar 2  05 FF        
+00090Cr 2  FF                   .byte   $FF
+00090Dr 2               rg_4A:        ; 'J'
+00090Dr 2  00 4A 00 00          .byte   $00, $4A, $00, $00, $25, $FF   ; [J]
+000911r 2  25 FF        
+000913r 2  FF                   .byte   $FF
+000914r 2               rg_4B:        ; 'K'
+000914r 2  20 00 4B 00          .byte   $20, $00, $4B, $00, $4E, $00, $FF   ;  [K]N
+000918r 2  4E 00 FF     
+00091Br 2  00 4B 00 00          .byte   $00, $4B, $00, $00, $19, $FF   ; [K]
+00091Fr 2  19 FF        
+000921r 2  FF                   .byte   $FF
+000922r 2               rg_4C:        ; 'L'
+000922r 2  00 4C 4F 00          .byte   $00, $4C, $4F, $00, $43, $23, $00, $29, $0B, $FF   ; [LO]C#
+000926r 2  43 23 00 29  
+00092Ar 2  0B FF        
+00092Cr 2  4C 00 4C 00          .byte   $4C, $00, $4C, $00, $00, $FF   ; L[L]
+000930r 2  00 FF        
+000932r 2  2A 23 00 4C          .byte   $2A, $23, $00, $4C, $00, $25, $00, $0F, $29, $FF   ; #*[L]%
+000936r 2  00 25 00 0F  
+00093Ar 2  29 FF        
+00093Cr 2  00 4C 45 41          .byte   $00, $4C, $45, $41, $44, $00, $00, $29, $04, $18, $FF   ; [LEAD]
+000940r 2  44 00 00 29  
+000944r 2  04 18 FF     
+000947r 2  00 4C 00 00          .byte   $00, $4C, $00, $00, $29, $FF   ; [L]
+00094Br 2  29 FF        
+00094Dr 2  FF                   .byte   $FF
+00094Er 2               rg_4D:        ; 'M'
+00094Er 2  00 4D 4F 56          .byte   $00, $4D, $4F, $56, $00, $00, $26, $0D, $1C, $FF   ; [MOV]
+000952r 2  00 00 26 0D  
+000956r 2  1C FF        
+000958r 2  00 4D 00 00          .byte   $00, $4D, $00, $00, $26, $FF   ; [M]
+00095Cr 2  26 FF        
+00095Er 2  FF                   .byte   $FF
+00095Fr 2               rg_4E:        ; 'N'
+00095Fr 2  45 00 4E 47          .byte   $45, $00, $4E, $47, $00, $2B, $00, $27, $25, $FF   ; E[NG]+
+000963r 2  00 2B 00 27  
+000967r 2  25 FF        
+000969r 2  00 4E 47 00          .byte   $00, $4E, $47, $00, $52, $00, $28, $1A, $FF   ; [NG]R
+00096Dr 2  52 00 28 1A  
+000971r 2  FF           
+000972r 2  00 4E 47 00          .byte   $00, $4E, $47, $00, $23, $00, $28, $1A, $FF   ; [NG]#
+000976r 2  23 00 28 1A  
+00097Ar 2  FF           
+00097Br 2  00 4E 47 4C          .byte   $00, $4E, $47, $4C, $00, $25, $00, $28, $1A, $0F, $29, $FF   ; [NGL]%
+00097Fr 2  00 25 00 28  
+000983r 2  1A 0F 29 FF  
+000987r 2  00 4E 47 00          .byte   $00, $4E, $47, $00, $00, $28, $FF   ; [NG]
+00098Br 2  00 28 FF     
+00098Er 2  00 4E 4B 00          .byte   $00, $4E, $4B, $00, $00, $28, $19, $FF   ; [NK]
+000992r 2  00 28 19 FF  
+000996r 2  20 00 4E 4F          .byte   $20, $00, $4E, $4F, $57, $00, $20, $00, $27, $12, $FF   ;  [NOW]
+00099Ar 2  57 00 20 00  
+00099Er 2  27 12 FF     
+0009A1r 2  00 4E 00 00          .byte   $00, $4E, $00, $00, $27, $FF   ; [N]
+0009A5r 2  27 FF        
+0009A7r 2  FF                   .byte   $FF
+0009A8r 2               rg_4F:        ; 'O'
+0009A8r 2  00 4F 46 00          .byte   $00, $4F, $46, $00, $20, $00, $0F, $1C, $FF   ; [OF]
+0009ACr 2  20 00 0F 1C  
+0009B0r 2  FF           
+0009B1r 2  00 4F 52 4F          .byte   $00, $4F, $52, $4F, $55, $47, $48, $00, $00, $0E, $0B, $FF   ; [OROUGH]
+0009B5r 2  55 47 48 00  
+0009B9r 2  00 0E 0B FF  
+0009BDr 2  3A 23 00 4F          .byte   $3A, $23, $00, $4F, $52, $00, $20, $00, $0E, $FF   ; #:[OR]
+0009C1r 2  52 00 20 00  
+0009C5r 2  0E FF        
+0009C7r 2  3A 23 00 4F          .byte   $3A, $23, $00, $4F, $52, $53, $00, $20, $00, $0E, $20, $FF   ; #:[ORS]
+0009CBr 2  52 53 00 20  
+0009CFr 2  00 0E 20 FF  
+0009D3r 2  00 4F 52 00          .byte   $00, $4F, $52, $00, $00, $0A, $2C, $FF   ; [OR]
+0009D7r 2  00 0A 2C FF  
+0009DBr 2  20 00 4F 4E          .byte   $20, $00, $4F, $4E, $45, $00, $00, $2A, $10, $27, $FF   ;  [ONE]
+0009DFr 2  45 00 00 2A  
+0009E3r 2  10 27 FF     
+0009E6r 2  00 4F 57 00          .byte   $00, $4F, $57, $00, $00, $0B, $FF   ; [OW]
+0009EAr 2  00 0B FF     
+0009EDr 2  20 00 4F 56          .byte   $20, $00, $4F, $56, $45, $52, $00, $00, $0B, $1C, $0E, $FF   ;  [OVER]
+0009F1r 2  45 52 00 00  
+0009F5r 2  0B 1C 0E FF  
+0009F9r 2  00 4F 56 00          .byte   $00, $4F, $56, $00, $00, $10, $1C, $FF   ; [OV]
+0009FDr 2  00 10 1C FF  
+000A01r 2  00 4F 00 5E          .byte   $00, $4F, $00, $5E, $25, $00, $0B, $FF   ; [O]^%
+000A05r 2  25 00 0B FF  
+000A09r 2  00 4F 00 5E          .byte   $00, $4F, $00, $5E, $45, $4E, $00, $0B, $FF   ; [O]^EN
+000A0Dr 2  45 4E 00 0B  
+000A11r 2  FF           
+000A12r 2  00 4F 00 5E          .byte   $00, $4F, $00, $5E, $49, $23, $00, $0B, $FF   ; [O]^I#
+000A16r 2  49 23 00 0B  
+000A1Ar 2  FF           
+000A1Br 2  00 4F 4C 00          .byte   $00, $4F, $4C, $00, $44, $00, $0B, $29, $FF   ; [OL]D
+000A1Fr 2  44 00 0B 29  
+000A23r 2  FF           
+000A24r 2  00 4F 55 47          .byte   $00, $4F, $55, $47, $48, $54, $00, $00, $0A, $17, $FF   ; [OUGHT]
+000A28r 2  48 54 00 00  
+000A2Cr 2  0A 17 FF     
+000A2Fr 2  00 4F 55 47          .byte   $00, $4F, $55, $47, $48, $00, $00, $10, $1B, $FF   ; [OUGH]
+000A33r 2  48 00 00 10  
+000A37r 2  1B FF        
+000A39r 2  20 00 4F 55          .byte   $20, $00, $4F, $55, $00, $00, $12, $FF   ;  [OU]
+000A3Dr 2  00 00 12 FF  
+000A41r 2  48 00 4F 55          .byte   $48, $00, $4F, $55, $00, $53, $23, $00, $12, $FF   ; H[OU]S#
+000A45r 2  00 53 23 00  
+000A49r 2  12 FF        
+000A4Br 2  00 4F 55 53          .byte   $00, $4F, $55, $53, $00, $00, $0F, $1F, $FF   ; [OUS]
+000A4Fr 2  00 00 0F 1F  
+000A53r 2  FF           
+000A54r 2  00 4F 55 52          .byte   $00, $4F, $55, $52, $00, $00, $0A, $2C, $FF   ; [OUR]
+000A58r 2  00 00 0A 2C  
+000A5Cr 2  FF           
+000A5Dr 2  00 4F 55 4C          .byte   $00, $4F, $55, $4C, $44, $00, $00, $0C, $18, $FF   ; [OULD]
+000A61r 2  44 00 00 0C  
+000A65r 2  18 FF        
+000A67r 2  5E 00 4F 55          .byte   $5E, $00, $4F, $55, $00, $5E, $4C, $00, $10, $FF   ; ^[OU]^L
+000A6Br 2  00 5E 4C 00  
+000A6Fr 2  10 FF        
+000A71r 2  00 4F 55 50          .byte   $00, $4F, $55, $50, $00, $00, $0D, $15, $FF   ; [OUP]
+000A75r 2  00 00 0D 15  
+000A79r 2  FF           
+000A7Ar 2  00 4F 55 00          .byte   $00, $4F, $55, $00, $00, $12, $FF   ; [OU]
+000A7Er 2  00 12 FF     
+000A81r 2  00 4F 59 00          .byte   $00, $4F, $59, $00, $00, $13, $FF   ; [OY]
+000A85r 2  00 13 FF     
+000A88r 2  00 4F 49 4E          .byte   $00, $4F, $49, $4E, $47, $00, $00, $0B, $05, $28, $FF   ; [OING]
+000A8Cr 2  47 00 00 0B  
+000A90r 2  05 28 FF     
+000A93r 2  00 4F 49 00          .byte   $00, $4F, $49, $00, $00, $13, $FF   ; [OI]
+000A97r 2  00 13 FF     
+000A9Ar 2  00 4F 4F 52          .byte   $00, $4F, $4F, $52, $00, $00, $0A, $2C, $FF   ; [OOR]
+000A9Er 2  00 00 0A 2C  
+000AA2r 2  FF           
+000AA3r 2  00 4F 4F 4B          .byte   $00, $4F, $4F, $4B, $00, $00, $0C, $19, $FF   ; [OOK]
+000AA7r 2  00 00 0C 19  
+000AABr 2  FF           
+000AACr 2  00 4F 4F 44          .byte   $00, $4F, $4F, $44, $00, $00, $0C, $18, $FF   ; [OOD]
+000AB0r 2  00 00 0C 18  
+000AB4r 2  FF           
+000AB5r 2  00 4F 4F 00          .byte   $00, $4F, $4F, $00, $00, $0D, $FF   ; [OO]
+000AB9r 2  00 0D FF     
+000ABCr 2  00 4F 00 45          .byte   $00, $4F, $00, $45, $00, $0B, $FF   ; [O]E
+000AC0r 2  00 0B FF     
+000AC3r 2  00 4F 00 20          .byte   $00, $4F, $00, $20, $00, $0B, $FF   ; [O]
+000AC7r 2  00 0B FF     
+000ACAr 2  00 4F 41 00          .byte   $00, $4F, $41, $00, $00, $0B, $FF   ; [OA]
+000ACEr 2  00 0B FF     
+000AD1r 2  20 00 4F 4E          .byte   $20, $00, $4F, $4E, $4C, $59, $00, $00, $0B, $27, $29, $04, $FF   ;  [ONLY]
+000AD5r 2  4C 59 00 00  
+000AD9r 2  0B 27 29 04  
+000ADEr 2  20 00 4F 4E          .byte   $20, $00, $4F, $4E, $43, $45, $00, $00, $2A, $10, $27, $1F, $FF   ;  [ONCE]
+000AE2r 2  43 45 00 00  
+000AE6r 2  2A 10 27 1F  
+000AEBr 2  00 4F 4E 20          .byte   $00, $4F, $4E, $20, $27, $20, $54, $00, $00, $0B, $27, $17, $FF   ; [ON ' T]
+000AEFr 2  27 20 54 00  
+000AF3r 2  00 0B 27 17  
+000AF8r 2  43 00 4F 00          .byte   $43, $00, $4F, $00, $4E, $00, $09, $FF   ; C[O]N
+000AFCr 2  4E 00 09 FF  
+000B00r 2  00 4F 00 4E          .byte   $00, $4F, $00, $4E, $47, $00, $0A, $FF   ; [O]NG
+000B04r 2  47 00 0A FF  
+000B08r 2  2A 20 00 4F          .byte   $2A, $20, $00, $4F, $00, $4E, $00, $10, $FF   ;  *[O]N
+000B0Cr 2  00 4E 00 10  
+000B10r 2  FF           
+000B11r 2  49 00 4F 4E          .byte   $49, $00, $4F, $4E, $00, $00, $0F, $27, $FF   ; I[ON]
+000B15r 2  00 00 0F 27  
+000B19r 2  FF           
+000B1Ar 2  3A 23 00 4F          .byte   $3A, $23, $00, $4F, $4E, $00, $20, $00, $0F, $27, $FF   ; #:[ON]
+000B1Er 2  4E 00 20 00  
+000B22r 2  0F 27 FF     
+000B25r 2  5E 23 00 4F          .byte   $5E, $23, $00, $4F, $4E, $00, $00, $0F, $27, $FF   ; #^[ON]
+000B29r 2  4E 00 00 0F  
+000B2Dr 2  27 FF        
+000B2Fr 2  00 4F 00 53          .byte   $00, $4F, $00, $53, $54, $20, $00, $0B, $FF   ; [O]ST
+000B33r 2  54 20 00 0B  
+000B37r 2  FF           
+000B38r 2  00 4F 46 00          .byte   $00, $4F, $46, $00, $5E, $00, $0A, $1B, $FF   ; [OF]^
+000B3Cr 2  5E 00 0A 1B  
+000B40r 2  FF           
+000B41r 2  00 4F 54 48          .byte   $00, $4F, $54, $48, $45, $52, $00, $00, $10, $1E, $0E, $FF   ; [OTHER]
+000B45r 2  45 52 00 00  
+000B49r 2  10 1E 0E FF  
+000B4Dr 2  00 4F 53 53          .byte   $00, $4F, $53, $53, $00, $20, $00, $0A, $1F, $FF   ; [OSS]
+000B51r 2  00 20 00 0A  
+000B55r 2  1F FF        
+000B57r 2  2A 23 00 4F          .byte   $2A, $23, $00, $4F, $4D, $00, $00, $10, $26, $FF   ; #*[OM]
+000B5Br 2  4D 00 00 10  
+000B5Fr 2  26 FF        
+000B61r 2  00 4F 00 00          .byte   $00, $4F, $00, $00, $09, $FF   ; [O]
+000B65r 2  09 FF        
+000B67r 2  FF                   .byte   $FF
+000B68r 2               rg_50:        ; 'P'
+000B68r 2  00 50 48 00          .byte   $00, $50, $48, $00, $00, $1B, $FF   ; [PH]
+000B6Cr 2  00 1B FF     
+000B6Fr 2  00 50 45 4F          .byte   $00, $50, $45, $4F, $50, $00, $00, $15, $04, $15, $FF   ; [PEOP]
+000B73r 2  50 00 00 15  
+000B77r 2  04 15 FF     
+000B7Ar 2  00 50 4F 57          .byte   $00, $50, $4F, $57, $00, $00, $15, $12, $FF   ; [POW]
+000B7Er 2  00 00 15 12  
+000B82r 2  FF           
+000B83r 2  00 50 55 54          .byte   $00, $50, $55, $54, $00, $20, $00, $15, $0C, $17, $FF   ; [PUT]
+000B87r 2  00 20 00 15  
+000B8Br 2  0C 17 FF     
+000B8Er 2  00 50 00 00          .byte   $00, $50, $00, $00, $15, $FF   ; [P]
+000B92r 2  15 FF        
+000B94r 2  FF                   .byte   $FF
+000B95r 2               rg_51:        ; 'Q'
+000B95r 2  00 51 55 41          .byte   $00, $51, $55, $41, $52, $00, $00, $19, $2A, $0A, $2C, $FF   ; [QUAR]
+000B99r 2  52 00 00 19  
+000B9Dr 2  2A 0A 2C FF  
+000BA1r 2  00 51 55 00          .byte   $00, $51, $55, $00, $00, $19, $2A, $FF   ; [QU]
+000BA5r 2  00 19 2A FF  
+000BA9r 2  00 51 00 00          .byte   $00, $51, $00, $00, $19, $FF   ; [Q]
+000BADr 2  19 FF        
+000BAFr 2  FF                   .byte   $FF
+000BB0r 2               rg_52:        ; 'R'
+000BB0r 2  20 00 52 45          .byte   $20, $00, $52, $45, $00, $5E, $23, $00, $2C, $04, $FF   ;  [RE]^#
+000BB4r 2  00 5E 23 00  
+000BB8r 2  2C 04 FF     
+000BBBr 2  00 52 00 00          .byte   $00, $52, $00, $00, $2C, $FF   ; [R]
+000BBFr 2  2C FF        
+000BC1r 2  FF                   .byte   $FF
+000BC2r 2               rg_53:        ; 'S'
+000BC2r 2  00 53 48 00          .byte   $00, $53, $48, $00, $00, $21, $FF   ; [SH]
+000BC6r 2  00 21 FF     
+000BC9r 2  23 00 53 49          .byte   $23, $00, $53, $49, $4F, $4E, $00, $00, $22, $0F, $27, $FF   ; #[SION]
+000BCDr 2  4F 4E 00 00  
+000BD1r 2  22 0F 27 FF  
+000BD5r 2  00 53 4F 4D          .byte   $00, $53, $4F, $4D, $45, $00, $00, $1F, $10, $26, $FF   ; [SOME]
+000BD9r 2  45 00 00 1F  
+000BDDr 2  10 26 FF     
+000BE0r 2  23 00 53 55          .byte   $23, $00, $53, $55, $52, $00, $23, $00, $22, $0E, $FF   ; #[SUR]#
+000BE4r 2  52 00 23 00  
+000BE8r 2  22 0E FF     
+000BEBr 2  00 53 55 52          .byte   $00, $53, $55, $52, $00, $23, $00, $21, $0E, $FF   ; [SUR]#
+000BEFr 2  00 23 00 21  
+000BF3r 2  0E FF        
+000BF5r 2  23 00 53 55          .byte   $23, $00, $53, $55, $00, $23, $00, $22, $0D, $FF   ; #[SU]#
+000BF9r 2  00 23 00 22  
+000BFDr 2  0D FF        
+000BFFr 2  23 00 53 53          .byte   $23, $00, $53, $53, $55, $00, $23, $00, $21, $0D, $FF   ; #[SSU]#
+000C03r 2  55 00 23 00  
+000C07r 2  21 0D FF     
+000C0Ar 2  23 00 53 45          .byte   $23, $00, $53, $45, $44, $00, $20, $00, $20, $18, $FF   ; #[SED]
+000C0Er 2  44 00 20 00  
+000C12r 2  20 18 FF     
+000C15r 2  23 00 53 00          .byte   $23, $00, $53, $00, $23, $00, $20, $FF   ; #[S]#
+000C19r 2  23 00 20 FF  
+000C1Dr 2  00 53 41 49          .byte   $00, $53, $41, $49, $44, $00, $00, $1F, $07, $18, $FF   ; [SAID]
+000C21r 2  44 00 00 1F  
+000C25r 2  07 18 FF     
+000C28r 2  5E 00 53 49          .byte   $5E, $00, $53, $49, $4F, $4E, $00, $00, $21, $0F, $27, $FF   ; ^[SION]
+000C2Cr 2  4F 4E 00 00  
+000C30r 2  21 0F 27 FF  
+000C34r 2  00 53 00 53          .byte   $00, $53, $00, $53, $00, $FF   ; [S]S
+000C38r 2  00 FF        
+000C3Ar 2  2E 00 53 00          .byte   $2E, $00, $53, $00, $20, $00, $20, $FF   ; .[S]
+000C3Er 2  20 00 20 FF  
+000C42r 2  45 2E 3A 23          .byte   $45, $2E, $3A, $23, $00, $53, $00, $20, $00, $20, $FF   ; #:.E[S]
+000C46r 2  00 53 00 20  
+000C4Ar 2  00 20 FF     
+000C4Dr 2  21 2A 23 00          .byte   $21, $2A, $23, $00, $53, $00, $20, $00, $20, $FF   ; #*![S]
+000C51r 2  53 00 20 00  
+000C55r 2  20 FF        
+000C57r 2  23 2A 23 00          .byte   $23, $2A, $23, $00, $53, $00, $20, $00, $1F, $FF   ; #*#[S]
+000C5Br 2  53 00 20 00  
+000C5Fr 2  1F FF        
+000C61r 2  55 00 53 00          .byte   $55, $00, $53, $00, $20, $00, $1F, $FF   ; U[S]
+000C65r 2  20 00 1F FF  
+000C69r 2  23 3A 20 00          .byte   $23, $3A, $20, $00, $53, $00, $20, $00, $20, $FF   ;  :#[S]
+000C6Dr 2  53 00 20 00  
+000C71r 2  20 FF        
+000C73r 2  20 00 53 43          .byte   $20, $00, $53, $43, $48, $00, $00, $1F, $19, $FF   ;  [SCH]
+000C77r 2  48 00 00 1F  
+000C7Br 2  19 FF        
+000C7Dr 2  00 53 00 43          .byte   $00, $53, $00, $43, $2B, $00, $FF   ; [S]C+
+000C81r 2  2B 00 FF     
+000C84r 2  23 00 53 4D          .byte   $23, $00, $53, $4D, $00, $00, $20, $26, $FF   ; #[SM]
+000C88r 2  00 00 20 26  
+000C8Cr 2  FF           
+000C8Dr 2  23 00 53 4E          .byte   $23, $00, $53, $4E, $00, $20, $27, $00, $20, $0F, $27, $FF   ; #[SN] '
+000C91r 2  00 20 27 00  
+000C95r 2  20 0F 27 FF  
+000C99r 2  00 53 00 00          .byte   $00, $53, $00, $00, $1F, $FF   ; [S]
+000C9Dr 2  1F FF        
+000C9Fr 2  FF                   .byte   $FF
+000CA0r 2               rg_54:        ; 'T'
+000CA0r 2  20 00 54 48          .byte   $20, $00, $54, $48, $45, $00, $20, $00, $1E, $0F, $FF   ;  [THE]
+000CA4r 2  45 00 20 00  
+000CA8r 2  1E 0F FF     
+000CABr 2  00 54 4F 00          .byte   $00, $54, $4F, $00, $20, $00, $17, $0D, $FF   ; [TO]
+000CAFr 2  20 00 17 0D  
+000CB3r 2  FF           
+000CB4r 2  00 54 48 41          .byte   $00, $54, $48, $41, $54, $00, $20, $00, $1E, $08, $17, $FF   ; [THAT]
+000CB8r 2  54 00 20 00  
+000CBCr 2  1E 08 17 FF  
+000CC0r 2  20 00 54 48          .byte   $20, $00, $54, $48, $49, $53, $00, $20, $00, $1E, $05, $1F, $FF   ;  [THIS]
+000CC4r 2  49 53 00 20  
+000CC8r 2  00 1E 05 1F  
+000CCDr 2  20 00 54 48          .byte   $20, $00, $54, $48, $45, $59, $00, $00, $1E, $06, $FF   ;  [THEY]
+000CD1r 2  45 59 00 00  
+000CD5r 2  1E 06 FF     
+000CD8r 2  20 00 54 48          .byte   $20, $00, $54, $48, $45, $52, $45, $00, $00, $1E, $07, $2C, $FF   ;  [THERE]
+000CDCr 2  45 52 45 00  
+000CE0r 2  00 1E 07 2C  
+000CE5r 2  00 54 48 45          .byte   $00, $54, $48, $45, $52, $00, $00, $1E, $0E, $FF   ; [THER]
+000CE9r 2  52 00 00 1E  
+000CEDr 2  0E FF        
+000CEFr 2  00 54 48 45          .byte   $00, $54, $48, $45, $49, $52, $00, $00, $1E, $07, $2C, $FF   ; [THEIR]
+000CF3r 2  49 52 00 00  
+000CF7r 2  1E 07 2C FF  
+000CFBr 2  20 00 54 48          .byte   $20, $00, $54, $48, $41, $4E, $00, $20, $00, $1E, $08, $27, $FF   ;  [THAN]
+000CFFr 2  41 4E 00 20  
+000D03r 2  00 1E 08 27  
+000D08r 2  20 00 54 48          .byte   $20, $00, $54, $48, $45, $4D, $00, $20, $00, $1E, $07, $26, $FF   ;  [THEM]
+000D0Cr 2  45 4D 00 20  
+000D10r 2  00 1E 07 26  
+000D15r 2  00 54 48 45          .byte   $00, $54, $48, $45, $53, $45, $00, $20, $00, $1E, $04, $20, $FF   ; [THESE]
+000D19r 2  53 45 00 20  
+000D1Dr 2  00 1E 04 20  
+000D22r 2  20 00 54 48          .byte   $20, $00, $54, $48, $45, $4E, $00, $00, $1E, $07, $27, $FF   ;  [THEN]
+000D26r 2  45 4E 00 00  
+000D2Ar 2  1E 07 27 FF  
+000D2Er 2  00 54 48 52          .byte   $00, $54, $48, $52, $4F, $55, $47, $48, $00, $00, $1D, $2C, $0D, $FF   ; [THROUGH]
+000D32r 2  4F 55 47 48  
+000D36r 2  00 00 1D 2C  
+000D3Cr 2  00 54 48 4F          .byte   $00, $54, $48, $4F, $53, $45, $00, $00, $1E, $0B, $20, $FF   ; [THOSE]
+000D40r 2  53 45 00 00  
+000D44r 2  1E 0B 20 FF  
+000D48r 2  00 54 48 4F          .byte   $00, $54, $48, $4F, $55, $47, $48, $00, $20, $00, $1E, $0B, $FF   ; [THOUGH]
+000D4Cr 2  55 47 48 00  
+000D50r 2  20 00 1E 0B  
+000D55r 2  20 00 54 48          .byte   $20, $00, $54, $48, $55, $53, $00, $00, $1E, $10, $1F, $FF   ;  [THUS]
+000D59r 2  55 53 00 00  
+000D5Dr 2  1E 10 1F FF  
+000D61r 2  00 54 48 00          .byte   $00, $54, $48, $00, $00, $1D, $FF   ; [TH]
+000D65r 2  00 1D FF     
+000D68r 2  3A 23 00 54          .byte   $3A, $23, $00, $54, $45, $44, $00, $20, $00, $17, $05, $18, $FF   ; #:[TED]
+000D6Cr 2  45 44 00 20  
+000D70r 2  00 17 05 18  
+000D75r 2  53 00 54 49          .byte   $53, $00, $54, $49, $00, $23, $4E, $00, $24, $FF   ; S[TI]#N
+000D79r 2  00 23 4E 00  
+000D7Dr 2  24 FF        
+000D7Fr 2  00 54 49 00          .byte   $00, $54, $49, $00, $4F, $00, $21, $FF   ; [TI]O
+000D83r 2  4F 00 21 FF  
+000D87r 2  00 54 49 00          .byte   $00, $54, $49, $00, $41, $00, $21, $FF   ; [TI]A
+000D8Br 2  41 00 21 FF  
+000D8Fr 2  00 54 49 45          .byte   $00, $54, $49, $45, $4E, $00, $00, $21, $0F, $27, $FF   ; [TIEN]
+000D93r 2  4E 00 00 21  
+000D97r 2  0F 27 FF     
+000D9Ar 2  00 54 55 52          .byte   $00, $54, $55, $52, $00, $23, $00, $24, $0E, $FF   ; [TUR]#
+000D9Er 2  00 23 00 24  
+000DA2r 2  0E FF        
+000DA4r 2  00 54 55 00          .byte   $00, $54, $55, $00, $41, $00, $24, $0D, $FF   ; [TU]A
+000DA8r 2  41 00 24 0D  
+000DACr 2  FF           
+000DADr 2  20 00 54 57          .byte   $20, $00, $54, $57, $4F, $00, $00, $17, $0D, $FF   ;  [TWO]
+000DB1r 2  4F 00 00 17  
+000DB5r 2  0D FF        
+000DB7r 2  00 54 00 00          .byte   $00, $54, $00, $00, $17, $FF   ; [T]
+000DBBr 2  17 FF        
+000DBDr 2  FF                   .byte   $FF
+000DBEr 2               rg_55:        ; 'U'
+000DBEr 2  20 00 55 4E          .byte   $20, $00, $55, $4E, $00, $49, $00, $14, $0D, $27, $FF   ;  [UN]I
+000DC2r 2  00 49 00 14  
+000DC6r 2  0D 27 FF     
+000DC9r 2  20 00 55 4E          .byte   $20, $00, $55, $4E, $00, $00, $10, $27, $FF   ;  [UN]
+000DCDr 2  00 00 10 27  
+000DD1r 2  FF           
+000DD2r 2  20 00 55 50          .byte   $20, $00, $55, $50, $4F, $4E, $00, $00, $0F, $15, $0A, $27, $FF   ;  [UPON]
+000DD6r 2  4F 4E 00 00  
+000DDAr 2  0F 15 0A 27  
+000DDFr 2  40 00 55 52          .byte   $40, $00, $55, $52, $00, $23, $00, $0C, $2C, $FF   ; @[UR]#
+000DE3r 2  00 23 00 0C  
+000DE7r 2  2C FF        
+000DE9r 2  00 55 52 00          .byte   $00, $55, $52, $00, $23, $00, $14, $0C, $2C, $FF   ; [UR]#
+000DEDr 2  23 00 14 0C  
+000DF1r 2  2C FF        
+000DF3r 2  00 55 52 00          .byte   $00, $55, $52, $00, $00, $0E, $FF   ; [UR]
+000DF7r 2  00 0E FF     
+000DFAr 2  00 55 00 5E          .byte   $00, $55, $00, $5E, $20, $00, $10, $FF   ; [U]^
+000DFEr 2  20 00 10 FF  
+000E02r 2  00 55 00 5E          .byte   $00, $55, $00, $5E, $5E, $00, $10, $FF   ; [U]^^
+000E06r 2  5E 00 10 FF  
+000E0Ar 2  00 55 59 00          .byte   $00, $55, $59, $00, $00, $11, $FF   ; [UY]
+000E0Er 2  00 11 FF     
+000E11r 2  47 20 00 55          .byte   $47, $20, $00, $55, $00, $23, $00, $FF   ;  G[U]#
+000E15r 2  00 23 00 FF  
+000E19r 2  47 00 55 00          .byte   $47, $00, $55, $00, $25, $00, $FF   ; G[U]%
+000E1Dr 2  25 00 FF     
+000E20r 2  47 00 55 00          .byte   $47, $00, $55, $00, $23, $00, $2A, $FF   ; G[U]#
+000E24r 2  23 00 2A FF  
+000E28r 2  4E 23 00 55          .byte   $4E, $23, $00, $55, $00, $00, $14, $0D, $FF   ; #N[U]
+000E2Cr 2  00 00 14 0D  
+000E30r 2  FF           
+000E31r 2  40 00 55 00          .byte   $40, $00, $55, $00, $00, $0D, $FF   ; @[U]
+000E35r 2  00 0D FF     
+000E38r 2  00 55 00 00          .byte   $00, $55, $00, $00, $14, $0D, $FF   ; [U]
+000E3Cr 2  14 0D FF     
+000E3Fr 2  FF                   .byte   $FF
+000E40r 2               rg_56:        ; 'V'
+000E40r 2  00 56 49 45          .byte   $00, $56, $49, $45, $57, $00, $00, $1C, $14, $0D, $FF   ; [VIEW]
+000E44r 2  57 00 00 1C  
+000E48r 2  14 0D FF     
+000E4Br 2  00 56 00 00          .byte   $00, $56, $00, $00, $1C, $FF   ; [V]
+000E4Fr 2  1C FF        
+000E51r 2  FF                   .byte   $FF
+000E52r 2               rg_57:        ; 'W'
+000E52r 2  20 00 57 45          .byte   $20, $00, $57, $45, $52, $45, $00, $00, $2A, $0E, $FF   ;  [WERE]
+000E56r 2  52 45 00 00  
+000E5Ar 2  2A 0E FF     
+000E5Dr 2  00 57 41 00          .byte   $00, $57, $41, $00, $53, $00, $2A, $09, $FF   ; [WA]S
+000E61r 2  53 00 2A 09  
+000E65r 2  FF           
+000E66r 2  00 57 41 00          .byte   $00, $57, $41, $00, $54, $00, $2A, $09, $FF   ; [WA]T
+000E6Ar 2  54 00 2A 09  
+000E6Er 2  FF           
+000E6Fr 2  00 57 48 45          .byte   $00, $57, $48, $45, $52, $45, $00, $00, $2B, $07, $2C, $FF   ; [WHERE]
+000E73r 2  52 45 00 00  
+000E77r 2  2B 07 2C FF  
+000E7Br 2  00 57 48 41          .byte   $00, $57, $48, $41, $54, $00, $00, $2B, $09, $17, $FF   ; [WHAT]
+000E7Fr 2  54 00 00 2B  
+000E83r 2  09 17 FF     
+000E86r 2  00 57 48 4F          .byte   $00, $57, $48, $4F, $4C, $00, $00, $23, $0B, $29, $FF   ; [WHOL]
+000E8Ar 2  4C 00 00 23  
+000E8Er 2  0B 29 FF     
+000E91r 2  00 57 48 4F          .byte   $00, $57, $48, $4F, $00, $00, $23, $0D, $FF   ; [WHO]
+000E95r 2  00 00 23 0D  
+000E99r 2  FF           
+000E9Ar 2  00 57 48 00          .byte   $00, $57, $48, $00, $00, $2B, $FF   ; [WH]
+000E9Er 2  00 2B FF     
+000EA1r 2  00 57 41 52          .byte   $00, $57, $41, $52, $00, $00, $2A, $0A, $2C, $FF   ; [WAR]
+000EA5r 2  00 00 2A 0A  
+000EA9r 2  2C FF        
+000EABr 2  00 57 4F 52          .byte   $00, $57, $4F, $52, $00, $5E, $00, $2A, $0E, $FF   ; [WOR]^
+000EAFr 2  00 5E 00 2A  
+000EB3r 2  0E FF        
+000EB5r 2  00 57 52 00          .byte   $00, $57, $52, $00, $00, $2C, $FF   ; [WR]
+000EB9r 2  00 2C FF     
+000EBCr 2  00 57 00 00          .byte   $00, $57, $00, $00, $2A, $FF   ; [W]
+000EC0r 2  2A FF        
+000EC2r 2  FF                   .byte   $FF
+000EC3r 2               rg_58:        ; 'X'
+000EC3r 2  00 58 00 00          .byte   $00, $58, $00, $00, $19, $1F, $FF   ; [X]
+000EC7r 2  19 1F FF     
+000ECAr 2  FF                   .byte   $FF
+000ECBr 2               rg_59:        ; 'Y'
+000ECBr 2  00 59 4F 55          .byte   $00, $59, $4F, $55, $4E, $47, $00, $00, $14, $10, $28, $FF   ; [YOUNG]
+000ECFr 2  4E 47 00 00  
+000ED3r 2  14 10 28 FF  
+000ED7r 2  20 00 59 4F          .byte   $20, $00, $59, $4F, $55, $00, $00, $14, $0D, $FF   ;  [YOU]
+000EDBr 2  55 00 00 14  
+000EDFr 2  0D FF        
+000EE1r 2  20 00 59 45          .byte   $20, $00, $59, $45, $53, $00, $00, $14, $07, $1F, $FF   ;  [YES]
+000EE5r 2  53 00 00 14  
+000EE9r 2  07 1F FF     
+000EECr 2  20 00 59 00          .byte   $20, $00, $59, $00, $00, $14, $FF   ;  [Y]
+000EF0r 2  00 14 FF     
+000EF3r 2  2A 23 00 59          .byte   $2A, $23, $00, $59, $00, $20, $00, $04, $FF   ; #*[Y]
+000EF7r 2  00 20 00 04  
+000EFBr 2  FF           
+000EFCr 2  2A 23 00 59          .byte   $2A, $23, $00, $59, $00, $49, $00, $04, $FF   ; #*[Y]I
+000F00r 2  00 49 00 04  
+000F04r 2  FF           
+000F05r 2  3A 20 00 59          .byte   $3A, $20, $00, $59, $00, $20, $00, $11, $FF   ;  :[Y]
+000F09r 2  00 20 00 11  
+000F0Dr 2  FF           
+000F0Er 2  3A 20 00 59          .byte   $3A, $20, $00, $59, $00, $23, $00, $11, $FF   ;  :[Y]#
+000F12r 2  00 23 00 11  
+000F16r 2  FF           
+000F17r 2  3A 20 00 59          .byte   $3A, $20, $00, $59, $00, $5E, $2B, $3A, $23, $00, $05, $FF   ;  :[Y]^+:#
+000F1Br 2  00 5E 2B 3A  
+000F1Fr 2  23 00 05 FF  
+000F23r 2  3A 20 00 59          .byte   $3A, $20, $00, $59, $00, $5E, $23, $00, $11, $FF   ;  :[Y]^#
+000F27r 2  00 5E 23 00  
+000F2Br 2  11 FF        
+000F2Dr 2  00 59 00 00          .byte   $00, $59, $00, $00, $05, $FF   ; [Y]
+000F31r 2  05 FF        
+000F33r 2  FF                   .byte   $FF
+000F34r 2               rg_5A:        ; 'Z'
+000F34r 2  00 5A 00 00          .byte   $00, $5A, $00, $00, $20, $FF   ; [Z]
+000F38r 2  20 FF        
+000F3Ar 2  FF                   .byte   $FF
+000F3Br 2               ; the group of each character $20-$5A (0 = none)
+000F3Br 2               rg_tab:
+000F3Br 2  rr rr                .word   rg_20
+000F3Dr 2  00 00                .word   0
+000F3Fr 2  00 00                .word   0
+000F41r 2  00 00                .word   0
+000F43r 2  00 00                .word   0
+000F45r 2  00 00                .word   0
+000F47r 2  00 00                .word   0
+000F49r 2  rr rr                .word   rg_27
+000F4Br 2  00 00                .word   0
+000F4Dr 2  00 00                .word   0
+000F4Fr 2  00 00                .word   0
+000F51r 2  00 00                .word   0
+000F53r 2  rr rr                .word   rg_2C
+000F55r 2  rr rr                .word   rg_2D
+000F57r 2  rr rr                .word   rg_2E
+000F59r 2  00 00                .word   0
+000F5Br 2  rr rr                .word   rg_30
+000F5Dr 2  rr rr                .word   rg_31
+000F5Fr 2  rr rr                .word   rg_32
+000F61r 2  rr rr                .word   rg_33
+000F63r 2  rr rr                .word   rg_34
+000F65r 2  rr rr                .word   rg_35
+000F67r 2  rr rr                .word   rg_36
+000F69r 2  rr rr                .word   rg_37
+000F6Br 2  rr rr                .word   rg_38
+000F6Dr 2  rr rr                .word   rg_39
+000F6Fr 2  00 00                .word   0
+000F71r 2  00 00                .word   0
+000F73r 2  00 00                .word   0
+000F75r 2  00 00                .word   0
+000F77r 2  00 00                .word   0
+000F79r 2  rr rr                .word   rg_3F
+000F7Br 2  00 00                .word   0
+000F7Dr 2  rr rr                .word   rg_41
+000F7Fr 2  rr rr                .word   rg_42
+000F81r 2  rr rr                .word   rg_43
+000F83r 2  rr rr                .word   rg_44
+000F85r 2  rr rr                .word   rg_45
+000F87r 2  rr rr                .word   rg_46
+000F89r 2  rr rr                .word   rg_47
+000F8Br 2  rr rr                .word   rg_48
+000F8Dr 2  rr rr                .word   rg_49
+000F8Fr 2  rr rr                .word   rg_4A
+000F91r 2  rr rr                .word   rg_4B
+000F93r 2  rr rr                .word   rg_4C
+000F95r 2  rr rr                .word   rg_4D
+000F97r 2  rr rr                .word   rg_4E
+000F99r 2  rr rr                .word   rg_4F
+000F9Br 2  rr rr                .word   rg_50
+000F9Dr 2  rr rr                .word   rg_51
+000F9Fr 2  rr rr                .word   rg_52
+000FA1r 2  rr rr                .word   rg_53
+000FA3r 2  rr rr                .word   rg_54
+000FA5r 2  rr rr                .word   rg_55
+000FA7r 2  rr rr                .word   rg_56
+000FA9r 2  rr rr                .word   rg_57
+000FABr 2  rr rr                .word   rg_58
+000FADr 2  rr rr                .word   rg_59
+000FAFr 2  rr rr                .word   rg_5A
+000FB1r 2               dict_t:
+000FB1r 2  5A 45 52 4F          .byte   $5A, $45, $52, $4F, $00, $20, $04, $2C, $0B, $FF   ; ZERO
+000FB5r 2  00 20 04 2C  
+000FB9r 2  0B FF        
+000FBBr 2  4F 4E 45 00          .byte   $4F, $4E, $45, $00, $2A, $10, $27, $FF   ; ONE
+000FBFr 2  2A 10 27 FF  
+000FC3r 2  54 57 4F 00          .byte   $54, $57, $4F, $00, $17, $0D, $FF   ; TWO
+000FC7r 2  17 0D FF     
+000FCAr 2  54 48 52 45          .byte   $54, $48, $52, $45, $45, $00, $1D, $2C, $04, $FF   ; THREE
+000FCEr 2  45 00 1D 2C  
+000FD2r 2  04 FF        
+000FD4r 2  46 4F 55 52          .byte   $46, $4F, $55, $52, $00, $1B, $0A, $2C, $FF   ; FOUR
+000FD8r 2  00 1B 0A 2C  
+000FDCr 2  FF           
+000FDDr 2  46 49 56 45          .byte   $46, $49, $56, $45, $00, $1B, $11, $1C, $FF   ; FIVE
+000FE1r 2  00 1B 11 1C  
+000FE5r 2  FF           
+000FE6r 2  53 49 58 00          .byte   $53, $49, $58, $00, $1F, $05, $19, $1F, $FF   ; SIX
+000FEAr 2  1F 05 19 1F  
+000FEEr 2  FF           
+000FEFr 2  53 45 56 45          .byte   $53, $45, $56, $45, $4E, $00, $1F, $07, $1C, $0F, $27, $FF   ; SEVEN
+000FF3r 2  4E 00 1F 07  
+000FF7r 2  1C 0F 27 FF  
+000FFBr 2  45 49 47 48          .byte   $45, $49, $47, $48, $54, $00, $06, $17, $FF   ; EIGHT
+000FFFr 2  54 00 06 17  
+001003r 2  FF           
+001004r 2  4E 49 4E 45          .byte   $4E, $49, $4E, $45, $00, $27, $11, $27, $FF   ; NINE
+001008r 2  00 27 11 27  
+00100Cr 2  FF           
+00100Dr 2  54 45 4E 00          .byte   $54, $45, $4E, $00, $17, $07, $27, $FF   ; TEN
+001011r 2  17 07 27 FF  
+001015r 2  45 4C 45 56          .byte   $45, $4C, $45, $56, $45, $4E, $00, $05, $29, $07, $1C, $0F, $27, $FF   ; ELEVEN
+001019r 2  45 4E 00 05  
+00101Dr 2  29 07 1C 0F  
+001023r 2  54 57 45 4C          .byte   $54, $57, $45, $4C, $56, $45, $00, $17, $2A, $07, $29, $1C, $FF   ; TWELVE
+001027r 2  56 45 00 17  
+00102Br 2  2A 07 29 1C  
+001030r 2  54 48 49 52          .byte   $54, $48, $49, $52, $54, $45, $45, $4E, $00, $1D, $0E, $17, $04, $27, $FF   ; THIRTEEN
+001034r 2  54 45 45 4E  
+001038r 2  00 1D 0E 17  
+00103Fr 2  46 4F 55 52          .byte   $46, $4F, $55, $52, $54, $45, $45, $4E, $00, $1B, $0A, $2C, $17, $04, $27, $FF   ; FOURTEEN
+001043r 2  54 45 45 4E  
+001047r 2  00 1B 0A 2C  
+00104Fr 2  46 49 46 54          .byte   $46, $49, $46, $54, $45, $45, $4E, $00, $1B, $05, $1B, $17, $04, $27, $FF   ; FIFTEEN
+001053r 2  45 45 4E 00  
+001057r 2  1B 05 1B 17  
+00105Er 2  53 49 58 54          .byte   $53, $49, $58, $54, $45, $45, $4E, $00, $1F, $05, $19, $1F, $17, $04, $27, $FF   ; SIXTEEN
+001062r 2  45 45 4E 00  
+001066r 2  1F 05 19 1F  
+00106Er 2  53 45 56 45          .byte   $53, $45, $56, $45, $4E, $54, $45, $45, $4E, $00, $1F, $07, $1C, $0F, $27, $17, $04, $27, $FF   ; SEVENTEEN
+001072r 2  4E 54 45 45  
+001076r 2  4E 00 1F 07  
+001081r 2  45 49 47 48          .byte   $45, $49, $47, $48, $54, $45, $45, $4E, $00, $06, $17, $04, $27, $FF   ; EIGHTEEN
+001085r 2  54 45 45 4E  
+001089r 2  00 06 17 04  
+00108Fr 2  4E 49 4E 45          .byte   $4E, $49, $4E, $45, $54, $45, $45, $4E, $00, $27, $11, $27, $17, $04, $27, $FF   ; NINETEEN
+001093r 2  54 45 45 4E  
+001097r 2  00 27 11 27  
+00109Fr 2  54 57 45 4E          .byte   $54, $57, $45, $4E, $54, $59, $00, $17, $2A, $07, $27, $17, $04, $FF   ; TWENTY
+0010A3r 2  54 59 00 17  
+0010A7r 2  2A 07 27 17  
+0010ADr 2  54 48 49 52          .byte   $54, $48, $49, $52, $54, $59, $00, $1D, $0E, $17, $04, $FF   ; THIRTY
+0010B1r 2  54 59 00 1D  
+0010B5r 2  0E 17 04 FF  
+0010B9r 2  46 4F 52 54          .byte   $46, $4F, $52, $54, $59, $00, $1B, $0A, $2C, $17, $04, $FF   ; FORTY
+0010BDr 2  59 00 1B 0A  
+0010C1r 2  2C 17 04 FF  
+0010C5r 2  46 49 46 54          .byte   $46, $49, $46, $54, $59, $00, $1B, $05, $1B, $17, $04, $FF   ; FIFTY
+0010C9r 2  59 00 1B 05  
+0010CDr 2  1B 17 04 FF  
+0010D1r 2  53 49 58 54          .byte   $53, $49, $58, $54, $59, $00, $1F, $05, $19, $1F, $17, $04, $FF   ; SIXTY
+0010D5r 2  59 00 1F 05  
+0010D9r 2  19 1F 17 04  
+0010DEr 2  53 45 56 45          .byte   $53, $45, $56, $45, $4E, $54, $59, $00, $1F, $07, $1C, $0F, $27, $17, $04, $FF   ; SEVENTY
+0010E2r 2  4E 54 59 00  
+0010E6r 2  1F 07 1C 0F  
+0010EEr 2  45 49 47 48          .byte   $45, $49, $47, $48, $54, $59, $00, $06, $17, $04, $FF   ; EIGHTY
+0010F2r 2  54 59 00 06  
+0010F6r 2  17 04 FF     
+0010F9r 2  4E 49 4E 45          .byte   $4E, $49, $4E, $45, $54, $59, $00, $27, $11, $27, $17, $04, $FF   ; NINETY
+0010FDr 2  54 59 00 27  
+001101r 2  11 27 17 04  
+001106r 2  48 55 4E 44          .byte   $48, $55, $4E, $44, $52, $45, $44, $00, $23, $10, $27, $18, $2C, $05, $18, $FF   ; HUNDRED
+00110Ar 2  52 45 44 00  
+00110Er 2  23 10 27 18  
+001116r 2  54 48 4F 55          .byte   $54, $48, $4F, $55, $53, $41, $4E, $44, $00, $1D, $12, $20, $0F, $27, $18, $FF   ; THOUSAND
+00111Ar 2  53 41 4E 44  
+00111Er 2  00 1D 12 20  
+001126r 2  00                   .byte   0
+001127r 2               ; the phonemes' names (for /P), 2 characters each
+001127r 2               ph_name:
+001127r 2  20 2F                .byte   " /"
+001129r 2  20 2C                .byte   " ,"
+00112Br 2  20 2E                .byte   " ."
+00112Dr 2  20 3F                .byte   " ?"
+00112Fr 2  49 59                .byte   "IY"
+001131r 2  49 48                .byte   "IH"
+001133r 2  45 59                .byte   "EY"
+001135r 2  45 48                .byte   "EH"
+001137r 2  41 45                .byte   "AE"
+001139r 2  41 41                .byte   "AA"
+00113Br 2  41 4F                .byte   "AO"
+00113Dr 2  4F 57                .byte   "OW"
+00113Fr 2  55 48                .byte   "UH"
+001141r 2  55 57                .byte   "UW"
+001143r 2  45 52                .byte   "ER"
+001145r 2  41 58                .byte   "AX"
+001147r 2  41 48                .byte   "AH"
+001149r 2  41 59                .byte   "AY"
+00114Br 2  41 57                .byte   "AW"
+00114Dr 2  4F 59                .byte   "OY"
+00114Fr 2  59 20                .byte   "Y "
+001151r 2  50 20                .byte   "P "
+001153r 2  42 20                .byte   "B "
+001155r 2  54 20                .byte   "T "
+001157r 2  44 20                .byte   "D "
+001159r 2  4B 20                .byte   "K "
+00115Br 2  47 20                .byte   "G "
+00115Dr 2  46 20                .byte   "F "
+00115Fr 2  56 20                .byte   "V "
+001161r 2  54 48                .byte   "TH"
+001163r 2  44 48                .byte   "DH"
+001165r 2  53 20                .byte   "S "
+001167r 2  5A 20                .byte   "Z "
+001169r 2  53 48                .byte   "SH"
+00116Br 2  5A 48                .byte   "ZH"
+00116Dr 2  48 48                .byte   "HH"
+00116Fr 2  43 48                .byte   "CH"
+001171r 2  4A 48                .byte   "JH"
+001173r 2  4D 20                .byte   "M "
+001175r 2  4E 20                .byte   "N "
+001177r 2  4E 58                .byte   "NX"
+001179r 2  4C 20                .byte   "L "
+00117Br 2  57 20                .byte   "W "
+00117Dr 2  57 48                .byte   "WH"
+00117Fr 2  52 20                .byte   "R "
+001181r 2               ; the SPO256 allophones' names (for /P and /A), 3 characters each
+001181r 2               al_name:
+001181r 2  50 41 31             .byte   "PA1"
+001184r 2  50 41 32             .byte   "PA2"
+001187r 2  50 41 33             .byte   "PA3"
+00118Ar 2  50 41 34             .byte   "PA4"
+00118Dr 2  50 41 35             .byte   "PA5"
+001190r 2  4F 59 20             .byte   "OY "
+001193r 2  41 59 20             .byte   "AY "
+001196r 2  45 48 20             .byte   "EH "
+001199r 2  4B 4B 33             .byte   "KK3"
+00119Cr 2  50 50 20             .byte   "PP "
+00119Fr 2  4A 48 20             .byte   "JH "
+0011A2r 2  4E 4E 31             .byte   "NN1"
+0011A5r 2  49 48 20             .byte   "IH "
+0011A8r 2  54 54 32             .byte   "TT2"
+0011ABr 2  52 52 31             .byte   "RR1"
+0011AEr 2  41 58 20             .byte   "AX "
+0011B1r 2  4D 4D 20             .byte   "MM "
+0011B4r 2  54 54 31             .byte   "TT1"
+0011B7r 2  44 48 31             .byte   "DH1"
+0011BAr 2  49 59 20             .byte   "IY "
+0011BDr 2  45 59 20             .byte   "EY "
+0011C0r 2  44 44 31             .byte   "DD1"
+0011C3r 2  55 57 31             .byte   "UW1"
+0011C6r 2  41 4F 20             .byte   "AO "
+0011C9r 2  41 41 20             .byte   "AA "
+0011CCr 2  59 59 32             .byte   "YY2"
+0011CFr 2  41 45 20             .byte   "AE "
+0011D2r 2  48 48 31             .byte   "HH1"
+0011D5r 2  42 42 31             .byte   "BB1"
+0011D8r 2  54 48 20             .byte   "TH "
+0011DBr 2  55 48 20             .byte   "UH "
+0011DEr 2  55 57 32             .byte   "UW2"
+0011E1r 2  41 57 20             .byte   "AW "
+0011E4r 2  44 44 32             .byte   "DD2"
+0011E7r 2  47 47 33             .byte   "GG3"
+0011EAr 2  56 56 20             .byte   "VV "
+0011EDr 2  47 47 31             .byte   "GG1"
+0011F0r 2  53 48 20             .byte   "SH "
+0011F3r 2  5A 48 20             .byte   "ZH "
+0011F6r 2  52 52 32             .byte   "RR2"
+0011F9r 2  46 46 20             .byte   "FF "
+0011FCr 2  4B 4B 32             .byte   "KK2"
+0011FFr 2  4B 4B 31             .byte   "KK1"
+001202r 2  5A 5A 20             .byte   "ZZ "
+001205r 2  4E 47 20             .byte   "NG "
+001208r 2  4C 4C 20             .byte   "LL "
+00120Br 2  57 57 20             .byte   "WW "
+00120Er 2  58 52 20             .byte   "XR "
+001211r 2  57 48 20             .byte   "WH "
+001214r 2  59 59 31             .byte   "YY1"
+001217r 2  43 48 20             .byte   "CH "
+00121Ar 2  45 52 31             .byte   "ER1"
+00121Dr 2  45 52 32             .byte   "ER2"
+001220r 2  4F 57 20             .byte   "OW "
+001223r 2  44 48 32             .byte   "DH2"
+001226r 2  53 53 20             .byte   "SS "
+001229r 2  4E 4E 32             .byte   "NN2"
+00122Cr 2  48 48 32             .byte   "HH2"
+00122Fr 2  4F 52 20             .byte   "OR "
+001232r 2  41 52 20             .byte   "AR "
+001235r 2  59 52 20             .byte   "YR "
+001238r 2  47 47 32             .byte   "GG2"
+00123Br 2  45 4C 20             .byte   "EL "
+00123Er 2  42 42 32             .byte   "BB2"
+001241r 2               ; each phoneme: its allophone, or $80 + a choice (talk.s al_spec): UW Y B D T K G N R HH DH
+001241r 2               ph_map:
+001241r 2  00                   .byte   $00   ; GAP
+001242r 2  00                   .byte   $00   ; COMMA
+001243r 2  00                   .byte   $00   ; STOP
+001244r 2  00                   .byte   $00   ; ASK
+001245r 2  13                   .byte   $13   ; IY
+001246r 2  0C                   .byte   $0C   ; IH
+001247r 2  14                   .byte   $14   ; EY
+001248r 2  07                   .byte   $07   ; EH
+001249r 2  1A                   .byte   $1A   ; AE
+00124Ar 2  18                   .byte   $18   ; AA
+00124Br 2  17                   .byte   $17   ; AO
+00124Cr 2  35                   .byte   $35   ; OW
+00124Dr 2  1E                   .byte   $1E   ; UH
+00124Er 2  80                   .byte   $80   ; UW
+00124Fr 2  33                   .byte   $33   ; ER
+001250r 2  0F                   .byte   $0F   ; AX
+001251r 2  0F                   .byte   $0F   ; AH
+001252r 2  06                   .byte   $06   ; AY
+001253r 2  20                   .byte   $20   ; AW
+001254r 2  05                   .byte   $05   ; OY
+001255r 2  81                   .byte   $81   ; Y
+001256r 2  09                   .byte   $09   ; P
+001257r 2  82                   .byte   $82   ; B
+001258r 2  84                   .byte   $84   ; T
+001259r 2  83                   .byte   $83   ; D
+00125Ar 2  85                   .byte   $85   ; K
+00125Br 2  86                   .byte   $86   ; G
+00125Cr 2  28                   .byte   $28   ; F
+00125Dr 2  23                   .byte   $23   ; V
+00125Er 2  1D                   .byte   $1D   ; TH
+00125Fr 2  8A                   .byte   $8A   ; DH
+001260r 2  37                   .byte   $37   ; S
+001261r 2  2B                   .byte   $2B   ; Z
+001262r 2  25                   .byte   $25   ; SH
+001263r 2  26                   .byte   $26   ; ZH
+001264r 2  89                   .byte   $89   ; HH
+001265r 2  32                   .byte   $32   ; CH
+001266r 2  0A                   .byte   $0A   ; JH
+001267r 2  10                   .byte   $10   ; M
+001268r 2  87                   .byte   $87   ; N
+001269r 2  2C                   .byte   $2C   ; NX
+00126Ar 2  2D                   .byte   $2D   ; L
+00126Br 2  2E                   .byte   $2E   ; W
+00126Cr 2  30                   .byte   $30   ; WH
+00126Dr 2  88                   .byte   $88   ; R
+00126Er 2               ; each phoneme: 1 vowel, 2 front vowel, 4 voiced stop, 8 unvoiced stop
+00126Er 2               ph_kind:
+00126Er 2  00                   .byte   0   ; GAP
+00126Fr 2  00                   .byte   0   ; COMMA
+001270r 2  00                   .byte   0   ; STOP
+001271r 2  00                   .byte   0   ; ASK
+001272r 2  03                   .byte   3   ; IY
+001273r 2  03                   .byte   3   ; IH
+001274r 2  03                   .byte   3   ; EY
+001275r 2  03                   .byte   3   ; EH
+001276r 2  03                   .byte   3   ; AE
+001277r 2  01                   .byte   1   ; AA
+001278r 2  01                   .byte   1   ; AO
+001279r 2  01                   .byte   1   ; OW
+00127Ar 2  01                   .byte   1   ; UH
+00127Br 2  01                   .byte   1   ; UW
+00127Cr 2  01                   .byte   1   ; ER
+00127Dr 2  01                   .byte   1   ; AX
+00127Er 2  01                   .byte   1   ; AH
+00127Fr 2  01                   .byte   1   ; AY
+001280r 2  01                   .byte   1   ; AW
+001281r 2  01                   .byte   1   ; OY
+001282r 2  00                   .byte   0   ; Y
+001283r 2  08                   .byte   8   ; P
+001284r 2  04                   .byte   4   ; B
+001285r 2  08                   .byte   8   ; T
+001286r 2  04                   .byte   4   ; D
+001287r 2  08                   .byte   8   ; K
+001288r 2  04                   .byte   4   ; G
+001289r 2  00                   .byte   0   ; F
+00128Ar 2  00                   .byte   0   ; V
+00128Br 2  00                   .byte   0   ; TH
+00128Cr 2  00                   .byte   0   ; DH
+00128Dr 2  00                   .byte   0   ; S
+00128Er 2  00                   .byte   0   ; Z
+00128Fr 2  00                   .byte   0   ; SH
+001290r 2  00                   .byte   0   ; ZH
+001291r 2  00                   .byte   0   ; HH
+001292r 2  08                   .byte   8   ; CH
+001293r 2  04                   .byte   4   ; JH
+001294r 2  00                   .byte   0   ; M
+001295r 2  00                   .byte   0   ; N
+001296r 2  00                   .byte   0   ; NX
+001297r 2  00                   .byte   0   ; L
+001298r 2  00                   .byte   0   ; W
+001299r 2  00                   .byte   0   ; WH
+00129Ar 2  00                   .byte   0   ; R
+00129Br 2               ; each phoneme: the R-coloured allophone it makes before R (0 none)
+00129Br 2               ph_rcol:
+00129Br 2  00                   .byte   0   ; GAP
+00129Cr 2  00                   .byte   0   ; COMMA
+00129Dr 2  00                   .byte   0   ; STOP
+00129Er 2  00                   .byte   0   ; ASK
+00129Fr 2  3C                   .byte   60   ; IY
+0012A0r 2  3C                   .byte   60   ; IH
+0012A1r 2  00                   .byte   0   ; EY
+0012A2r 2  2F                   .byte   47   ; EH
+0012A3r 2  2F                   .byte   47   ; AE
+0012A4r 2  3B                   .byte   59   ; AA
+0012A5r 2  3A                   .byte   58   ; AO
+0012A6r 2  3A                   .byte   58   ; OW
+0012A7r 2  00                   .byte   0   ; UH
+0012A8r 2  00                   .byte   0   ; UW
+0012A9r 2  00                   .byte   0   ; ER
+0012AAr 2  00                   .byte   0   ; AX
+0012ABr 2  00                   .byte   0   ; AH
+0012ACr 2  00                   .byte   0   ; AY
+0012ADr 2  00                   .byte   0   ; AW
+0012AEr 2  00                   .byte   0   ; OY
+0012AFr 2  00                   .byte   0   ; Y
+0012B0r 2  00                   .byte   0   ; P
+0012B1r 2  00                   .byte   0   ; B
+0012B2r 2  00                   .byte   0   ; T
+0012B3r 2  00                   .byte   0   ; D
+0012B4r 2  00                   .byte   0   ; K
+0012B5r 2  00                   .byte   0   ; G
+0012B6r 2  00                   .byte   0   ; F
+0012B7r 2  00                   .byte   0   ; V
+0012B8r 2  00                   .byte   0   ; TH
+0012B9r 2  00                   .byte   0   ; DH
+0012BAr 2  00                   .byte   0   ; S
+0012BBr 2  00                   .byte   0   ; Z
+0012BCr 2  00                   .byte   0   ; SH
+0012BDr 2  00                   .byte   0   ; ZH
+0012BEr 2  00                   .byte   0   ; HH
+0012BFr 2  00                   .byte   0   ; CH
+0012C0r 2  00                   .byte   0   ; JH
+0012C1r 2  00                   .byte   0   ; M
+0012C2r 2  00                   .byte   0   ; N
+0012C3r 2  00                   .byte   0   ; NX
+0012C4r 2  00                   .byte   0   ; L
+0012C5r 2  00                   .byte   0   ; W
+0012C6r 2  00                   .byte   0   ; WH
+0012C7r 2  00                   .byte   0   ; R
+0012C8r 2               A_PA1 = 0
+0012C8r 2               A_PA2 = 1
+0012C8r 2               A_PA3 = 2
+0012C8r 2               A_PA4 = 3
+0012C8r 2               A_PA5 = 4
+0012C8r 2               A_OY = 5
+0012C8r 2               A_AY = 6
+0012C8r 2               A_EH = 7
+0012C8r 2               A_KK3 = 8
+0012C8r 2               A_PP = 9
+0012C8r 2               A_JH = 10
+0012C8r 2               A_NN1 = 11
+0012C8r 2               A_IH = 12
+0012C8r 2               A_TT2 = 13
+0012C8r 2               A_RR1 = 14
+0012C8r 2               A_AX = 15
+0012C8r 2               A_MM = 16
+0012C8r 2               A_TT1 = 17
+0012C8r 2               A_DH1 = 18
+0012C8r 2               A_IY = 19
+0012C8r 2               A_EY = 20
+0012C8r 2               A_DD1 = 21
+0012C8r 2               A_UW1 = 22
+0012C8r 2               A_AO = 23
+0012C8r 2               A_AA = 24
+0012C8r 2               A_YY2 = 25
+0012C8r 2               A_AE = 26
+0012C8r 2               A_HH1 = 27
+0012C8r 2               A_BB1 = 28
+0012C8r 2               A_TH = 29
+0012C8r 2               A_UH = 30
+0012C8r 2               A_UW2 = 31
+0012C8r 2               A_AW = 32
+0012C8r 2               A_DD2 = 33
+0012C8r 2               A_GG3 = 34
+0012C8r 2               A_VV = 35
+0012C8r 2               A_GG1 = 36
+0012C8r 2               A_SH = 37
+0012C8r 2               A_ZH = 38
+0012C8r 2               A_RR2 = 39
+0012C8r 2               A_FF = 40
+0012C8r 2               A_KK2 = 41
+0012C8r 2               A_KK1 = 42
+0012C8r 2               A_ZZ = 43
+0012C8r 2               A_NG = 44
+0012C8r 2               A_LL = 45
+0012C8r 2               A_WW = 46
+0012C8r 2               A_XR = 47
+0012C8r 2               A_WH = 48
+0012C8r 2               A_YY1 = 49
+0012C8r 2               A_CH = 50
+0012C8r 2               A_ER1 = 51
+0012C8r 2               A_ER2 = 52
+0012C8r 2               A_OW = 53
+0012C8r 2               A_DH2 = 54
+0012C8r 2               A_SS = 55
+0012C8r 2               A_NN2 = 56
+0012C8r 2               A_HH2 = 57
+0012C8r 2               A_OR = 58
+0012C8r 2               A_AR = 59
+0012C8r 2               A_YR = 60
+0012C8r 2               A_GG2 = 61
+0012C8r 2               A_EL = 62
+0012C8r 2               A_BB2 = 63
+0012C8r 2               PH_N = 45
+0012C8r 2               P_GAP = 0
+0012C8r 2               P_COMMA = 1
+0012C8r 2               P_STOP = 2
+0012C8r 2               P_ASK = 3
+0012C8r 2               P_IY = 4
+0012C8r 2               P_IH = 5
+0012C8r 2               P_EY = 6
+0012C8r 2               P_EH = 7
+0012C8r 2               P_AE = 8
+0012C8r 2               P_AA = 9
+0012C8r 2               P_AO = 10
+0012C8r 2               P_OW = 11
+0012C8r 2               P_UH = 12
+0012C8r 2               P_UW = 13
+0012C8r 2               P_ER = 14
+0012C8r 2               P_AX = 15
+0012C8r 2               P_AH = 16
+0012C8r 2               P_AY = 17
+0012C8r 2               P_AW = 18
+0012C8r 2               P_OY = 19
+0012C8r 2               P_Y = 20
+0012C8r 2               P_P = 21
+0012C8r 2               P_B = 22
+0012C8r 2               P_T = 23
+0012C8r 2               P_D = 24
+0012C8r 2               P_K = 25
+0012C8r 2               P_G = 26
+0012C8r 2               P_F = 27
+0012C8r 2               P_V = 28
+0012C8r 2               P_TH = 29
+0012C8r 2               P_DH = 30
+0012C8r 2               P_S = 31
+0012C8r 2               P_Z = 32
+0012C8r 2               P_SH = 33
+0012C8r 2               P_ZH = 34
+0012C8r 2               P_HH = 35
+0012C8r 2               P_CH = 36
+0012C8r 2               P_JH = 37
+0012C8r 2               P_M = 38
+0012C8r 2               P_N = 39
+0012C8r 2               P_NX = 40
+0012C8r 2               P_L = 41
+0012C8r 2               P_W = 42
+0012C8r 2               P_WH = 43
+0012C8r 2               P_R = 44
+0012C8r 2               
+0012C8r 1               
+0012C8r 1               ; ============================================================================
+0012C8r 1                       .segment "BSS"
+000000r 1  xx           show:   .res    1
+000001r 1  xx           spo:    .res    1
+000002r 1  xx           echo:   .res    1
+000003r 1  xx           llen:   .res    1
+000004r 1  xx xx xx xx  line:   .res    LINE_MAX + 1
+000008r 1  xx xx xx xx  
+00000Cr 1  xx xx xx xx  
+00007Dr 1  xx xx        src:    .res    2
+00007Fr 1  xx xx        send:   .res    2
+000081r 1  xx           ti:     .res    1
+000082r 1  xx           tend:   .res    1
+000083r 1  xx           pn:     .res    1
+000084r 1  xx           na:     .res    1
+000085r 1  xx xx        rp:     .res    2
+000087r 1  xx xx        nxt:    .res    2
+000089r 1  xx           rend:   .res    1
+00008Ar 1  xx           mofs:   .res    1
+00008Br 1  xx           rofs:   .res    1
+00008Cr 1  xx           pofs:   .res    1
+00008Dr 1  xx           llen2:  .res    1
+00008Er 1  xx           py:     .res    1
+00008Fr 1  xx           dir:    .res    1
+000090r 1  xx           cnt:    .res    1
+000091r 1  xx           cx:     .res    1
+000092r 1  xx           k:      .res    1
+000093r 1  xx           cur:    .res    1
+000094r 1  xx           prev:   .res    1
+000095r 1  xx           nxt1:   .res    1
+000096r 1  xx           nxt2:   .res    1
+000097r 1  xx           wstart: .res    1
+000098r 1  xx xx        nv:     .res    2
+00009Ar 1  xx           nbig:   .res    1
+00009Br 1  xx           ndig:   .res    1
+00009Cr 1  xx xx xx xx  dg:     .res    16
+0000A0r 1  xx xx xx xx  
+0000A4r 1  xx xx xx xx  
+0000ACr 1  xx xx        wv:     .res    2
+0000AEr 1  xx           t1:     .res    1
+0000AFr 1  xx           t2:     .res    1
+0000B0r 1  xx           t3:     .res    1
+0000B1r 1  xx           t4:     .res    1
+0000B2r 1  xx           t5:     .res    1
+0000B3r 1  xx           t6:     .res    1
+0000B4r 1  xx           t7:     .res    1
+0000B5r 1  xx xx xx xx  tbuf:   .res    256
+0000B9r 1  xx xx xx xx  
+0000BDr 1  xx xx xx xx  
+0001B5r 1  xx xx xx xx  pbuf:   .res    256
+0001B9r 1  xx xx xx xx  
+0001BDr 1  xx xx xx xx  
+0002B5r 1  xx xx xx xx  abuf:   .res    256
+0002B9r 1  xx xx xx xx  
+0002BDr 1  xx xx xx xx  
+0003B5r 1               fbuf:                           ; a text file, to $7EFF
+0003B5r 1               

@@ -1,0 +1,30 @@
+Modules list:
+-------------
+swarm.o:
+    CODE              Offs=000000  Size=001BD7  Align=00001  Fill=0000
+    RODATA            Offs=000000  Size=002D48  Align=00001  Fill=0000
+    BSS               Offs=000000  Size=0003EB  Align=00001  Fill=0000
+
+
+Segment list:
+-------------
+Name                   Start     End    Size  Align
+----------------------------------------------------
+CODE                  000800  0023D6  001BD7  00001
+RODATA                0023D7  00511E  002D48  00001
+BSS                   00511F  005509  0003EB  00001
+
+
+Exports list by name:
+---------------------
+
+
+
+Exports list by value:
+----------------------
+
+
+
+Imports list:
+-------------
+

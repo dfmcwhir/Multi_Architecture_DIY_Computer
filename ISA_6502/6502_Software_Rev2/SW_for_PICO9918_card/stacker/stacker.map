@@ -1,0 +1,30 @@
+Modules list:
+-------------
+stacker.o:
+    CODE              Offs=000000  Size=000FCE  Align=00001  Fill=0000
+    RODATA            Offs=000000  Size=000843  Align=00001  Fill=0000
+    BSS               Offs=000000  Size=00032F  Align=00001  Fill=0000
+
+
+Segment list:
+-------------
+Name                   Start     End    Size  Align
+----------------------------------------------------
+CODE                  000800  0017CD  000FCE  00001
+RODATA                0017CE  002010  000843  00001
+BSS                   002011  00233F  00032F  00001
+
+
+Exports list by name:
+---------------------
+
+
+
+Exports list by value:
+----------------------
+
+
+
+Imports list:
+-------------
+

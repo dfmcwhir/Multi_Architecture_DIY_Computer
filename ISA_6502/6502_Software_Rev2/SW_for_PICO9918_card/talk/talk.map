@@ -1,0 +1,30 @@
+Modules list:
+-------------
+talk.o:
+    CODE              Offs=000000  Size=000AC4  Align=00001  Fill=0000
+    RODATA            Offs=000000  Size=0012C8  Align=00001  Fill=0000
+    BSS               Offs=000000  Size=0003B5  Align=00001  Fill=0000
+
+
+Segment list:
+-------------
+Name                   Start     End    Size  Align
+----------------------------------------------------
+CODE                  000800  0012C3  000AC4  00001
+RODATA                0012C4  00258B  0012C8  00001
+BSS                   00258C  002940  0003B5  00001
+
+
+Exports list by name:
+---------------------
+
+
+
+Exports list by value:
+----------------------
+
+
+
+Imports list:
+-------------
+

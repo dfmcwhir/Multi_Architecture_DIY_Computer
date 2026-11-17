@@ -1,0 +1,212 @@
+ca65 V2.19 - Git d20d99b
+Main file   : install.s
+Current file: install.s
+
+000000r 1               ; ============================================================================
+000000r 1               ; install.s - GUI.BIN's start: copies the file manager (assembled to run at
+000000r 1               ; $1000) into the top RAM bank and registers it with SBC_SHELL; then the
+000000r 1               ; ROM starts it (SBC_MENU goes to the shell from now on).
+000000r 1               ;
+000000r 1               ;   GUI.BIN:  $0800  this (and a page buffer), $0B00  the file manager
+000000r 1               ;
+000000r 1               ; The copy goes a page at a time through the buffer here ($0800-$0FFF is
+000000r 1               ; never banked): read from the bank GUI.BIN was loaded into, write to the
+000000r 1               ; top bank.
+000000r 1               ; ============================================================================
+000000r 1               
+000000r 1                       .include "sbc_api.inc"
+000000r 2               ; sbc_api.inc - fixed ROM entry points of the SBC (see jumptable.s), and the
+000000r 2               ; CPU clock.  Use in your own ca65 programs:  .include "sbc_api.inc"
+000000r 2               ; (the games find it one folder up: their make.bat passes  -I ..  to ca65)
+000000r 2               SBC_CHRIN       = $FE00         ; carry set + A = char, carry clear = none waiting
+000000r 2               SBC_CHROUT      = $FE03         ; print A (A, X, Y preserved)
+000000r 2               SBC_MENU        = $FE06         ; boot menu
+000000r 2               SBC_COLD        = $FE09         ; BASIC cold start
+000000r 2               SBC_WARM        = $FE0C         ; BASIC warm start
+000000r 2               SBC_MONITOR     = $FE0F         ; monitor prompt (or JMP $FF00)
+000000r 2               SBC_PADSTATE    = $FE12         ; A = gamepad buttons held: bit0 A,1 B,2 Select,3 Start,4 Up,5 Down,6 Left,7 Right
+000000r 2               SBC_LOAD        = $FE15         ; load a file from the current device (U: or C:): A/Y = parameter block (.word addr, .word max, "NAME.EXT",0)
+000000r 2                                               ;   carry clear = loaded, X/Y = length; carry set = failed, A = error code
+000000r 2               SBC_CWD         = $FE18         ; A/Y = the monitor's current folder: 0-ended, "" (the top) or "/A/B"
+000000r 2                                               ;   (newer ROMs: check for a JMP ($4C) at $FE18 first)
+000000r 2               
+000000r 2               ; ---- CPU Rev2 ROMs (API version 2).  Check first:  LDA $FE1B / CMP #$4C,
+000000r 2               ;      then JSR SBC_SYSINFO and check Y >= 2.
+000000r 2               SBC_SYSINFO     = $FE1B         ; A = display type (DISP_...), X = device status, Y = API version
+000000r 2               SBC_SEROUT      = $FE1E         ; send A out of the serial console port (A, X, Y preserved)
+000000r 2               SBC_MOUSEON     = $FE21         ; A = 1 mouse reports on, 0 off (off at reset); C=1 = no mouse
+000000r 2               SBC_MOUSE       = $FE24         ; A = buttons (bit0 L, 1 R, 2 M), X/Y = signed movement since
+000000r 2                                               ;   the last call (right/down +); C=1 = a report arrived
+000000r 2               SBC_BANKSET     = $FE27         ; A = RAM bank 0-15 for $1000-$7EFF (X, Y kept).  Your code that
+000000r 2                                               ;   calls it must be in $0000-$0FFF, or it switches itself out!
+000000r 2               SBC_BANKGET     = $FE2A         ; A = bank selected, X = number of banks fitted
+000000r 2               SBC_TICKS       = $FE2D         ; A/X/Y = 60 Hz counter, low/middle/high
+000000r 2               SBC_ACIAIN      = $FE30         ; serial card 6551: C=1 + A = byte, C=0 none
+000000r 2               SBC_ACIAOUT     = $FE33         ; serial card 6551: send A (A, X, Y preserved)
+000000r 2               SBC_VSYNC       = $FE36         ; C=1 if a frame ended since the last call (PICO9918 / ESP32_VGA),
+000000r 2                                               ;   A = the VDP status / ESP32 STATUS
+000000r 2               SBC_CONRESET    = $FE39         ; display back to the text console, cleared (call it when
+000000r 2                                               ;   your game exits after changing the display mode)
+000000r 2               SBC_SNDNOTE     = $FE3C         ; A/Y -> 5 bytes: voice (AY 0-2, ESP32 0-3), note (0-95, 36 = C4),
+000000r 2                                               ;   volume (0-15; AY 16 = envelope), time (16 bit, 1/60 s,
+000000r 2                                               ;   0 = hold).  Doesn't wait.  C=1 = bad values
+000000r 2               SBC_SNDQUIET    = $FE3F         ; all sound off
+000000r 2               SBC_SNDBUSY     = $FE42         ; A = voice: C=1 while its timed note is still playing
+000000r 2               SBC_SAY         = $FE45         ; A/Y -> SPO256 allophones (0-63) ended by $FF; queued
+000000r 2               SBC_SAYBUSY     = $FE48         ; C=1 while the SPO256 is speaking
+000000r 2               SBC_AYREAD      = $FE4B         ; X = AY register (14/15 = I/O ports A/B) -> A
+000000r 2               SBC_AYWRITE     = $FE4E         ; AY register X = A (register 7 bits 6/7 = ports A/B output)
+000000r 2               SBC_TIME        = $FE51         ; A/Y -> 18 byte buffer <- "mm/dd/yy hh:mm:ss",0 (CF card's DS1302);
+000000r 2                                               ;   C=1 = no clock
+000000r 2               SBC_SETTIME     = $FE54         ; A/Y -> 14 characters "dwyymmddHHMMSS" (dw 01 = Sunday)
+000000r 2               SBC_DIR         = $FE57         ; stage 6: A/Y -> block: .word table, .byte most entries, .byte device
+000000r 2                                               ;   ('U', 'C' or 0 = as it is): the current folder (SBC_CWD) into the
+000000r 2                                               ;   table, 16 bytes an entry: name 8, ext 3 (space padded), attributes
+000000r 2                                               ;   ($10 = folder), size 4.  C=0: A = entries; C=1: A = error code
+000000r 2               SBC_RUN         = $FE5A         ; stage 6: A/Y -> block: .byte 0 = .BIN (bank 0, $0800) / 1 = BASIC
+000000r 2                                               ;   program, .byte device, "NAME.EXT",0 (in the current folder).
+000000r 2                                               ;   Returns only on an error: C=1, A = code
+000000r 2               SBC_SHELL       = $FE5D         ; stage 6: A = the RAM bank of a shell ($1000 JMP, $1003 "SH65"):
+000000r 2                                               ;   SBC_MENU then goes back to it.  A = 0: none.  C=1: no shell there
+000000r 2               SBC_COPY        = $FE60         ; stage 6b: A/Y -> block: .byte source device ('U'/'C'), .word -> source
+000000r 2                                               ;   path "/A/NAME.EXT",0, .byte destination device, .word -> its path.
+000000r 2                                               ;   Uses every RAM bank but yours as the buffer (bank 0 is lost).
+000000r 2                                               ;   C=0 copied; C=1, A = error ($F0 too big)
+000000r 2               SBC_DELETE      = $FE63         ; stage 6b: A/Y -> block: .byte device, .word -> path.  C=1, A = error
+000000r 2                                               ;   ($42 not found, $FD the drive can't delete)
+000000r 2               SBC_DISPTYPE    = $FEFF         ; a byte: the display type (DISP_...)
+000000r 2               
+000000r 2               ; SBC_SYSINFO display types
+000000r 2               DISP_NONE       = 0
+000000r 2               DISP_TERM       = 1             ; KB_MONITOR_TERM (PIC32 terminal)
+000000r 2               DISP_PICO       = 2             ; PICO9918
+000000r 2               DISP_ESP32      = 3             ; ESP32_VGA
+000000r 2               
+000000r 2               ; SBC_SYSINFO device status bits (X)
+000000r 2               DEV_VIA         = $01
+000000r 2               DEV_ACIA        = $02
+000000r 2               DEV_DISPLAY     = $04
+000000r 2               DEV_AVRKBD      = $08
+000000r 2               
+000000r 2               ; Key codes from the AVR keyboard interface (Serial Rev3 / PICO9918 card)
+000000r 2               KEY_UP          = $05           ; ^E  (WordStar)
+000000r 2               KEY_DOWN        = $18           ; ^X
+000000r 2               KEY_LEFT        = $10           ; ^P
+000000r 2               KEY_RIGHT       = $04           ; ^D
+000000r 2               KEY_ESC         = $03           ; Esc sends ^C
+000000r 2               KEY_F1          = 129           ; F1-F12 = 129-140, shifted 141-152
+000000r 2               
+000000r 2               ; First RAM address for loaded programs (CPU Rev2 ROM)
+000000r 2               SBC_USER_RAM    = $0800
+000000r 2               
+000000r 2               ; The CPU clock in MHz (whole numbers, 1 to 8).  Programs size their delay
+000000r 2               ; loops from it, so a millisecond stays a millisecond.  To build for another
+000000r 2               ; clock, change it here or give it on the command line:  make.bat 1
+000000r 2               .ifndef CLOCK_MHZ
+000000r 2               CLOCK_MHZ       = 2
+000000r 2               .endif
+000000r 2               
+000000r 1               
+000000r 1               ; the stage 6 entries (an older sbc_api.inc doesn't have them)
+000000r 1               .ifndef SBC_SHELL
+000000r 1               SBC_DIR         = $FE57
+000000r 1               SBC_RUN         = $FE5A
+000000r 1               SBC_SHELL       = $FE5D
+000000r 1               .endif
+000000r 1               
+000000r 1               IMG     = $0B00                 ; the file manager in GUI.BIN (as loaded)
+000000r 1               IMG_DST = $1000                 ; where it runs, in its bank
+000000r 1               
+000000r 1                       .segment "INSTALL"
+000000r 1  4C rr rr             jmp     inst
+000003r 1  D8           inst:   cld
+000004r 1  AD 5D FE             lda     SBC_SHELL       ; ROM stage 6?
+000007r 1  C9 4C                cmp     #$4C
+000009r 1  D0 71                bne     @old
+00000Br 1  20 1B FE             jsr     SBC_SYSINFO
+00000Er 1  C9 02                cmp     #DISP_PICO
+000010r 1  D0 70                bne     @pico
+000012r 1  20 2A FE             jsr     SBC_BANKGET     ; A = this bank, X = banks fitted
+000015r 1  8D rr rr             sta     i_src
+000018r 1  CA                   dex
+000019r 1  8E rr rr             stx     i_dst
+00001Cr 1  F0 6A                beq     @banks          ; (one bank)
+00001Er 1  EC rr rr             cpx     i_src
+000021r 1  F0 65                beq     @banks          ; (loaded into the top bank itself)
+000023r 1  AD 08 0B             lda     IMG+8           ; pages = (the end - $1000 + 255) / 256
+000026r 1  18                   clc
+000027r 1  69 FF                adc     #$FF
+000029r 1  AD 09 0B             lda     IMG+9
+00002Cr 1  69 00                adc     #0
+00002Er 1  38                   sec
+00002Fr 1  E9 10                sbc     #>IMG_DST
+000031r 1  8D rr rr             sta     i_n
+000034r 1  A9 0B                lda     #>IMG
+000036r 1  8D rr rr             sta     @rd+2
+000039r 1  A9 10                lda     #>IMG_DST
+00003Br 1  8D rr rr             sta     @wr+2
+00003Er 1  AD rr rr     @pg:    lda     i_src
+000041r 1  20 27 FE             jsr     SBC_BANKSET
+000044r 1  A2 00                ldx     #0
+000046r 1  BD 00 0B     @rd:    lda     IMG,x
+000049r 1  9D rr rr             sta     i_buf,x
+00004Cr 1  E8                   inx
+00004Dr 1  D0 F7                bne     @rd
+00004Fr 1  AD rr rr             lda     i_dst
+000052r 1  20 27 FE             jsr     SBC_BANKSET
+000055r 1  A2 00                ldx     #0
+000057r 1  BD rr rr     @cp:    lda     i_buf,x
+00005Ar 1  9D 00 10     @wr:    sta     IMG_DST,x
+00005Dr 1  E8                   inx
+00005Er 1  D0 F7                bne     @cp
+000060r 1  EE rr rr             inc     @rd+2
+000063r 1  EE rr rr             inc     @wr+2
+000066r 1  CE rr rr             dec     i_n
+000069r 1  D0 D3                bne     @pg
+00006Br 1  AD rr rr             lda     i_src
+00006Er 1  20 27 FE             jsr     SBC_BANKSET
+000071r 1  AD rr rr             lda     i_dst
+000074r 1  20 5D FE             jsr     SBC_SHELL
+000077r 1  B0 15                bcs     @bad
+000079r 1  4C 06 FE             jmp     SBC_MENU        ; (the ROM starts the shell)
+00007Cr 1  A9 rr        @old:   lda     #<m_old
+00007Er 1  A0 rr                ldy     #>m_old
+000080r 1  D0 10                bne     @msg
+000082r 1  A9 rr        @pico:  lda     #<m_pico
+000084r 1  A0 rr                ldy     #>m_pico
+000086r 1  D0 0A                bne     @msg
+000088r 1  A9 rr        @banks: lda     #<m_banks
+00008Ar 1  A0 rr                ldy     #>m_banks
+00008Cr 1  D0 04                bne     @msg
+00008Er 1  A9 rr        @bad:   lda     #<m_bad
+000090r 1  A0 rr                ldy     #>m_bad
+000092r 1  8D rr rr     @msg:   sta     @pr+1
+000095r 1  8C rr rr             sty     @pr+2
+000098r 1  A2 00                ldx     #0
+00009Ar 1  BD FF FF     @pr:    lda     $FFFF,x
+00009Dr 1  F0 06                beq     @end
+00009Fr 1  20 03 FE             jsr     SBC_CHROUT
+0000A2r 1  E8                   inx
+0000A3r 1  D0 F5                bne     @pr
+0000A5r 1  4C 0F FE     @end:   jmp     SBC_MONITOR
+0000A8r 1               
+0000A8r 1  0D 0A 47 55  m_old:  .byte   13, 10, "GUI needs ROM stage 6 (SBC_DIR, SBC_RUN, SBC_SHELL)", 13, 10, 0
+0000ACr 1  49 20 6E 65  
+0000B0r 1  65 64 73 20  
+0000E0r 1  0D 0A 47 55  m_pico: .byte   13, 10, "GUI needs the PICO9918 display", 13, 10, 0
+0000E4r 1  49 20 6E 65  
+0000E8r 1  65 64 73 20  
+000103r 1               m_banks:
+000103r 1  0D 0A 47 55          .byte   13, 10, "GUI needs a second RAM bank (load it into bank 0)", 13, 10, 0
+000107r 1  49 20 6E 65  
+00010Br 1  65 64 73 20  
+000139r 1  0D 0A 47 55  m_bad:  .byte   13, 10, "GUI: the copy in the top bank failed its check", 13, 10, 0
+00013Dr 1  49 3A 20 74  
+000141r 1  68 65 20 63  
+00016Cr 1  xx           i_src:  .res    1
+00016Dr 1  xx           i_dst:  .res    1
+00016Er 1  xx           i_n:    .res    1
+00016Fr 1  xx xx xx xx  i_buf:  .res    256
+000173r 1  xx xx xx xx  
+000177r 1  xx xx xx xx  
+00016Fr 1               
