@@ -1,0 +1,28 @@
+# Berkeley PLA format generated using
+#
+# CUPL(WM)        5.0a Serial# 60008009
+# Device          g16v8s  Library DLIB-h-40-9
+# Created         Tue May 05 15:45:28 2026
+# Name            ISA_6502_IO_ADDR_DEC
+# Partno          xxxxxx
+# Revision        1
+# Date            2026-05-04
+# Designer        dfmcwhir
+# Company         
+# Assembly        
+# Location        
+#
+# Inputs  a1 a2 a3 a4 
+#         a5 a6 a7 i2cs 
+#         iocs ioen 
+# Outputs !i2cs !iocs 
+.i 10
+.o 2
+.p 6
+0001000--0 1~
+---1------ ~1
+----1----- ~1
+-----1---- ~1
+------1--- ~1
+---------1 ~1
+.end

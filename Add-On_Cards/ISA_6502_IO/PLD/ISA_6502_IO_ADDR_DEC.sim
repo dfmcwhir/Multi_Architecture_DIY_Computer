@@ -1,0 +1,28 @@
+%SIGNAL
+PIN   9 =  a1 
+PIN   8 =  a2 
+PIN   7 =  a3 
+PIN   6 =  a4 
+PIN   5 =  a5 
+PIN   4 =  a6 
+PIN   3 =  a7 
+PIN  18 =  i2cs 
+PIN  19 =  iocs 
+PIN   2 =  ioen 
+%END
+
+%FIELD
+%END
+
+%EQUATION
+!i2cs =>
+    !a1 & !a2 & !a3 & a4 & !a5 & !a6 & !a7 & !ioen
+
+!iocs =>
+    a4
+  # a5
+  # a6
+  # a7
+  # ioen
+
+%END

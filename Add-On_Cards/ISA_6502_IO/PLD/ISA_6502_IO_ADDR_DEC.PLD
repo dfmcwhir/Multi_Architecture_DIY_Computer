@@ -1,0 +1,35 @@
+Name     ISA_6502_IO_ADDR_DEC;
+Date        2026-05-04;
+Revision    1;
+Designer    dfmcwhir;
+Company     ;
+Assembly    ;
+Location    ;
+Device      g16v8;
+
+/* *************** INPUT PINS *********************/
+PIN 2    = ioen                        ; /* I/O Enable */
+PIN 3    = a7                         ; /* Address Bit 7 */
+PIN 4    = a6                         ; /* Address Bit 6 */
+PIN 5    = a5                         ; /* Address Bit 5 */
+PIN 6    = a4                         ; /* Address Bit 4 */
+PIN 7    = a3                         ; /* Address Bit 3 */
+PIN 8    = a2                         ; /* Address Bit 2 */
+PIN 9    = a1                         ; /* Address Bit 1 */
+
+/* *************** OUTPUT PINS *********************/
+PIN 19   = iocs                       ; /* I/O Chip Select (Active High) */
+PIN 18   = i2cs                       ; /* I2C Enable (Active Low) */
+
+
+/* *************** LOGIC EQUATIONS *********************/
+
+/* IO_CS: High only when A4-A7 are low AND IOen is low */
+/* IO_CS = !IOen & !A7 & !A6 & !A5 & !A4 */
+/* convertend to NOR equation because notted AND equation was giving incorrect output
+iocs = !(ioen # a4 # a5 # a6 # a7);
+
+
+/* I2Cen: Low only when A1-A3, A5-A7, and ioen are low AND A4 is high */
+/* I2Cen = !A1 & !A2 & !A3 & A4 & !A5 & !A6 & !A7 */
+i2cs = !(!a1 & !a2 & !a3 & !a5 & !a6 & !a7 & !ioen & a4);
