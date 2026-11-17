@@ -25,5 +25,5 @@
 <tr><td>7F0F</td><td>ORA/IRA</td></tr>
 </table>
 
-6522 = IRQ2
+6522 = IRQ2<br>
 PCF8584 = IRQ4
