@@ -1,5 +1,7 @@
 # Multi_Architecture_DIY_Computer
 A DIY computer system that uses a common backplane with swappable 8-bit CPU and add-on cards<BR><br>
+<p>PCB for the cards have I have already made and tested are available on PCBWay here:
+https://www.pcbway.com/project/member/shareproject/?bmbno=88AAB50F-5E23-43</p>
 
 Up front, I will state the following:
   1. I started the project for my own learning and enjoyment. There will be documentation shortfalls and hardware and SW bugs that I missed and/or fixed and forgot about. There will also be plenty of poor design choices and probletunities for improvement. 
