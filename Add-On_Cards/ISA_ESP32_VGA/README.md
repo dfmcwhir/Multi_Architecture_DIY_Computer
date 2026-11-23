@@ -10,6 +10,7 @@
 <h2>Known Issues:</h2>
 <li>The footprints for the resistors on the board are too small, resistors have to be installed at an angle</li>
 <li>The footprint for the double mini-din KB/mouse connector is slightly off. Two of the shield tabs have to be snipped off to make it fit</li>
+<li>There should be a diode (BAT85) between the bus RESET line and the ESP32 reset (pin 3) to prevent 5V from getting to the ESP32. </li>
 
 <h2>Resources</h2>
 <table><thead><tr><th>Address</th><th>Function</th></tr></thead>
