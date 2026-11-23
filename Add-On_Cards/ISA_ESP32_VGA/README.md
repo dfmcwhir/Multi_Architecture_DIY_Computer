@@ -1,4 +1,4 @@
-<h2>AY-3-8910 sound card</h2>
+<h2>ESP32 VGA card</h2>
 
 <p>This a new card that hasn't been tested yet. It is loosely based on the FABGL ESP32 library here: https://github.com/fdivitto/fabgl. That is an older library and that theoretically could provide VGA video as well as KB, mouse and sound. The firmware is here is an AI generated first draft of an 8-bit parallel interface to the ESP32/FABGL library which isn't the way that it seems like most people used that library. It could be fun to use and expand on this system. It definitely seems like it could be used to offload a fair amount processing from the 6502 in terms of generating graphics and UI interaction. The downside is that it is pretty slow. According to the AI analysis, even at a 2MHz CPU speed this card will require using the CPU /WAIT signal. Not sure how/if this will work with the 8085 or Z80 cpu cards. We will see how it goes.</p>
 
